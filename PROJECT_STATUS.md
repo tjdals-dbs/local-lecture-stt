@@ -9,10 +9,10 @@
 
 - Current milestone: M0 foundation
 - Current Task: none in progress
-- Next action: T01 macOS project and module boundaries
-- Latest completed Task: V00 repository baseline
-- Latest passed gate: none
-- Application implementation: not started
+- Next action: T02 domain model, schemas, and state machine
+- Latest completed Task: T01 macOS project and module boundaries
+- Latest passed gate: T01 initial runnable baseline
+- Application implementation: executable initial SwiftUI shell
 
 ## Repository state at this handoff
 
@@ -36,17 +36,18 @@ The actual Git status and remote state must be rechecked at the start of every t
 | Implementation breakdown and priorities | Defined in `IMPLEMENTATION_PLAN.md` | T01~T27 and G1~G4 documented |
 | Repository remote | Created and connected by user | Local `origin` inspected |
 | V00 repository baseline | Complete on `dev` | Approved files, ignore policy, and `origin/dev` verified |
+| T01 macOS project and module boundaries | Complete on `dev`; first `main` baseline created from the same verified commit | Xcode 26.6 unsigned arm64 Debug build, two smoke tests, manual app launch, and `task/**`/`dev`/`main` CI |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-No application implementation Tasks have started. V00 is complete; the canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`.
+T01 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T02 is ready to start on a fresh task branch.
 
 ## Gate status
 
 | Gate | Status | Promotion |
 | --- | --- | --- |
-| T01 initial runnable baseline | Pending | First `main` creation |
+| T01 initial runnable baseline | Passed | First `main` created from verified `dev` |
 | G1 safe recorder | Pending | `v0.1.0-alpha.1` |
 | G2 engine and model selection | Pending | `v0.1.0-alpha.2` |
 | G3 feature complete | Pending | `v0.1.0-beta.1` |
@@ -66,16 +67,16 @@ No application implementation Tasks have started. V00 is complete; the canonical
 
 - No current blocker.
 - Repository visibility has not been recorded in project documents and does not block V00.
-- There is no executable app yet, so `main` must not receive the documentation-only baseline.
+- The app is intentionally unsigned for local and CI verification; a developer signing identity is required only for separately installed signed builds.
 
-## V00 handoff
+## T01 handoff
 
-V00 is complete. T01 can start from the latest `dev` baseline on a fresh `task/t01-*` branch.
+T01 is complete. T02 can start from the latest `dev` baseline on a fresh `task/t02-*` branch.
 
-- `dev` is the local and remote documentation baseline.
-- `main` has not been created and must remain absent until T01 proves a runnable application baseline.
-- No Xcode project or application source has been created.
-- T01 should update this status document, the implementation-plan checklist, and the architecture/development documents when it integrates into `dev`.
+- `dev` and `main` point to the same verified initial runnable baseline.
+- The native `LocalLectureSTT.xcodeproj` contains the app, unit test, and integration test targets, plus a shared `LocalLectureSTT` scheme.
+- `docs/ARCHITECTURE.md` records the current logical App/Domain/Application/Infrastructure/Features boundaries; `docs/DEVELOPMENT.md` records verified commands.
+- Actual recording, STT, model, persistence, and session features are still absent by design.
 
 ## Status update rules
 

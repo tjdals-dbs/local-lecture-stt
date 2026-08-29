@@ -4,7 +4,7 @@ Local Lecture STT는 macOS에서 강의를 안전하게 녹음하고, 완전히 
 
 ## 현재 상태
 
-명세 및 저장소 설정 단계입니다. 아직 실행 가능한 앱은 없습니다.
+실행 가능한 초기 macOS 앱 셸(T01) 단계입니다. 현재는 단일 메인 창과 설정 placeholder만 제공하며, 녹음·STT·모델 관리·세션 저장은 아직 구현하지 않았습니다.
 
 ## 주요 원칙
 
@@ -18,6 +18,8 @@ Local Lecture STT는 macOS에서 강의를 안전하게 녹음하고, 완전히 
 - [MVP 명세](MVP_SPEC.md)
 - [구현 계획](IMPLEMENTATION_PLAN.md)
 - [프로젝트 상태](PROJECT_STATUS.md)
+- [아키텍처](docs/ARCHITECTURE.md)
+- [개발·빌드·테스트](docs/DEVELOPMENT.md)
 
 ## 브랜치 정책
 

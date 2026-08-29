@@ -1,0 +1,38 @@
+name: macOS CI
+
+on:
+  push:
+    branches:
+      - "task/**"
+      - dev
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report toolchain and architecture
+        run: |
+          xcodebuild -version
+          swift --version
+          uname -m
+      - name: Build unsigned arm64 Debug app
+        run: |
+          xcodebuild \
+            -project LocalLectureSTT.xcodeproj \
+            -scheme LocalLectureSTT \
+            -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+      - name: Test unsigned arm64 Debug app
+        run: |
+          xcodebuild \
+            -project LocalLectureSTT.xcodeproj \
+            -scheme LocalLectureSTT \
+            -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            CODE_SIGNING_ALLOWED=NO \
+            test

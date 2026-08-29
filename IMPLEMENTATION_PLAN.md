@@ -952,7 +952,7 @@ fix(transcript): prevent overlap duplication (T18)
 ## 9. 전체 진행 체크리스트
 
 - [x] V00 GitHub 저장소와 문서 기준선
-- [ ] T01 프로젝트와 모듈 경계
+- [x] T01 프로젝트와 모듈 경계
 - [ ] T02 도메인 모델과 상태 머신
 - [ ] T03 파일 저장소와 루트 권한
 - [ ] T04 SQLite 카탈로그와 대조

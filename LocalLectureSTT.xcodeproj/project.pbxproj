@@ -1,0 +1,113 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000011 /* LocalLectureSTTApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000001 /* LocalLectureSTTApp.swift */; };
+		A10000000000000000000012 /* AppShellInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000002 /* AppShellInfo.swift */; };
+		A10000000000000000000013 /* MainWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000004 /* MainWindowView.swift */; };
+		A10000000000000000000014 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000005 /* SettingsView.swift */; };
+		A10000000000000000000015 /* AppShellInfoTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000008 /* AppShellInfoTests.swift */; };
+		A10000000000000000000016 /* MainWindowViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000009 /* MainWindowViewTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A10000000000000000000001 /* LocalLectureSTTApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalLectureSTTApp.swift; sourceTree = "<group>"; };
+		A10000000000000000000002 /* AppShellInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppShellInfo.swift; sourceTree = "<group>"; };
+		A10000000000000000000003 /* LocalLectureSTT.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LocalLectureSTT.entitlements; sourceTree = "<group>"; };
+		A10000000000000000000004 /* MainWindowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowView.swift; sourceTree = "<group>"; };
+		A10000000000000000000005 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		A10000000000000000000006 /* LocalLectureSTT.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LocalLectureSTT.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000007 /* LocalLectureSTTTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LocalLectureSTTTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000008 /* AppShellInfoTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppShellInfoTests.swift; sourceTree = "<group>"; };
+		A10000000000000000000009 /* MainWindowViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowViewTests.swift; sourceTree = "<group>"; };
+		A10000000000000000000010 /* LocalLectureSTTIntegrationTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LocalLectureSTTIntegrationTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000017 /* BOUNDARY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = BOUNDARY.md; sourceTree = "<group>"; };
+		A10000000000000000000018 /* BOUNDARY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = BOUNDARY.md; sourceTree = "<group>"; };
+		A10000000000000000000019 /* BOUNDARY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = BOUNDARY.md; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A10000000000000000000021 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000022 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000023 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A10000000000000000000031 = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000032 /* LocalLectureSTT */,
+				A10000000000000000000036 /* LocalLectureSTTTests */,
+				A10000000000000000000037 /* LocalLectureSTTIntegrationTests */,
+				A10000000000000000000038 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10000000000000000000032 /* LocalLectureSTT */ = {isa = PBXGroup; children = (A10000000000000000000033 /* App */, A10000000000000000000034 /* Features */, A10000000000000000000039 /* Domain */, A1000000000000000000003A /* Application */, A1000000000000000000003B /* Infrastructure */); path = LocalLectureSTT; sourceTree = "<group>"; };
+		A10000000000000000000033 /* App */ = {isa = PBXGroup; children = (A10000000000000000000001 /* LocalLectureSTTApp.swift */, A10000000000000000000002 /* AppShellInfo.swift */, A10000000000000000000003 /* LocalLectureSTT.entitlements */); path = App; sourceTree = "<group>"; };
+		A10000000000000000000034 /* Features */ = {isa = PBXGroup; children = (A10000000000000000000004 /* MainWindowView.swift */, A10000000000000000000005 /* SettingsView.swift */); path = Features; sourceTree = "<group>"; };
+		A10000000000000000000039 /* Domain */ = {isa = PBXGroup; children = (A10000000000000000000017 /* BOUNDARY.md */); path = Domain; sourceTree = "<group>"; };
+		A1000000000000000000003A /* Application */ = {isa = PBXGroup; children = (A10000000000000000000018 /* BOUNDARY.md */); path = Application; sourceTree = "<group>"; };
+		A1000000000000000000003B /* Infrastructure */ = {isa = PBXGroup; children = (A10000000000000000000019 /* BOUNDARY.md */); path = Infrastructure; sourceTree = "<group>"; };
+		A10000000000000000000036 /* LocalLectureSTTTests */ = {isa = PBXGroup; children = (A10000000000000000000008 /* AppShellInfoTests.swift */); path = LocalLectureSTTTests; sourceTree = "<group>"; };
+		A10000000000000000000037 /* LocalLectureSTTIntegrationTests */ = {isa = PBXGroup; children = (A10000000000000000000009 /* MainWindowViewTests.swift */); path = LocalLectureSTTIntegrationTests; sourceTree = "<group>"; };
+		A10000000000000000000038 /* Products */ = {isa = PBXGroup; children = (A10000000000000000000006 /* LocalLectureSTT.app */, A10000000000000000000007 /* LocalLectureSTTTests.xctest */, A10000000000000000000010 /* LocalLectureSTTIntegrationTests.xctest */); name = Products; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A10000000000000000000041 /* LocalLectureSTT */ = {isa = PBXNativeTarget; buildConfigurationList = A10000000000000000000071 /* Build configuration list for PBXNativeTarget \"LocalLectureSTT\" */; buildPhases = (A10000000000000000000051 /* Sources */, A10000000000000000000021 /* Frameworks */, A10000000000000000000061 /* Resources */); buildRules = (); dependencies = (); name = LocalLectureSTT; productName = LocalLectureSTT; productReference = A10000000000000000000006 /* LocalLectureSTT.app */; productType = "com.apple.product-type.application"; };
+		A10000000000000000000042 /* LocalLectureSTTTests */ = {isa = PBXNativeTarget; buildConfigurationList = A10000000000000000000072 /* Build configuration list for PBXNativeTarget \"LocalLectureSTTTests\" */; buildPhases = (A10000000000000000000052 /* Sources */, A10000000000000000000022 /* Frameworks */, A10000000000000000000062 /* Resources */); buildRules = (); dependencies = (A10000000000000000000081 /* PBXTargetDependency */); name = LocalLectureSTTTests; productName = LocalLectureSTTTests; productReference = A10000000000000000000007 /* LocalLectureSTTTests.xctest */; productType = "com.apple.product-type.bundle.unit-test"; };
+		A10000000000000000000043 /* LocalLectureSTTIntegrationTests */ = {isa = PBXNativeTarget; buildConfigurationList = A10000000000000000000073 /* Build configuration list for PBXNativeTarget \"LocalLectureSTTIntegrationTests\" */; buildPhases = (A10000000000000000000053 /* Sources */, A10000000000000000000023 /* Frameworks */, A10000000000000000000063 /* Resources */); buildRules = (); dependencies = (A10000000000000000000082 /* PBXTargetDependency */); name = LocalLectureSTTIntegrationTests; productName = LocalLectureSTTIntegrationTests; productReference = A10000000000000000000010 /* LocalLectureSTTIntegrationTests.xctest */; productType = "com.apple.product-type.bundle.unit-test"; };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000000000000000000091 /* Project object */ = {isa = PBXProject; attributes = { BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 2660; LastUpgradeCheck = 2660; TargetAttributes = { A10000000000000000000041 = { CreatedOnToolsVersion = 26.6; }; A10000000000000000000042 = { CreatedOnToolsVersion = 26.6; TestTargetID = A10000000000000000000041; }; A10000000000000000000043 = { CreatedOnToolsVersion = 26.6; TestTargetID = A10000000000000000000041; }; }; }; buildConfigurationList = A10000000000000000000074 /* Build configuration list for PBXProject \"LocalLectureSTT\" */; compatibilityVersion = "Xcode 16.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base,); mainGroup = A10000000000000000000031; minimizedProjectReferenceProxies = 1; preferredProjectObjectVersion = 77; productRefGroup = A10000000000000000000038 /* Products */; projectDirPath = ""; projectRoot = ""; targets = (A10000000000000000000041 /* LocalLectureSTT */, A10000000000000000000042 /* LocalLectureSTTTests */, A10000000000000000000043 /* LocalLectureSTTIntegrationTests */); };
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A10000000000000000000061 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000062 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000063 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10000000000000000000051 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000011 /* LocalLectureSTTApp.swift in Sources */, A10000000000000000000012 /* AppShellInfo.swift in Sources */, A10000000000000000000013 /* MainWindowView.swift in Sources */, A10000000000000000000014 /* SettingsView.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000052 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000015 /* AppShellInfoTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000053 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000016 /* MainWindowViewTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A10000000000000000000081 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A10000000000000000000041 /* LocalLectureSTT */; targetProxy = A10000000000000000000083 /* PBXContainerItemProxy */; };
+		A10000000000000000000082 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A10000000000000000000041 /* LocalLectureSTT */; targetProxy = A10000000000000000000084 /* PBXContainerItemProxy */; };
+/* End PBXTargetDependency section */
+
+/* Begin PBXContainerItemProxy section */
+		A10000000000000000000083 /* PBXContainerItemProxy */ = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000091 /* Project object */; proxyType = 1; remoteGlobalIDString = A10000000000000000000041; remoteInfo = LocalLectureSTT; };
+		A10000000000000000000084 /* PBXContainerItemProxy */ = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000091 /* Project object */; proxyType = 1; remoteGlobalIDString = A10000000000000000000041; remoteInfo = LocalLectureSTT; };
+/* End PBXContainerItemProxy section */
+
+/* Begin XCBuildConfiguration section */
+		A100000000000000000000A1 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_CXX_LANGUAGE_STANDARD = "gnu++20"; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; CLANG_WARN_DOCUMENTATION_COMMENTS = YES; CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES; DEBUG_INFORMATION_FORMAT = dwarf; ENABLE_STRICT_OBJC_MSGSEND = YES; GCC_C_LANGUAGE_STANDARD = gnu17; GCC_WARN_64_TO_32_BIT_CONVERSION = YES; GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE; GCC_WARN_UNUSED_FUNCTION = YES; GCC_WARN_UNUSED_VARIABLE = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; }; name = Debug; };
+		A100000000000000000000A2 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_CXX_LANGUAGE_STANDARD = "gnu++20"; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; CLANG_WARN_DOCUMENTATION_COMMENTS = YES; CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; ENABLE_NS_ASSERTIONS = NO; ENABLE_STRICT_OBJC_MSGSEND = YES; GCC_C_LANGUAGE_STANDARD = gnu17; GCC_WARN_64_TO_32_BIT_CONVERSION = YES; GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE; GCC_WARN_UNUSED_FUNCTION = YES; GCC_WARN_UNUSED_VARIABLE = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; SDKROOT = macosx; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_VERSION = 6.0; }; name = Release; };
+		A100000000000000000000B1 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; CODE_SIGN_ENTITLEMENTS = LocalLectureSTT/App/LocalLectureSTT.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = ""; ENABLE_APP_SANDBOX = YES; ENABLE_TESTABILITY = YES; EXTRACT_APPINTENTS_METADATA = NO; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = "Local Lecture STT"; INFOPLIST_KEY_NSMicrophoneUsageDescription = "강의 녹음을 위해 마이크 접근 권한이 필요합니다."; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = io.github.tjdals-dbs.LocalLectureSTT; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = macosx; SWIFT_EMIT_LOC_STRINGS = YES; }; name = Debug; };
+		A100000000000000000000B2 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; CODE_SIGN_ENTITLEMENTS = LocalLectureSTT/App/LocalLectureSTT.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = ""; ENABLE_APP_SANDBOX = YES; EXTRACT_APPINTENTS_METADATA = NO; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = "Local Lecture STT"; INFOPLIST_KEY_NSMicrophoneUsageDescription = "강의 녹음을 위해 마이크 접근 권한이 필요합니다."; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = io.github.tjdals-dbs.LocalLectureSTT; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = macosx; SWIFT_EMIT_LOC_STRINGS = YES; }; name = Release; };
+		A100000000000000000000C1 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; BUNDLE_LOADER = "$(TEST_HOST)"; EXTRACT_APPINTENTS_METADATA = NO; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = io.github.tjdals-dbs.LocalLectureSTTTests; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = macosx; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LocalLectureSTT.app/Contents/MacOS/LocalLectureSTT"; TEST_TARGET_NAME = LocalLectureSTT; }; name = Debug; };
+		A100000000000000000000C2 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; BUNDLE_LOADER = "$(TEST_HOST)"; EXTRACT_APPINTENTS_METADATA = NO; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = io.github.tjdals-dbs.LocalLectureSTTTests; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = macosx; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LocalLectureSTT.app/Contents/MacOS/LocalLectureSTT"; TEST_TARGET_NAME = LocalLectureSTT; }; name = Release; };
+		A100000000000000000000D1 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; BUNDLE_LOADER = "$(TEST_HOST)"; EXTRACT_APPINTENTS_METADATA = NO; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = io.github.tjdals-dbs.LocalLectureSTTIntegrationTests; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = macosx; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LocalLectureSTT.app/Contents/MacOS/LocalLectureSTT"; TEST_TARGET_NAME = LocalLectureSTT; }; name = Debug; };
+		A100000000000000000000D2 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; BUNDLE_LOADER = "$(TEST_HOST)"; EXTRACT_APPINTENTS_METADATA = NO; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = io.github.tjdals-dbs.LocalLectureSTTIntegrationTests; PRODUCT_NAME = "$(TARGET_NAME)"; SUPPORTED_PLATFORMS = macosx; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LocalLectureSTT.app/Contents/MacOS/LocalLectureSTT"; TEST_TARGET_NAME = LocalLectureSTT; }; name = Release; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A10000000000000000000071 /* Build configuration list for PBXNativeTarget "LocalLectureSTT" */ = {isa = XCConfigurationList; buildConfigurations = (A100000000000000000000B1 /* Debug */, A100000000000000000000B2 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A10000000000000000000072 /* Build configuration list for PBXNativeTarget "LocalLectureSTTTests" */ = {isa = XCConfigurationList; buildConfigurations = (A100000000000000000000C1 /* Debug */, A100000000000000000000C2 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A10000000000000000000073 /* Build configuration list for PBXNativeTarget "LocalLectureSTTIntegrationTests" */ = {isa = XCConfigurationList; buildConfigurations = (A100000000000000000000D1 /* Debug */, A100000000000000000000D2 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A10000000000000000000074 /* Build configuration list for PBXProject "LocalLectureSTT" */ = {isa = XCConfigurationList; buildConfigurations = (A100000000000000000000A1 /* Debug */, A100000000000000000000A2 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = A10000000000000000000091 /* Project object */;
+}
