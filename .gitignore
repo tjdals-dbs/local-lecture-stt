@@ -1,0 +1,72 @@
+# macOS
+.DS_Store
+
+# Xcode and SwiftPM build products and user state
+DerivedData/
+build/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+.build/
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+.swiftpm/configuration/
+
+# Downloaded or converted STT models and staging
+DownloadedModels/
+converted-models/
+ModelStaging/
+model-staging/
+model-downloads/
+model-conversion/
+
+# User sessions, recordings, recovery, and runtime transcripts
+Sessions/
+sessions/
+Recordings/
+recordings/
+Recovery/
+recovery/
+transcripts/
+*.m4a
+Recovery/*.mov
+recovery/*.mov
+benchmark-recordings/
+benchmark-audio/
+
+# Runtime databases
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Logs, crashes, and transient files
+logs/
+Logs/
+*.log
+*.crash
+*.ips
+tmp/
+temp/
+staging/
+downloads/
+
+# Local credentials and signing material
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.p8
+*.cer
+*.mobileprovision
+*.provisionprofile
+*.key
+*.secret
+
+# Distribution artifacts
+*.app
+*.dmg
+*.zip
