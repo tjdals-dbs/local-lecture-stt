@@ -29,6 +29,12 @@ On 2026-08-30, this baseline was verified with Xcode 26.6 (Build 17F113), Swift 
 
 Run these commands from the repository root. They are unsigned, Debug, and arm64-only.
 
+The project Debug configuration explicitly sets `SWIFT_OPTIMIZATION_LEVEL = -Onone`, so Debug builds use `-Onone` instead of optimized `-O` for Swift compilation. On Xcode 26.6 this produces the `__preview.dylib` JIT product and does not show the prior Preview-disabled guidance.
+
+### Known Xcode 26.6 diagnostic
+
+The project deliberately does not link `AppIntents`. Xcode 26.6 nevertheless invokes `appintentsmetadataprocessor` for the app and both test targets, emitting `Metadata extraction skipped. No AppIntents.framework dependency found.` The build and tests still pass. `EXTRACT_APP_INTENTS_METADATA = NO` was tested and does not suppress this toolchain-generated diagnostic, so it is not retained as an ineffective project setting and no AppIntents dependency is added merely to silence it.
+
 ```sh
 xcodebuild \
   -project LocalLectureSTT.xcodeproj \

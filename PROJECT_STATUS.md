@@ -16,11 +16,12 @@
 
 ## Repository state at this handoff
 
-- Remote: `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
+- Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
+- GitHub default branch: `main`
 - Local branch: `dev`
-- Remote baseline: `origin/dev` V00 documentation baseline
+- Remote baseline: `origin/dev` and `origin/main` are the same verified T01 runnable baseline
 - `dev` branch: created and tracked at `origin/dev`
-- `main` branch: not created yet
+- `main` branch: created and tracked at `origin/main`; it currently points to the same T01 baseline commit as `dev`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
 - Task policy: one fresh implementation session and one `task/tNN-*` branch per Task
@@ -66,7 +67,6 @@ T01 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN
 ## Known issues and blockers
 
 - No current blocker.
-- Repository visibility has not been recorded in project documents and does not block V00.
 - The app is intentionally unsigned for local and CI verification; a developer signing identity is required only for separately installed signed builds.
 
 ## T01 handoff
