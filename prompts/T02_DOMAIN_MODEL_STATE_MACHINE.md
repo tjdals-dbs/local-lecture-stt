@@ -72,6 +72,7 @@ Pull Request, `main` 변경·push·승격, tag, GitHub Release, branch protectio
 - T01 앱, unit test target, integration test target, shared scheme과 CI가 존재함
 - 현재 Domain에는 구현 타입이 없고 boundary marker만 있음
 - Xcode 26.6의 AppIntents metadata 경고는 알려진 비차단 toolchain 진단이며 `docs/DEVELOPMENT.md`에 기록되어 있음
+- 현재 GitHub Actions는 성공하면서 `actions/checkout@v4`의 Node.js 20 사용 종료 안내를 외부 action annotation으로 표시할 수 있음. 이는 T02 source warning이 아니므로 T02에서 workflow를 임의 업그레이드하지 말고 최종 보고에 기존 비차단 안내로만 구분할 것
 
 대화나 이 목록보다 새 세션에서 확인한 실제 Git 상태와 코드를 우선한다.
 
@@ -391,10 +392,10 @@ xcodebuild \
 - `git diff --check`
 - 전체 task branch diff와 staged diff
 - 새 compiler warning 또는 test warning 유무
-- 기존 알려진 AppIntents metadata 경고와 새 회귀를 구분
+- 기존 알려진 AppIntents metadata 경고 및 GitHub-hosted action annotation과 새 source/build/test 회귀를 구분
 - build product, DerivedData, runtime data가 Git에 포함되지 않음
 
-테스트 실패나 warning을 숨기기 위해 production 동작을 완화하거나 dependency를 추가하지 않는다. 알려진 Xcode 진단 외의 새 경고가 있으면 T02 범위에서 해결하거나 완료를 차단한 이유를 보고한다.
+테스트 실패나 warning을 숨기기 위해 production 동작을 완화하거나 dependency를 추가하지 않는다. 알려진 비차단 진단·외부 action annotation 외에 T02가 만든 새 source/build/test 경고가 있으면 T02 범위에서 해결하거나 완료를 차단한 이유를 보고한다.
 
 ## 11. commit, CI, `dev` 통합
 
