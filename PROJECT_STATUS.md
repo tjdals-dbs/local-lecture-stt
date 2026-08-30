@@ -19,9 +19,9 @@
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
 - Local branch: `dev`
-- Remote baseline: `origin/dev` and `origin/main` are the same verified T01 runnable baseline
+- Remote baseline: `origin/dev` contains the verified T02 integration; `origin/main` remains the verified T01 runnable baseline
 - `dev` branch: T02 domain-model integration branch, tracked at `origin/dev`
-- `main` branch: created and tracked at `origin/main`; it currently points to the same T01 baseline commit as `dev`
+- `main` branch: created and tracked at `origin/main`; it remains at the verified T01 baseline while `dev` has advanced through T02
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
 - Task policy: one fresh implementation session and one `task/tNN-*` branch per Task
