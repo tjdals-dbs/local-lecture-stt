@@ -38,7 +38,7 @@ The actual Git status and remote state must be rechecked at the start of every t
 | Repository remote | Created and connected by user | Local `origin` inspected |
 | V00 repository baseline | Complete on `dev` | Approved files, ignore policy, and `origin/dev` verified |
 | T01 macOS project and module boundaries | Complete on `dev`; first `main` baseline created from the same verified commit | Xcode 26.6 unsigned arm64 Debug build, two smoke tests, manual app launch, and `task/**`/`dev`/`main` CI |
-| T02 domain model, schemas, and state machine | Complete on `dev`; `main` remains on the verified T01 baseline | Domain DTO round-trips, lifecycle/checkpoint rules, unsigned arm64 Debug build, 15 unit tests, integration smoke test, and task/dev CI |
+| T02 domain model, schemas, and state machine | Complete on `dev`; `main` remains on the verified T01 baseline | Domain DTO and transcript journal round-trips, lifecycle/checkpoint rules, unsigned arm64 Debug build, 17 unit tests, integration smoke test, and task/dev CI |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
@@ -75,8 +75,8 @@ T02 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN
 T02 is complete. T03 can start from the latest `dev` baseline on a fresh `task/t03-*` branch.
 
 - `dev` contains the T02 domain contracts; `main` remains at the verified T01 baseline.
-- `LocalLectureSTT/Domain` now contains Foundation-only identifiers, timestamp/media-time values, schema-v1 DTOs, lifecycle validation, and finalization checkpoint progression. No file I/O is implemented.
-- `LocalLectureSTTTests/DomainModelTests.swift` covers JSON round-trips, schema rejection, lifecycle/recovery rules, and checkpoint ordering. The app and integration smoke test remain unchanged.
+- `LocalLectureSTT/Domain` now contains Foundation-only identifiers, timestamp/media-time values, schema-v1 DTOs including `TranscriptJournalRecord`, lifecycle validation, and finalization checkpoint progression. No file I/O is implemented.
+- The checkpoint contract permits only the last completed stage to be reapplied idempotently; reapplying an earlier stage is a regression. `LocalLectureSTTTests/DomainModelTests.swift` covers JSON round-trips, schema rejection, lifecycle/recovery rules, and checkpoint ordering with 17 unit tests. The app and integration smoke test remain unchanged.
 - T03 can add the file repository, security-scoped root access, atomic JSON writes, and JSONL appends using these DTOs; recording, STT, model installation, and SQLite remain absent by design.
 
 ## Status update rules

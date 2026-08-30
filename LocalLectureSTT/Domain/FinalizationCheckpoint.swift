@@ -38,8 +38,12 @@ struct FinalizationCheckpointDocument: Codable, Sendable, Equatable {
     }
 
     func markingCompleted(_ step: FinalizationStep, at updatedAt: AbsoluteTime) throws -> FinalizationCheckpointDocument {
-        if completedSteps.contains(step) {
+        if completedSteps.last == step {
             return self
+        }
+
+        if let lastCompletedStep = completedSteps.last, completedSteps.contains(step) {
+            throw DomainValidationError.checkpointStepRegression(completed: lastCompletedStep, attempted: step)
         }
 
         let expected = FinalizationStep.allCases[completedSteps.count]

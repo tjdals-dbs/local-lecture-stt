@@ -36,6 +36,31 @@ final class DomainModelTests: XCTestCase {
         assertCodableSendable(TranscriptSegment.self)
     }
 
+    func testTranscriptJournalRecordRoundTripsAsAnIndependentSchemaVersionedRecord() throws {
+        let record = try TranscriptJournalRecord(
+            sessionId: sessionID,
+            segment: try makeSegment(id: "00000000-0000-0000-0000-000000000013", sequence: 2, start: 2_500, end: 3_750)
+        )
+
+        XCTAssertEqual(try roundTrip(record), record)
+        XCTAssertTrue(try encodedString(record).contains("\"schemaVersion\":1"))
+        assertCodableSendable(TranscriptJournalRecord.self)
+    }
+
+    func testTranscriptJournalRecordRejectsUnsupportedSchemaVersionOnConstructionAndDecoding() throws {
+        let segment = try makeSegment(id: "00000000-0000-0000-0000-000000000014", sequence: 3, start: 3_750, end: 5_000)
+        XCTAssertThrowsError(try TranscriptJournalRecord(
+            schemaVersion: SchemaVersion(rawValue: 2),
+            sessionId: sessionID,
+            segment: segment
+        ))
+
+        let record = try TranscriptJournalRecord(sessionId: sessionID, segment: segment)
+        let json = try encodedString(record)
+            .replacingOccurrences(of: "\"schemaVersion\":1", with: "\"schemaVersion\":2")
+        XCTAssertThrowsError(try JSONDecoder().decode(TranscriptJournalRecord.self, from: Data(json.utf8)))
+    }
+
     func testEveryEventKindRoundTripsAsAnIndependentSchemaVersionedRecord() throws {
         for kind in SessionEventKind.allCases {
             let record = try SessionEventRecord(
@@ -179,11 +204,9 @@ final class DomainModelTests: XCTestCase {
         ))
     }
 
-    func testCheckpointProgressIsSequentialIdempotentAndCannotSkipOrRegress() throws {
+    func testCheckpointProgressIsSequentialAndRejectsSkippedOrNoncontiguousSteps() throws {
         let empty = try FinalizationCheckpointDocument(sessionId: sessionID, updatedAt: timestamp)
-        let first = try empty.markingCompleted(.workingAudioSecured, at: timestamp)
 
-        XCTAssertEqual(try first.markingCompleted(.workingAudioSecured, at: AbsoluteTime(Date())), first)
         XCTAssertThrowsError(try empty.markingCompleted(.catalogUpdated, at: timestamp))
         XCTAssertThrowsError(try FinalizationCheckpointDocument(
             sessionId: sessionID,
@@ -196,6 +219,32 @@ final class DomainModelTests: XCTestCase {
             checkpoint = try checkpoint.markingCompleted(step, at: timestamp)
         }
         XCTAssertEqual(checkpoint.completedSteps, FinalizationStep.allCases)
+    }
+
+    func testCheckpointOnlyLatestCompletedStepIsIdempotentAndEarlierReapplicationIsRegression() throws {
+        let empty = try FinalizationCheckpointDocument(sessionId: sessionID, updatedAt: timestamp)
+        let first = try empty.markingCompleted(.workingAudioSecured, at: timestamp)
+        let second = try first.markingCompleted(.finalM4ACreated, at: timestamp)
+
+        XCTAssertEqual(try second.markingCompleted(.finalM4ACreated, at: AbsoluteTime(Date())), second)
+        XCTAssertThrowsError(try second.markingCompleted(.workingAudioSecured, at: timestamp)) { error in
+            XCTAssertEqual(
+                error as? DomainValidationError,
+                .checkpointStepRegression(completed: .finalM4ACreated, attempted: .workingAudioSecured)
+            )
+        }
+
+        var completed = empty
+        for step in FinalizationStep.allCases {
+            completed = try completed.markingCompleted(step, at: timestamp)
+        }
+        XCTAssertEqual(try completed.markingCompleted(.recoveryDataRemoved, at: AbsoluteTime(Date())), completed)
+        XCTAssertThrowsError(try completed.markingCompleted(.workingAudioSecured, at: timestamp)) { error in
+            XCTAssertEqual(
+                error as? DomainValidationError,
+                .checkpointStepRegression(completed: .recoveryDataRemoved, attempted: .workingAudioSecured)
+            )
+        }
     }
 
     private func makeMetadata(

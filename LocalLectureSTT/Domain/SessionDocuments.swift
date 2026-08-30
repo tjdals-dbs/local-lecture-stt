@@ -186,3 +186,30 @@ struct TranscriptDocument: Codable, Sendable, Equatable {
         )
     }
 }
+
+/// One independently persisted line in recovery/transcript.journal.jsonl.
+struct TranscriptJournalRecord: Codable, Sendable, Equatable {
+    let schemaVersion: SchemaVersion
+    let sessionId: SessionID
+    let segment: TranscriptSegment
+
+    init(
+        schemaVersion: SchemaVersion = .current,
+        sessionId: SessionID,
+        segment: TranscriptSegment
+    ) throws {
+        try SchemaVersionPolicy.validate(schemaVersion)
+        self.schemaVersion = schemaVersion
+        self.sessionId = sessionId
+        self.segment = segment
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            schemaVersion: container.decode(SchemaVersion.self, forKey: .schemaVersion),
+            sessionId: container.decode(SessionID.self, forKey: .sessionId),
+            segment: container.decode(TranscriptSegment.self, forKey: .segment)
+        )
+    }
+}
