@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 enum AtomicWriteStep: Sendable, Equatable {
-    case afterTemporaryCreate
+    case afterTemporaryCreate(temporaryPath: String)
     case beforeWrite
     case beforeFlush
     case beforeRename
@@ -40,7 +40,7 @@ struct AtomicFileWriter: Sendable {
         shouldCleanTemporary = true
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         do {
-            try fault(.afterTemporaryCreate)
+            try fault(.afterTemporaryCreate(temporaryPath: temporary.path))
             do {
                 try fault(.beforeWrite)
                 try handle.write(contentsOf: data)

@@ -34,7 +34,7 @@ MVP는 단일 프로세스다. 이후 비동기 구성 요소는 XPC나 별도 �
 
 `AbsoluteTime`은 wall-clock `Date`를 밀리초 정밀도로 고정하고 시간대 포함 ISO 8601 문자열로 JSON에 기록한다. `MediaMilliseconds`, segment sequence와 segment count는 별도 음수 불가 정수 타입이므로 wall-clock 시간·초 단위 부동소수·미디어 위치가 섞이지 않는다.
 
-모든 독립 저장 DTO(`SessionMetadataDocument`, `TranscriptDocument`, `TranscriptJournalRecord`, `SessionEventRecord`, `FinalizationCheckpointDocument`)는 정수 `schemaVersion`을 가진다. 중앙 `SchemaVersionPolicy`는 현재 v1만 허용하고 미래 버전을 조용히 현재 버전으로 해석하지 않는다. `TranscriptJournalRecord`는 `recovery/transcript.journal.jsonl`의 독립적인 한 레코드이며, 실제 JSONL append는 아직 구현하지 않는다.
+모든 독립 저장 DTO(`SessionMetadataDocument`, `TranscriptDocument`, `TranscriptJournalRecord`, `SessionEventRecord`, `FinalizationCheckpointDocument`)는 정수 `schemaVersion`을 가진다. 중앙 `SchemaVersionPolicy`는 현재 v1만 허용하고 미래 버전을 조용히 현재 버전으로 해석하지 않는다. `TranscriptJournalRecord`는 `recovery/transcript.journal.jsonl`의 독립적인 한 레코드이며, T03의 `JSONLWriter`가 이를 append-only로 기록한다.
 
 `SessionLifecycle`은 현재 처리 상태와 녹음 결말인 `CaptureOutcome`을 분리한다. 정상 종료는 `recording/paused → securing → finalizing → completed`이며 securing부터 outcome이 `completed`다. 중단 복구는 `interrupted → securing/finalizing → interrupted`이고 outcome은 계속 `interrupted`여서 파일 복구 완료가 정상 녹음 완료로 바뀌지 않는다. 같은 상태 적용은 검증된 lifecycle의 no-op이고, 다른 모든 허용되지 않은 전이는 domain error다. 앱 시작 시 잔존한 `recording`/`paused` + `inProgress` 변환은 T09가 담당한다.
 
@@ -44,7 +44,9 @@ MVP는 단일 프로세스다. 이후 비동기 구성 요소는 XPC나 별도 �
 
 `StorageRootID`는 UUID 기반의 안정적인 앱 고유 식별자다. `Infrastructure/StorageRootManager` actor는 Application Support의 `LocalLectureSTT/Storage/storage-roots.json`에 schema v1 registry를 atomic JSON으로 저장한다. Registry는 active root와 historical root의 app-scoped bookmark, 표시용 이름·경로와 관리 시각을 보존한다. 표시 경로는 UI 안내용일 뿐 접근 권한으로 사용하지 않는다.
 
-`FoundationSecurityScopedBookmarkCodec`은 `.withSecurityScope` bookmark를 만들고 resolve한다. 매 repository operation은 manager의 lexical `withAccess` 내부에서 resolved URL을 사용한다. 성공한 start는 operation의 성공·실패 모두에서 한 번 stop된다. resolve/start 실패는 UI에 `reauthorizationRequired`로 전달되며 stale bookmark는 같은 root ID의 bookmark를 atomic하게 교체한다.
+`StorageRootCatalog`는 bookmark/URL을 노출하지 않고 active root ID와 `StorageRootReference(summary, isActive)` 목록만 Application에 제공한다. 따라서 T04는 catalog의 stable root ID를 사용해 Infrastructure의 lexical scoped-access 경계에서 각 historical root를 처리할 수 있다. Historical root 재승인은 해당 ID와 현재 active root를 유지하며, active root 변경은 명시적 directory selection만 수행한다.
+
+`FoundationSecurityScopedBookmarkCodec`은 `.withSecurityScope` bookmark를 만들고 resolve한다. 매 repository operation은 manager의 lexical `withAccess` 내부에서 resolved URL을 사용한다. 성공한 start는 operation의 성공·실패 모두에서 한 번 stop된다. resolve/start 실패는 UI에 `reauthorizationRequired`로 전달되며 stale bookmark는 같은 root ID의 bookmark를 atomic하게 교체하고 갱신된 summary를 반환한다.
 
 `Features/StorageRootViewModel`은 AppKit `NSOpenPanel` adapter를 분리해 명시적인 선택·변경·재승인 버튼만 제공한다. 앱 시작 시 active root 복원을 시도하지만 panel을 자동으로 열지 않는다. 테스트용 view construction은 in-memory preview controller를 사용하므로 Application Support나 panel을 건드리지 않는다.
 

@@ -44,47 +44,41 @@ final class StorageRootViewModel: ObservableObject {
         StorageRootViewModel(controller: PreviewStorageRootController(), directorySelector: PreviewDirectorySelector())
     }
 
-    func restore() {
-        Task {
-            state = Self.viewState(from: await controller.availability())
-        }
+    func restore() async {
+        state = Self.viewState(from: await controller.availability())
     }
 
-    func chooseActiveRoot() {
+    func chooseActiveRoot() async {
         guard !isPresentingPicker, !isSavingSelection else { return }
         isPresentingPicker = true
         defer { isPresentingPicker = false }
         guard let url = directorySelector.chooseDirectory() else { return }
         isSavingSelection = true
-        Task {
-            defer { isSavingSelection = false }
-            do {
-                let root = try await controller.registerSelectedDirectory(url)
-                state = .available(root, refreshedBookmark: false)
-            } catch let error as StorageError {
-                state = .failed(error.code)
-            } catch {
-                state = .failed(.bookmarkCreateFailed)
-            }
+        defer { isSavingSelection = false }
+        do {
+            let root = try await controller.registerSelectedDirectory(url)
+            state = .available(root, refreshedBookmark: false)
+        } catch let error as StorageError {
+            state = .failed(error.code)
+        } catch {
+            state = .failed(.bookmarkCreateFailed)
         }
     }
 
-    func reauthorize() {
+    func reauthorize() async {
         guard case let .reauthorizationRequired(summary?) = state, !isPresentingPicker, !isSavingSelection else { return }
         isPresentingPicker = true
         defer { isPresentingPicker = false }
         guard let url = directorySelector.chooseDirectory() else { return }
         isSavingSelection = true
-        Task {
-            defer { isSavingSelection = false }
-            do {
-                let root = try await controller.reauthorize(rootID: summary.id, with: url)
-                state = .available(root, refreshedBookmark: false)
-            } catch let error as StorageError {
-                state = .failed(error.code)
-            } catch {
-                state = .failed(.bookmarkCreateFailed)
-            }
+        defer { isSavingSelection = false }
+        do {
+            let root = try await controller.reauthorize(rootID: summary.id, with: url)
+            state = .available(root, refreshedBookmark: false)
+        } catch let error as StorageError {
+            state = .failed(error.code)
+        } catch {
+            state = .failed(.bookmarkCreateFailed)
         }
     }
 
@@ -100,6 +94,7 @@ final class StorageRootViewModel: ObservableObject {
 
 private actor PreviewStorageRootController: StorageRootControlling {
     func availability() async -> StorageRootAvailability { .noRootSelected }
+    func storageRootCatalog() async throws -> StorageRootCatalog { StorageRootCatalog(activeRootID: nil, roots: []) }
     func registerSelectedDirectory(_ url: URL) async throws -> StorageRootSummary { throw StorageError(.bookmarkCreateFailed) }
     func reauthorize(rootID: StorageRootID, with url: URL) async throws -> StorageRootSummary { throw StorageError(.bookmarkCreateFailed) }
 }

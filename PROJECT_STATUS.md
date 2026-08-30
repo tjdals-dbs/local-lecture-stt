@@ -39,7 +39,7 @@ The actual Git status and remote state must be rechecked at the start of every t
 | V00 repository baseline | Complete on `dev` | Approved files, ignore policy, and `origin/dev` verified |
 | T01 macOS project and module boundaries | Complete on `dev`; first `main` baseline created from the same verified commit | Xcode 26.6 unsigned arm64 Debug build, two smoke tests, manual app launch, and `task/**`/`dev`/`main` CI |
 | T02 domain model, schemas, and state machine | Complete on `dev`; `main` remains on the verified T01 baseline | Domain DTO and transcript journal round-trips, lifecycle/checkpoint rules, unsigned arm64 Debug build, 17 unit tests, integration smoke test, and task/dev CI |
-| T03 file repository and root folder permission | Complete on `dev`; `main` remains on the verified T01 baseline | Bookmark registry/access lifecycle, session layout, atomic JSON, JSONL append, 24 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
+| T03 file repository and root folder permission | Complete on `dev`; `main` remains on the verified T01 baseline | Bookmark registry/access lifecycle, active/historical root catalog, session layout, atomic JSON, JSONL append, 34 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
@@ -77,7 +77,7 @@ T03 is complete. T04 can start from the latest `dev` baseline on a fresh `task/t
 
 - `dev` contains T02 domain contracts plus `StorageRootManager` and `FileSessionRepository`; `main` remains at the verified T01 baseline.
 - T03 adds app-scoped security-scoped bookmark persistence at `Application Support/LocalLectureSTT/Storage/storage-roots.json`, stable active/historical root IDs, lexical scope access, typed artifact paths and ownership, atomic JSON replacement, and serialized JSONL append. The main window and Settings expose only select/change/reauthorize root actions.
-- `LocalLectureSTTTests/StorageRepositoryTests.swift` exercises registry restoration, stale refresh, denied scope, scope balancing, collision preservation, DTO round-trips, JSON replacement fault preservation, and JSONL bytes. The unsigned CI does not prove signed sandbox bookmark persistence; the manual same-signed-build procedure remains in `docs/DEVELOPMENT.md`.
+- `LocalLectureSTTTests/StorageRepositoryTests.swift` exercises root catalog restoration and ID-preserving historical reauthorization, stale refresh summaries, denied/success/throw scope balance, all artifact paths, document failure categories, atomic fault preservation, JSONL append/encode failure/concurrency, and UI state flows. The unsigned CI does not prove signed sandbox bookmark persistence; the manual same-signed-build procedure remains in `docs/DEVELOPMENT.md`.
 - T04 can build the rebuildable SQLite catalog and filesystem reconciliation on these file-authoritative session boundaries. Recording, audio finalization, STT, model installation, transcript compact, and derived rendering remain absent by design.
 
 ## Status update rules

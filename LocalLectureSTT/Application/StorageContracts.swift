@@ -19,6 +19,8 @@ enum StorageErrorCode: String, Codable, Sendable, Equatable {
     case sessionIDMismatch
     case jsonEncodeFailed
     case jsonDecodeFailed
+    case documentCorrupt
+    case documentUnsupported
     case temporaryCreateFailed
     case temporaryWriteFailed
     case temporaryFlushFailed
@@ -40,6 +42,18 @@ struct StorageRootSummary: Codable, Sendable, Equatable, Identifiable {
     let displayName: String
     let displayPath: String
     let updatedAt: AbsoluteTime
+}
+
+struct StorageRootReference: Codable, Sendable, Equatable, Identifiable {
+    let summary: StorageRootSummary
+    let isActive: Bool
+
+    var id: StorageRootID { summary.id }
+}
+
+struct StorageRootCatalog: Codable, Sendable, Equatable {
+    let activeRootID: StorageRootID?
+    let roots: [StorageRootReference]
 }
 
 enum StorageRootAvailability: Sendable, Equatable {

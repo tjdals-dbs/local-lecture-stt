@@ -18,7 +18,7 @@ struct MainWindowView: View {
                 } description: {
                     Text("세션 파일을 저장할 폴더를 선택하세요.")
                 } actions: {
-                    Button("저장 폴더 선택", action: storageRoots.chooseActiveRoot)
+                    Button("저장 폴더 선택") { Task { await storageRoots.chooseActiveRoot() } }
                 }
             case let .available(root, refreshedBookmark):
                 ContentUnavailableView {
@@ -32,7 +32,7 @@ struct MainWindowView: View {
                 } description: {
                     Text("저장 폴더에 다시 접근할 수 있도록 선택하세요.")
                 } actions: {
-                    Button("저장 폴더 재승인", action: storageRoots.reauthorize)
+                    Button("저장 폴더 재승인") { Task { await storageRoots.reauthorize() } }
                 }
             case let .failed(code):
                 ContentUnavailableView {
@@ -40,11 +40,11 @@ struct MainWindowView: View {
                 } description: {
                     Text(code.rawValue)
                 } actions: {
-                    Button("다시 선택", action: storageRoots.chooseActiveRoot)
+                    Button("다시 선택") { Task { await storageRoots.chooseActiveRoot() } }
                 }
             }
         }
         .accessibilityIdentifier("initial-project-shell")
-        .task { storageRoots.restore() }
+        .task { await storageRoots.restore() }
     }
 }

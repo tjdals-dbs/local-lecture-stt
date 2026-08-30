@@ -104,7 +104,7 @@ actor StorageRootManager: StorageRootControlling {
             guard let activeID = registry.activeRootID else { return .noRootSelected }
             guard let entry = registry.roots.first(where: { $0.id == activeID }) else { return .failed(.registryCorrupt) }
             let result = try await performWithAccess(to: entry.id) { _ in () }
-            return .available(entry.summary, refreshedBookmark: result.refreshedBookmark)
+            return .available(try rootSummary(id: entry.id), refreshedBookmark: result.refreshedBookmark)
         } catch let error as StorageError {
             switch error.code {
             case .bookmarkResolveFailed, .securityScopeAccessFailed, .reauthorizationRequired:
@@ -115,6 +115,16 @@ actor StorageRootManager: StorageRootControlling {
         } catch {
             return .failed(.registryCorrupt)
         }
+    }
+
+    func storageRootCatalog() async throws -> StorageRootCatalog {
+        let registry = try loadRegistry()
+        return StorageRootCatalog(
+            activeRootID: registry.activeRootID,
+            roots: registry.roots.map { entry in
+                StorageRootReference(summary: entry.summary, isActive: entry.id == registry.activeRootID)
+            }
+        )
     }
 
     func registerSelectedDirectory(_ url: URL) async throws -> StorageRootSummary {
@@ -159,7 +169,6 @@ actor StorageRootManager: StorageRootControlling {
         registry.roots[index].displayName = displayName(for: url)
         registry.roots[index].displayPath = normalizedPath(for: url)
         registry.roots[index].updatedAt = now()
-        registry.activeRootID = rootID
         try saveRegistry(registry)
         return registry.roots[index].summary
     }
@@ -216,6 +225,12 @@ actor StorageRootManager: StorageRootControlling {
         let registry = try loadRegistry()
         guard let id = registry.activeRootID else { return nil }
         return registry.roots.first(where: { $0.id == id })?.summary
+    }
+
+    private func rootSummary(id: StorageRootID) throws -> StorageRootSummary {
+        let registry = try loadRegistry()
+        guard let entry = registry.roots.first(where: { $0.id == id }) else { throw StorageError(.registryCorrupt) }
+        return entry.summary
     }
 
     private func loadRegistry() throws -> StorageRootRegistry {

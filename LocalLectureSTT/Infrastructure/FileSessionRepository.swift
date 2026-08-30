@@ -76,12 +76,15 @@ actor FileSessionRepository: SessionRepository {
 
     private func read<Document: Decodable & Sendable>(at location: SessionLocation, artifact: SessionArtifact, as type: Document.Type) async throws -> Document {
         try await withArtifact(artifact, at: location) { destination in
+            guard FileManager.default.fileExists(atPath: destination.path) else {
+                throw StorageError(.artifactMissing)
+            }
             do {
                 return try JSONDecoder().decode(Document.self, from: Data(contentsOf: destination))
-            } catch CocoaError.fileNoSuchFile {
-                throw StorageError(.artifactMissing)
+            } catch DomainValidationError.unsupportedSchemaVersion {
+                throw StorageError(.documentUnsupported)
             } catch {
-                throw StorageError(.jsonDecodeFailed)
+                throw StorageError(.documentCorrupt)
             }
         }
     }

@@ -23,7 +23,7 @@ The project is `LocalLectureSTT.xcodeproj` and its shared scheme is `LocalLectur
 
 ## Verification record
 
-On 2026-08-30, this baseline was verified with Xcode 26.6 (Build 17F113), Swift 6.3.3, macOS 26.6.2, and an arm64 host. The unsigned Debug build and both smoke tests passed. A manual launch displayed the one main window and its initial-shell placeholder; **Settings…** opened the settings placeholder, and the app quit normally.
+On 2026-08-30, this baseline was verified with Xcode 26.6 (Build 17F113), Swift 6.3.3, macOS 26.6.2, and an arm64 host. The unsigned Debug build and unit/integration tests passed. The app exposes the minimal storage-root state in its main window and Settings; signed sandbox bookmark persistence still requires the manual procedure below.
 
 ## Build and test
 
@@ -68,7 +68,7 @@ The committed entitlement enables app-scoped bookmarks, but the CI build is unsi
 
 ## Run locally
 
-Open `LocalLectureSTT.xcodeproj` in Xcode, select the shared `LocalLectureSTT` scheme, and run it. The initial shell shows one main window. Choose **Local Lecture STT → Settings…** to open the settings placeholder. You can also run the Debug app product after the build command.
+Open `LocalLectureSTT.xcodeproj` in Xcode, select the shared `LocalLectureSTT` scheme, and run it. The main window shows the storage-root state and a selection/reapproval action as appropriate. Choose **Local Lecture STT → Settings…** to change the active storage root or reauthorize it. You can also run the Debug app product after the build command.
 
 The committed project intentionally has no development team. Unsigned build/test verification uses `CODE_SIGNING_ALLOWED=NO`; signing may be needed for a separately installed local app. The app target has sandbox, microphone, user-selected read/write, and app-scoped bookmark entitlements. T03 opens a directory-only panel only after an explicit user action.
 
