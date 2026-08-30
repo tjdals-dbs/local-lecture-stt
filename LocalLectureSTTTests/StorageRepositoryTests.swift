@@ -93,6 +93,30 @@ final class StorageRepositoryTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: registry), corrupt)
     }
 
+    func testUnsupportedRegistryIsReportedAndNeverOverwritten() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let manager = fixture.manager(codec: TestBookmarkCodec())
+        _ = try await manager.registerSelectedDirectory(fixture.rootA)
+        let registry = fixture.registryURL
+        let supported = try Data(contentsOf: registry)
+        let unsupported = Data(String(decoding: supported, as: UTF8.self)
+            .replacingOccurrences(of: "\"schemaVersion\":1", with: "\"schemaVersion\":999")
+            .utf8)
+        try unsupported.write(to: registry)
+
+        let availability = await manager.availability()
+        XCTAssertEqual(availability, .failed(.registryUnsupported))
+        XCTAssertEqual(try Data(contentsOf: registry), unsupported)
+        do {
+            _ = try await manager.storageRootCatalog()
+            XCTFail("Expected unsupported registry")
+        } catch let error as StorageError {
+            XCTAssertEqual(error.code, .registryUnsupported)
+        }
+        XCTAssertEqual(try Data(contentsOf: registry), unsupported)
+    }
+
     func testSessionLayoutArtifactsRoundTripAndCollisionPreservesOriginal() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
@@ -350,31 +374,105 @@ final class StorageRepositoryTests: XCTestCase {
     }
 
     @MainActor
-    func testRootViewModelRepresentsNoRootAvailableReauthorizationCancelAndError() async throws {
-        let root = StorageRootSummary(id: StorageRootID(), displayName: "A", displayPath: "/tmp/A", updatedAt: AbsoluteTime(Date()))
-        let controller = TestRootController(availability: .noRootSelected, summary: root)
-        let selector = TestDirectorySelector(selectedURL: nil)
+    func testRootViewModelChooseAndChangePassEachSelectedURLAndBecomeAvailable() async throws {
+        let first = storageRootSummary(name: "A")
+        let second = storageRootSummary(name: "B")
+        let firstURL = URL(fileURLWithPath: "/tmp/selected-a")
+        let secondURL = URL(fileURLWithPath: "/tmp/selected-b")
+        let controller = TestRootController(availability: .noRootSelected, summary: first)
+        let selector = TestDirectorySelector(selectedURL: firstURL)
         let model = StorageRootViewModel(controller: controller, directorySelector: selector)
 
         await model.restore()
         XCTAssertEqual(model.state, .noRoot)
         await model.chooseActiveRoot()
-        XCTAssertEqual(model.state, .noRoot)
+        XCTAssertEqual(model.state, .available(first, refreshedBookmark: false))
+        XCTAssertEqual(selector.chooseCount, 1)
+        let initialRegistrationURLs = await controller.registrationURLs()
+        XCTAssertEqual(initialRegistrationURLs, [firstURL])
 
-        await controller.setAvailability(.available(root, refreshedBookmark: false))
-        await model.restore()
-        XCTAssertEqual(model.state, .available(root, refreshedBookmark: false))
+        selector.selectedURL = secondURL
+        await controller.setRegistrationSummary(second)
+        await model.chooseActiveRoot()
+        XCTAssertEqual(model.state, .available(second, refreshedBookmark: false))
+        XCTAssertEqual(selector.chooseCount, 2)
+        let changedRegistrationURLs = await controller.registrationURLs()
+        XCTAssertEqual(changedRegistrationURLs, [firstURL, secondURL])
+    }
 
-        await controller.setAvailability(.reauthorizationRequired(root))
+    @MainActor
+    func testRootViewModelReauthorizationPassesExistingRootIDAndBecomesAvailable() async throws {
+        let root = storageRootSummary(name: "A")
+        let replacementURL = URL(fileURLWithPath: "/tmp/reauthorized-a")
+        let controller = TestRootController(availability: .reauthorizationRequired(root), summary: root)
+        let selector = TestDirectorySelector(selectedURL: replacementURL)
+        let model = StorageRootViewModel(controller: controller, directorySelector: selector)
+
         await model.restore()
         XCTAssertEqual(model.state, .reauthorizationRequired(root))
         await model.reauthorize()
-        XCTAssertEqual(model.state, .reauthorizationRequired(root))
 
-        selector.selectedURL = URL(fileURLWithPath: "/tmp/selected")
-        await controller.setRegistrationError(StorageError(.bookmarkCreateFailed))
-        await model.chooseActiveRoot()
-        XCTAssertEqual(model.state, .failed(.bookmarkCreateFailed))
+        XCTAssertEqual(model.state, .available(root, refreshedBookmark: false))
+        XCTAssertEqual(selector.chooseCount, 1)
+        let requests = await controller.reauthorizationRequests()
+        XCTAssertEqual(requests, [ReauthorizationRequest(rootID: root.id, url: replacementURL)])
+    }
+
+    @MainActor
+    func testRootViewModelCancellationPreservesStateAndDoesNotCallController() async throws {
+        let available = storageRootSummary(name: "A")
+        let chooseController = TestRootController(availability: .available(available, refreshedBookmark: false), summary: available)
+        let chooseSelector = TestDirectorySelector(selectedURL: nil)
+        let chooseModel = StorageRootViewModel(controller: chooseController, directorySelector: chooseSelector)
+        await chooseModel.restore()
+        await chooseModel.chooseActiveRoot()
+        XCTAssertEqual(chooseModel.state, .available(available, refreshedBookmark: false))
+        XCTAssertEqual(chooseSelector.chooseCount, 1)
+        let chooseCalls = await chooseController.registrationURLs()
+        XCTAssertEqual(chooseCalls, [])
+
+        let reauthorization = storageRootSummary(name: "B")
+        let reauthorizeController = TestRootController(availability: .reauthorizationRequired(reauthorization), summary: reauthorization)
+        let reauthorizeSelector = TestDirectorySelector(selectedURL: nil)
+        let reauthorizeModel = StorageRootViewModel(controller: reauthorizeController, directorySelector: reauthorizeSelector)
+        await reauthorizeModel.restore()
+        await reauthorizeModel.reauthorize()
+        XCTAssertEqual(reauthorizeModel.state, .reauthorizationRequired(reauthorization))
+        XCTAssertEqual(reauthorizeSelector.chooseCount, 1)
+        let reauthorizeCalls = await reauthorizeController.reauthorizationRequests()
+        XCTAssertEqual(reauthorizeCalls, [])
+    }
+
+    @MainActor
+    func testRootViewModelChooseAndReauthorizationErrorsExposeExactCodes() async throws {
+        let chooseRoot = storageRootSummary(name: "A")
+        let chooseURL = URL(fileURLWithPath: "/tmp/failed-choice")
+        let chooseController = TestRootController(availability: .noRootSelected, summary: chooseRoot)
+        let chooseSelector = TestDirectorySelector(selectedURL: chooseURL)
+        let chooseModel = StorageRootViewModel(controller: chooseController, directorySelector: chooseSelector)
+        await chooseController.setRegistrationError(StorageError(.bookmarkCreateFailed))
+        await chooseModel.chooseActiveRoot()
+        XCTAssertEqual(chooseModel.state, .failed(.bookmarkCreateFailed))
+        XCTAssertEqual(chooseSelector.chooseCount, 1)
+        let chooseCalls = await chooseController.registrationURLs()
+        XCTAssertEqual(chooseCalls, [chooseURL])
+
+        let reauthorizationRoot = storageRootSummary(name: "B")
+        let reauthorizationURL = URL(fileURLWithPath: "/tmp/failed-reauthorization")
+        let reauthorizeController = TestRootController(availability: .reauthorizationRequired(reauthorizationRoot), summary: reauthorizationRoot)
+        let reauthorizeSelector = TestDirectorySelector(selectedURL: reauthorizationURL)
+        let reauthorizeModel = StorageRootViewModel(controller: reauthorizeController, directorySelector: reauthorizeSelector)
+        await reauthorizeModel.restore()
+        await reauthorizeController.setReauthorizationError(StorageError(.rootNotDirectory))
+        await reauthorizeModel.reauthorize()
+        XCTAssertEqual(reauthorizeModel.state, .failed(.rootNotDirectory))
+        XCTAssertEqual(reauthorizeSelector.chooseCount, 1)
+        let reauthorizeCalls = await reauthorizeController.reauthorizationRequests()
+        XCTAssertEqual(reauthorizeCalls, [ReauthorizationRequest(rootID: reauthorizationRoot.id, url: reauthorizationURL)])
+    }
+
+    private func storageRootSummary(name: String) -> StorageRootSummary {
+        StorageRootSummary(id: StorageRootID(), displayName: name, displayPath: "/tmp/\(name)", updatedAt: AbsoluteTime(Date()))
     }
 
     private func syntheticMetadata(sessionID: SessionID) throws -> SessionMetadataDocument {
@@ -460,33 +558,55 @@ private enum TestOperationFailure: Error {
     case failed
 }
 
+private struct ReauthorizationRequest: Sendable, Equatable {
+    let rootID: StorageRootID
+    let url: URL
+}
+
 private actor TestRootController: StorageRootControlling {
     private var currentAvailability: StorageRootAvailability
-    private let summary: StorageRootSummary
+    private var registrationSummary: StorageRootSummary
+    private var reauthorizationSummary: StorageRootSummary
     private var registrationError: StorageError?
+    private var reauthorizationError: StorageError?
+    private var recordedRegistrationURLs: [URL] = []
+    private var recordedReauthorizationRequests: [ReauthorizationRequest] = []
 
     init(availability: StorageRootAvailability, summary: StorageRootSummary) {
         currentAvailability = availability
-        self.summary = summary
+        registrationSummary = summary
+        reauthorizationSummary = summary
     }
 
     func availability() async -> StorageRootAvailability { currentAvailability }
     func storageRootCatalog() async throws -> StorageRootCatalog {
-        StorageRootCatalog(activeRootID: summary.id, roots: [StorageRootReference(summary: summary, isActive: true)])
+        StorageRootCatalog(activeRootID: registrationSummary.id, roots: [StorageRootReference(summary: registrationSummary, isActive: true)])
     }
     func registerSelectedDirectory(_ url: URL) async throws -> StorageRootSummary {
+        recordedRegistrationURLs.append(url)
         if let registrationError { throw registrationError }
-        return summary
+        return registrationSummary
     }
-    func reauthorize(rootID: StorageRootID, with url: URL) async throws -> StorageRootSummary { summary }
-    func setAvailability(_ availability: StorageRootAvailability) { currentAvailability = availability }
+    func reauthorize(rootID: StorageRootID, with url: URL) async throws -> StorageRootSummary {
+        recordedReauthorizationRequests.append(ReauthorizationRequest(rootID: rootID, url: url))
+        if let reauthorizationError { throw reauthorizationError }
+        return reauthorizationSummary
+    }
+    func setRegistrationSummary(_ summary: StorageRootSummary) { registrationSummary = summary }
     func setRegistrationError(_ error: StorageError?) { registrationError = error }
+    func setReauthorizationError(_ error: StorageError?) { reauthorizationError = error }
+    func registrationURLs() -> [URL] { recordedRegistrationURLs }
+    func reauthorizationRequests() -> [ReauthorizationRequest] { recordedReauthorizationRequests }
 }
 
 @MainActor
 private final class TestDirectorySelector: DirectorySelecting {
     var selectedURL: URL?
+    private(set) var chooseCount = 0
 
     init(selectedURL: URL?) { self.selectedURL = selectedURL }
-    func chooseDirectory() -> URL? { selectedURL }
+    func chooseDirectory() -> URL? {
+        chooseCount += 1
+        return selectedURL
+    }
 }
