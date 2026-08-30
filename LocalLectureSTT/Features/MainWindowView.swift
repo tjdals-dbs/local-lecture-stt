@@ -2,9 +2,11 @@ import SwiftUI
 
 struct MainWindowView: View {
     @ObservedObject private var storageRoots: StorageRootViewModel
+    @ObservedObject private var catalogStartup: CatalogStartupCoordinator
 
-    init(storageRoots: StorageRootViewModel = .preview) {
+    init(storageRoots: StorageRootViewModel = .preview, catalogStartup: CatalogStartupCoordinator = CatalogStartupCoordinator(catalog: UnavailableSessionCatalog(error: .openFailed))) {
         self.storageRoots = storageRoots
+        self.catalogStartup = catalogStartup
     }
 
     var body: some View {
@@ -45,6 +47,9 @@ struct MainWindowView: View {
             }
         }
         .accessibilityIdentifier("initial-project-shell")
-        .task { await storageRoots.restore() }
+        .task {
+            await storageRoots.restore()
+            catalogStartup.start()
+        }
     }
 }

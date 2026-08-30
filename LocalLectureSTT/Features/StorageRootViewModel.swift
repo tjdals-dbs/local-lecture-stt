@@ -34,10 +34,12 @@ final class StorageRootViewModel: ObservableObject {
 
     private let controller: any StorageRootControlling
     private let directorySelector: any DirectorySelecting
+    private let onRootChanged: @MainActor @Sendable () -> Void
 
-    init(controller: any StorageRootControlling, directorySelector: any DirectorySelecting) {
+    init(controller: any StorageRootControlling, directorySelector: any DirectorySelecting, onRootChanged: @escaping @MainActor @Sendable () -> Void = {}) {
         self.controller = controller
         self.directorySelector = directorySelector
+        self.onRootChanged = onRootChanged
     }
 
     static var preview: StorageRootViewModel {
@@ -58,6 +60,7 @@ final class StorageRootViewModel: ObservableObject {
         do {
             let root = try await controller.registerSelectedDirectory(url)
             state = .available(root, refreshedBookmark: false)
+            onRootChanged()
         } catch let error as StorageError {
             state = .failed(error.code)
         } catch {
@@ -75,6 +78,7 @@ final class StorageRootViewModel: ObservableObject {
         do {
             let root = try await controller.reauthorize(rootID: summary.id, with: url)
             state = .available(root, refreshedBookmark: false)
+            onRootChanged()
         } catch let error as StorageError {
             state = .failed(error.code)
         } catch {

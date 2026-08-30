@@ -13,6 +13,7 @@
 - App Sandbox의 Application Support 아래에 schema-versioned SQLite 카탈로그가 생성된다.
 - 앱과 테스트는 macOS SDK가 제공하는 SQLite3와 시스템 libsqlite3만 사용하며 외부 package나 ORM을 추가하지 않는다.
 - Application 경계에는 SQLite C 타입, SQL 문자열, URL, bookmark, FileManager가 노출되지 않는다.
+- 이 규칙은 T04에서 새로 추가하는 `SessionCataloging`, `SessionCatalogStore`, `SessionFileScanning`, projection/scan/report 계약에 적용한다. 기존 T03 `StorageRootControlling.registerSelectedDirectory(_:)`와 `reauthorize(rootID:with:)`의 `Foundation.URL` 입력은 승인된 기존 예외로 유지하며, T04에서 이를 재설계하지 않는다.
 - 목록 항목은 최소한 session ID, root ID, 불변 folder name, 제목, 생성 시각, active duration, metadata 상태, capture outcome, 파일 존재 상태와 metadata 갱신 시각을 보존한다.
 - 사용자에게 표시할 상태는 정상 파일이면 metadata 상태, 폴더 또는 metadata가 확인된 누락이면 missing, 읽을 수 없는 metadata면 error로 결정된다. 마지막으로 정상 해석한 metadata 상태를 잃지 않는다.
 - 목록은 생성 시각 내림차순과 안정적인 tie-breaker로 결정론적으로 정렬되고 제목, 날짜, 길이, 표시 상태를 제공한다.

@@ -179,10 +179,15 @@ actor StorageRootManager: StorageRootControlling {
     }
 
     func withAccess<Value: Sendable>(to rootID: StorageRootID? = nil, operation: @Sendable (URL) throws -> Value) async throws -> Value {
-        try await performWithAccess(to: rootID, operation: operation).value
+        try await performWithAccess(to: rootID, requireWritable: true, operation: operation).value
     }
 
-    private func performWithAccess<Value: Sendable>(to rootID: StorageRootID? = nil, operation: @Sendable (URL) throws -> Value) async throws -> (value: Value, refreshedBookmark: Bool) {
+    /// Read-only operations such as catalog reconciliation may use roots that are no longer writable.
+    func withReadAccess<Value: Sendable>(to rootID: StorageRootID, operation: @Sendable (URL) throws -> Value) async throws -> Value {
+        try await performWithAccess(to: rootID, requireWritable: false, operation: operation).value
+    }
+
+    private func performWithAccess<Value: Sendable>(to rootID: StorageRootID? = nil, requireWritable: Bool = true, operation: @Sendable (URL) throws -> Value) async throws -> (value: Value, refreshedBookmark: Bool) {
         var registry = try loadRegistry()
         let resolvedID: StorageRootID
         if let rootID { resolvedID = rootID }
@@ -211,7 +216,7 @@ actor StorageRootManager: StorageRootControlling {
             guard FileManager.default.fileExists(atPath: resolved.url.path) else { throw StorageError(.rootMissing) }
             let values = try resolved.url.resourceValues(forKeys: [.isDirectoryKey, .isWritableKey])
             guard values.isDirectory == true else { throw StorageError(.rootNotDirectory) }
-            guard values.isWritable != false else { throw StorageError(.rootNotWritable) }
+            if requireWritable, values.isWritable == false { throw StorageError(.rootNotWritable) }
             let value = try operation(resolved.url)
             await bookmarkCodec.stopAccessing(resolved.url)
             return (value, resolved.isStale)

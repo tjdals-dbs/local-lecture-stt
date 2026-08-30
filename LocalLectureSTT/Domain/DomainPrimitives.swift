@@ -13,6 +13,7 @@ enum DomainValidationError: Error, Equatable, Sendable {
     case checkpointStepSkipped(expected: FinalizationStep, attempted: FinalizationStep)
     case checkpointStepRegression(completed: FinalizationStep, attempted: FinalizationStep)
     case invalidCheckpointProgress
+    case invalidSessionFolderName
 }
 
 enum DomainValidation {

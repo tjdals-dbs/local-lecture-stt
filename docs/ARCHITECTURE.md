@@ -69,4 +69,16 @@ transcript.txt, transcript.md         derived
 
 `AtomicFileWriter`는 same-directory exclusive temp file → write → `synchronize()` → close → POSIX atomic rename → directory sync 순서로 JSON을 교체한다. rename 전 실패는 기존 destination을 건드리지 않으며 writer가 소유한 temp만 best-effort로 제거한다. `JSONLWriter`는 repository actor의 직렬화 안에서 완전히 encoded 된 단일 JSON line과 LF를 append하고 flush한다. append 실패 뒤의 possible partial trailing record를 복구하는 일은 T20/T26 범위다.
 
-의도적으로 아직 구현하지 않은 항목은 SQLite catalog, 실제 audio 생성·검사, recording lifecycle, STT, journal compact, derived file rendering, session recovery와 전체 세션 UI다.
+### T04 rebuildable session catalog
+
+`Application/SessionCatalog.swift` keeps SQLite and URL out of the application boundary with `SessionCatalogItem`, `CatalogProjection`, `CatalogPresence`, scan reports, and scanner/store protocols. Files always win: `present` displays metadata status, `missing` displays `.missing`, and `unreadable` displays `.error` without discarding the last valid metadata status.
+
+The pre-existing T03 `StorageRootControlling` selection/reauthorization methods are an intentional exception: they accept `Foundation.URL` for the Feature-to-Infrastructure selection boundary. T04 does not expand that exception. Domain and every new catalog projection/scanner/store/report contract remain URL-free; scanner URLs exist only within Infrastructure's lexical security scope.
+
+`SessionFileScanner` reads active and historical roots inside read-only security scopes, enumerates direct children only, and rejects symlinks, bad folder names, invalid metadata, unsupported schemas, and ID mismatches. Only complete root scans mark unseen rows missing; partial or unavailable roots preserve existing rows.
+
+`SQLiteSessionCatalogStore` is an actor over system SQLite3 at `Application Support/LocalLectureSTT/Catalog/session-catalog.sqlite3`. Schema v1 stores IDs, immutable folder, projection fields, presence, and millisecond timestamps. It uses parameter binding, WAL, FULL synchronous, foreign keys, trusted_schema off, finite busy timeout, and one `BEGIN IMMEDIATE` batch transaction. Existing DBs receive read-only user-version/quick-check validation first; future schemas remain untouched, while corrupt catalogs are retained under `Catalog/Corrupt/<timestamp>-<uuid>/` before rebuild.
+
+`CatalogStartupCoordinator` is composed once in the app and coalesces startup/root-change reconciliation. T04 deliberately does not add the T21 list UI.
+
+의도적으로 아직 구현하지 않은 항목은 실제 audio 생성·검사, recording lifecycle, STT, journal compact, derived file rendering, session recovery와 전체 세션 UI다.

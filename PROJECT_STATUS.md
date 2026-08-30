@@ -9,8 +9,8 @@
 
 - Current milestone: M0 foundation
 - Current Task: none in progress
-- Next action: T04 SQLite session catalog and filesystem reconciliation
-- Latest completed Task: T03 file repository and root folder permission
+- Next action: T05 microphone capture and input signal monitor
+- Latest completed Task: T04 SQLite session catalog and filesystem reconciliation
 - Latest passed gate: T01 initial runnable baseline
 - Application implementation: executable initial SwiftUI shell
 
@@ -19,8 +19,8 @@
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
 - Local branch: `dev`
-- Remote baseline: `origin/dev` contains the verified T03 integration; `origin/main` remains the verified T01 runnable baseline
-- `dev` branch: T03 storage integration branch, tracked at `origin/dev`
+- Remote baseline: `origin/dev` contains the verified T04 integration; `origin/main` remains the verified T01 runnable baseline
+- `dev` branch: T04 catalog integration branch, tracked at `origin/dev`
 - `main` branch: created and tracked at `origin/main`; it remains at the verified T01 baseline while `dev` has advanced through T02
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -40,11 +40,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T01 macOS project and module boundaries | Complete on `dev`; first `main` baseline created from the same verified commit | Xcode 26.6 unsigned arm64 Debug build, two smoke tests, manual app launch, and `task/**`/`dev`/`main` CI |
 | T02 domain model, schemas, and state machine | Complete on `dev`; `main` remains on the verified T01 baseline | Domain DTO and transcript journal round-trips, lifecycle/checkpoint rules, unsigned arm64 Debug build, 17 unit tests, integration smoke test, and task/dev CI |
 | T03 file repository and root folder permission | Complete on `dev`; `main` remains on the verified T01 baseline | Bookmark registry/access lifecycle, active/historical root catalog, session layout, atomic JSON, JSONL append, 38 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
+| T04 SQLite session catalog and filesystem reconciliation | Complete on `dev`; `main` remains on the verified T01 baseline | SQLite v1 schema/index validation, file-authoritative rebuild/reconciliation, unavailable-root and conflict preservation, corrupt-sidecar quarantine, 47 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-T03 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T04 is ready to start on a fresh task branch.
+T04 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T05 is ready to start on a fresh task branch.
 
 ## Gate status
 
@@ -71,14 +72,14 @@ T03 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN
 - No current blocker.
 - The app is intentionally unsigned for local and CI verification; a developer signing identity is required only for separately installed signed builds.
 
-## T03 handoff
+## T04 handoff
 
-T03 is complete. T04 can start from the latest `dev` baseline on a fresh `task/t04-*` branch.
+T04 is complete. T05 can start from the latest `dev` baseline on a fresh `task/t05-*` branch.
 
-- `dev` contains T02 domain contracts plus `StorageRootManager` and `FileSessionRepository`; `main` remains at the verified T01 baseline.
-- T03 adds app-scoped security-scoped bookmark persistence at `Application Support/LocalLectureSTT/Storage/storage-roots.json`, stable active/historical root IDs, lexical scope access, typed artifact paths and ownership, atomic JSON replacement, and serialized JSONL append. The main window and Settings expose only select/change/reauthorize root actions.
-- `LocalLectureSTTTests/StorageRepositoryTests.swift` exercises root catalog restoration, unsupported-registry preservation, ID-preserving historical reauthorization, stale refresh summaries, denied/success/throw scope balance, all artifact paths, document failure categories, atomic fault preservation, JSONL append/encode failure/concurrency, and fake-controller UI success/change/reauthorize/cancel/error flows. The unsigned CI does not prove signed sandbox bookmark persistence; the manual same-signed-build procedure remains in `docs/DEVELOPMENT.md`.
-- T04 can build the rebuildable SQLite catalog and filesystem reconciliation on these file-authoritative session boundaries. Recording, audio finalization, STT, model installation, transcript compact, and derived rendering remain absent by design.
+- `dev` contains T03 file-authoritative session roots plus a rebuildable SQLite catalog at `Application Support/LocalLectureSTT/Catalog/session-catalog.sqlite3`; `main` remains at the verified T01 baseline.
+- T04 adds URL-free catalog contracts, lexical read-only root scanning, explicit startup failures, complete-only missing sweeps, and catalog-preserving handling for unreadable, unavailable, duplicate, and location-conflict sessions. A malformed/corrupt v1 database is sidecar-first quarantined and rebuilt; a future schema is left byte-for-byte untouched.
+- `LocalLectureSTTTests/SessionCatalogTests.swift` covers actual root-manager → scanner → reconciler → store rebuild, metadata updates, missing preservation, active/historical/unavailable roots, malformed metadata, transaction conflicts, schema/future/corrupt sidecar cases, quarantine faults, and startup coalescing. The unsigned CI does not prove signed sandbox bookmark persistence; the manual same-signed-build procedure remains in `docs/DEVELOPMENT.md`.
+- T05 can add microphone capture without coupling recording correctness to this rebuildable derived catalog.
 
 ## Status update rules
 
