@@ -18,6 +18,24 @@ struct SessionID: Codable, Sendable, Hashable {
     }
 }
 
+struct StorageRootID: Codable, Sendable, Hashable {
+    let rawValue: UUID
+
+    init(_ rawValue: UUID = UUID()) {
+        self.rawValue = rawValue
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        self.init(try container.decode(UUID.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
 struct TranscriptSegmentID: Codable, Sendable, Hashable {
     let rawValue: UUID
 

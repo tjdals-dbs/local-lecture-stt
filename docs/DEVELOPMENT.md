@@ -55,11 +55,22 @@ xcodebuild \
 
 Check the project targets and shared scheme with `xcodebuild -list`. Check the configured deployment target and architecture with `xcodebuild -showBuildSettings`; inspect the built executable with `file` or `lipo -archs`.
 
+## T03 storage-root manual verification
+
+Use a newly created, empty test directory only; never select a real lecture-session root for this procedure.
+
+1. Run the app and choose **저장 폴더 선택** from the main window. Select test directory A.
+2. Quit normally, run the same locally signed build again, and confirm that A appears as available without reopening the panel.
+3. Open Settings, choose **저장 폴더 변경**, and select empty directory B. Confirm A is neither moved nor changed.
+4. Invoke selection and cancel the panel; confirm B remains active.
+
+The committed entitlement enables app-scoped bookmarks, but the CI build is unsigned and cannot prove sandbox persistence. Perform the restart portion with the same locally signed app identity before treating actual sandbox enforcement as verified. Automated tests use a temporary Application Support fixture and a fake scoped-bookmark codec; they never touch the user's Application Support or roots.
+
 ## Run locally
 
 Open `LocalLectureSTT.xcodeproj` in Xcode, select the shared `LocalLectureSTT` scheme, and run it. The initial shell shows one main window. Choose **Local Lecture STT → Settings…** to open the settings placeholder. You can also run the Debug app product after the build command.
 
-The committed project intentionally has no development team. Unsigned build/test verification uses `CODE_SIGNING_ALLOWED=NO`; signing may be needed for a separately installed local app. The app target has sandbox, microphone, and user-selected read/write file entitlements, but T01 does not request microphone access or open a file panel.
+The committed project intentionally has no development team. Unsigned build/test verification uses `CODE_SIGNING_ALLOWED=NO`; signing may be needed for a separately installed local app. The app target has sandbox, microphone, user-selected read/write, and app-scoped bookmark entitlements. T03 opens a directory-only panel only after an explicit user action.
 
 ## CI
 

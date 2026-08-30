@@ -1,11 +1,31 @@
 import SwiftUI
 
 struct SettingsView: View {
+    @ObservedObject private var storageRoots: StorageRootViewModel
+
+    init(storageRoots: StorageRootViewModel = .preview) {
+        self.storageRoots = storageRoots
+    }
+
     var body: some View {
         Form {
-            Text("설정은 후속 작업에서 제공됩니다.")
+            Section("저장 폴더") {
+                switch storageRoots.state {
+                case let .available(root, _):
+                    Text(root.displayPath)
+                    Button("저장 폴더 변경", action: storageRoots.chooseActiveRoot)
+                case .reauthorizationRequired:
+                    Text("재승인이 필요합니다.")
+                    Button("저장 폴더 재승인", action: storageRoots.reauthorize)
+                case .loading:
+                    ProgressView()
+                case .noRoot, .failed:
+                    Button("저장 폴더 선택", action: storageRoots.chooseActiveRoot)
+                }
+            }
         }
         .padding()
         .frame(minWidth: 360, minHeight: 160)
+        .task { storageRoots.restore() }
     }
 }

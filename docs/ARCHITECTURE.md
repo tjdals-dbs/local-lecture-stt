@@ -1,6 +1,6 @@
 # Architecture
 
-## T02 domain model and lifecycle
+## T03 storage root and session repository
 
 `LocalLectureSTT`는 macOS 15 이상, arm64 전용 SwiftUI 앱 target 하나와 두 test target으로 시작한다.
 
@@ -16,7 +16,7 @@ LocalLectureSTTTests             unit smoke test
 LocalLectureSTTIntegrationTests  app module을 연결하는 integration smoke test
 ```
 
-현재 경계는 하나의 app target 안에 있는 **논리적 경계**이며 compile-time module 분리는 아직 없다. `Domain`은 Foundation과 Swift 값 타입만 사용하며, 다음 T03 이후의 저장소·오디오·STT 구현에는 의존하지 않는다.
+현재 경계는 하나의 app target 안에 있는 **논리적 경계**이며 compile-time module 분리는 아직 없다. `Domain`은 Foundation과 Swift 값 타입만 사용하며, 저장소·오디오·STT 구현에는 의존하지 않는다.
 
 목표 의존 방향은 다음과 같다.
 
@@ -40,4 +40,31 @@ MVP는 단일 프로세스다. 이후 비동기 구성 요소는 XPC나 별도 �
 
 `FinalizationCheckpointDocument`는 명세의 여덟 단계가 앞 단계부터 순서대로 완료됐음을 보존한다. 마지막으로 완료된 단계의 재적용만 idempotent하며, 이미 완료한 더 이른 단계를 다시 적용하면 regression, 다음 단계를 건너뛰면 skipped error다. 비연속 저장 상태도 거부한다. 실제 JSONL append는 T03, 오디오 마무리와 checkpoint 실행은 T08/T09 범위다.
 
-의도적으로 아직 구현하지 않은 항목은 persistence, 권한 요청, AVFoundation 마이크 캡처, STT 엔진 protocol과 모델 관리, 세션 UI 및 앱 생명주기 정책이다.
+### Storage roots
+
+`StorageRootID`는 UUID 기반의 안정적인 앱 고유 식별자다. `Infrastructure/StorageRootManager` actor는 Application Support의 `LocalLectureSTT/Storage/storage-roots.json`에 schema v1 registry를 atomic JSON으로 저장한다. Registry는 active root와 historical root의 app-scoped bookmark, 표시용 이름·경로와 관리 시각을 보존한다. 표시 경로는 UI 안내용일 뿐 접근 권한으로 사용하지 않는다.
+
+`FoundationSecurityScopedBookmarkCodec`은 `.withSecurityScope` bookmark를 만들고 resolve한다. 매 repository operation은 manager의 lexical `withAccess` 내부에서 resolved URL을 사용한다. 성공한 start는 operation의 성공·실패 모두에서 한 번 stop된다. resolve/start 실패는 UI에 `reauthorizationRequired`로 전달되며 stale bookmark는 같은 root ID의 bookmark를 atomic하게 교체한다.
+
+`Features/StorageRootViewModel`은 AppKit `NSOpenPanel` adapter를 분리해 명시적인 선택·변경·재승인 버튼만 제공한다. 앱 시작 시 active root 복원을 시도하지만 panel을 자동으로 열지 않는다. 테스트용 view construction은 in-memory preview controller를 사용하므로 Application Support나 panel을 건드리지 않는다.
+
+### Session files
+
+`FileSessionRepository` actor는 active 또는 historical root의 scoped operation에서만 session files를 읽고 쓴다. `SessionFolderName`은 주입된 time zone으로 `YYYYMMDD-HHMMSS_<8-char-lowercase-id>`를 만들며 제목과 무관하다. 새 session은 폴더와 `recovery/`만 만들고, 기존 이름은 collision으로 거부하며 자동 정리하지 않는다.
+
+`SessionArtifact`만이 파일 경로를 만들며 canonical/recovery source와 derived artifact를 명시적으로 분류한다.
+
+```text
+metadata.json                         authoritative/recovery
+audio.m4a                             authoritative/recovery
+transcript.json                       authoritative/recovery
+events.jsonl                          authoritative/recovery
+recovery/audio.recovery.mov           authoritative/recovery
+recovery/transcript.journal.jsonl     authoritative/recovery
+recovery/finalization.checkpoint.json authoritative/recovery
+transcript.txt, transcript.md         derived
+```
+
+`AtomicFileWriter`는 same-directory exclusive temp file → write → `synchronize()` → close → POSIX atomic rename → directory sync 순서로 JSON을 교체한다. rename 전 실패는 기존 destination을 건드리지 않으며 writer가 소유한 temp만 best-effort로 제거한다. `JSONLWriter`는 repository actor의 직렬화 안에서 완전히 encoded 된 단일 JSON line과 LF를 append하고 flush한다. append 실패 뒤의 possible partial trailing record를 복구하는 일은 T20/T26 범위다.
+
+의도적으로 아직 구현하지 않은 항목은 SQLite catalog, 실제 audio 생성·검사, recording lifecycle, STT, journal compact, derived file rendering, session recovery와 전체 세션 UI다.
