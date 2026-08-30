@@ -13,6 +13,13 @@
 		A10000000000000000000014 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000005 /* SettingsView.swift */; };
 		A10000000000000000000015 /* AppShellInfoTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000008 /* AppShellInfoTests.swift */; };
 		A10000000000000000000016 /* MainWindowViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000009 /* MainWindowViewTests.swift */; };
+		B20000000000000000000001 /* Identifiers.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000011 /* Identifiers.swift */; };
+		B20000000000000000000002 /* DomainPrimitives.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000012 /* DomainPrimitives.swift */; };
+		B20000000000000000000003 /* SessionLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000013 /* SessionLifecycle.swift */; };
+		B20000000000000000000004 /* SessionDocuments.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000014 /* SessionDocuments.swift */; };
+		B20000000000000000000005 /* SessionEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000015 /* SessionEvents.swift */; };
+		B20000000000000000000006 /* FinalizationCheckpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000016 /* FinalizationCheckpoint.swift */; };
+		B20000000000000000000007 /* DomainModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000017 /* DomainModelTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,6 +36,13 @@
 		A10000000000000000000017 /* BOUNDARY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = BOUNDARY.md; sourceTree = "<group>"; };
 		A10000000000000000000018 /* BOUNDARY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = BOUNDARY.md; sourceTree = "<group>"; };
 		A10000000000000000000019 /* BOUNDARY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = BOUNDARY.md; sourceTree = "<group>"; };
+		B20000000000000000000011 /* Identifiers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Identifiers.swift; sourceTree = "<group>"; };
+		B20000000000000000000012 /* DomainPrimitives.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DomainPrimitives.swift; sourceTree = "<group>"; };
+		B20000000000000000000013 /* SessionLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionLifecycle.swift; sourceTree = "<group>"; };
+		B20000000000000000000014 /* SessionDocuments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionDocuments.swift; sourceTree = "<group>"; };
+		B20000000000000000000015 /* SessionEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionEvents.swift; sourceTree = "<group>"; };
+		B20000000000000000000016 /* FinalizationCheckpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalizationCheckpoint.swift; sourceTree = "<group>"; };
+		B20000000000000000000017 /* DomainModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DomainModelTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -51,10 +65,10 @@
 		A10000000000000000000032 /* LocalLectureSTT */ = {isa = PBXGroup; children = (A10000000000000000000033 /* App */, A10000000000000000000034 /* Features */, A10000000000000000000039 /* Domain */, A1000000000000000000003A /* Application */, A1000000000000000000003B /* Infrastructure */); path = LocalLectureSTT; sourceTree = "<group>"; };
 		A10000000000000000000033 /* App */ = {isa = PBXGroup; children = (A10000000000000000000001 /* LocalLectureSTTApp.swift */, A10000000000000000000002 /* AppShellInfo.swift */, A10000000000000000000003 /* LocalLectureSTT.entitlements */); path = App; sourceTree = "<group>"; };
 		A10000000000000000000034 /* Features */ = {isa = PBXGroup; children = (A10000000000000000000004 /* MainWindowView.swift */, A10000000000000000000005 /* SettingsView.swift */); path = Features; sourceTree = "<group>"; };
-		A10000000000000000000039 /* Domain */ = {isa = PBXGroup; children = (A10000000000000000000017 /* BOUNDARY.md */); path = Domain; sourceTree = "<group>"; };
+		A10000000000000000000039 /* Domain */ = {isa = PBXGroup; children = (A10000000000000000000017 /* BOUNDARY.md */, B20000000000000000000011 /* Identifiers.swift */, B20000000000000000000012 /* DomainPrimitives.swift */, B20000000000000000000013 /* SessionLifecycle.swift */, B20000000000000000000014 /* SessionDocuments.swift */, B20000000000000000000015 /* SessionEvents.swift */, B20000000000000000000016 /* FinalizationCheckpoint.swift */); path = Domain; sourceTree = "<group>"; };
 		A1000000000000000000003A /* Application */ = {isa = PBXGroup; children = (A10000000000000000000018 /* BOUNDARY.md */); path = Application; sourceTree = "<group>"; };
 		A1000000000000000000003B /* Infrastructure */ = {isa = PBXGroup; children = (A10000000000000000000019 /* BOUNDARY.md */); path = Infrastructure; sourceTree = "<group>"; };
-		A10000000000000000000036 /* LocalLectureSTTTests */ = {isa = PBXGroup; children = (A10000000000000000000008 /* AppShellInfoTests.swift */); path = LocalLectureSTTTests; sourceTree = "<group>"; };
+		A10000000000000000000036 /* LocalLectureSTTTests */ = {isa = PBXGroup; children = (A10000000000000000000008 /* AppShellInfoTests.swift */, B20000000000000000000017 /* DomainModelTests.swift */); path = LocalLectureSTTTests; sourceTree = "<group>"; };
 		A10000000000000000000037 /* LocalLectureSTTIntegrationTests */ = {isa = PBXGroup; children = (A10000000000000000000009 /* MainWindowViewTests.swift */); path = LocalLectureSTTIntegrationTests; sourceTree = "<group>"; };
 		A10000000000000000000038 /* Products */ = {isa = PBXGroup; children = (A10000000000000000000006 /* LocalLectureSTT.app */, A10000000000000000000007 /* LocalLectureSTTTests.xctest */, A10000000000000000000010 /* LocalLectureSTTIntegrationTests.xctest */); name = Products; sourceTree = "<group>"; };
 /* End PBXGroup section */
@@ -76,8 +90,8 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A10000000000000000000051 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000011 /* LocalLectureSTTApp.swift in Sources */, A10000000000000000000012 /* AppShellInfo.swift in Sources */, A10000000000000000000013 /* MainWindowView.swift in Sources */, A10000000000000000000014 /* SettingsView.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
-		A10000000000000000000052 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000015 /* AppShellInfoTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000051 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000011 /* LocalLectureSTTApp.swift in Sources */, A10000000000000000000012 /* AppShellInfo.swift in Sources */, A10000000000000000000013 /* MainWindowView.swift in Sources */, A10000000000000000000014 /* SettingsView.swift in Sources */, B20000000000000000000001 /* Identifiers.swift in Sources */, B20000000000000000000002 /* DomainPrimitives.swift in Sources */, B20000000000000000000003 /* SessionLifecycle.swift in Sources */, B20000000000000000000004 /* SessionDocuments.swift in Sources */, B20000000000000000000005 /* SessionEvents.swift in Sources */, B20000000000000000000006 /* FinalizationCheckpoint.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000052 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000015 /* AppShellInfoTests.swift in Sources */, B20000000000000000000007 /* DomainModelTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
 		A10000000000000000000053 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000016 /* MainWindowViewTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 

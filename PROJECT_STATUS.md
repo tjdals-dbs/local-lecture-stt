@@ -9,8 +9,8 @@
 
 - Current milestone: M0 foundation
 - Current Task: none in progress
-- Next action: T02 domain model, schemas, and state machine
-- Latest completed Task: T01 macOS project and module boundaries
+- Next action: T03 file repository and root folder permission
+- Latest completed Task: T02 domain model, schemas, and state machine
 - Latest passed gate: T01 initial runnable baseline
 - Application implementation: executable initial SwiftUI shell
 
@@ -20,7 +20,7 @@
 - GitHub default branch: `main`
 - Local branch: `dev`
 - Remote baseline: `origin/dev` and `origin/main` are the same verified T01 runnable baseline
-- `dev` branch: created and tracked at `origin/dev`
+- `dev` branch: T02 domain-model integration branch, tracked at `origin/dev`
 - `main` branch: created and tracked at `origin/main`; it currently points to the same T01 baseline commit as `dev`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -38,11 +38,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | Repository remote | Created and connected by user | Local `origin` inspected |
 | V00 repository baseline | Complete on `dev` | Approved files, ignore policy, and `origin/dev` verified |
 | T01 macOS project and module boundaries | Complete on `dev`; first `main` baseline created from the same verified commit | Xcode 26.6 unsigned arm64 Debug build, two smoke tests, manual app launch, and `task/**`/`dev`/`main` CI |
+| T02 domain model, schemas, and state machine | Complete on `dev`; `main` remains on the verified T01 baseline | Domain DTO round-trips, lifecycle/checkpoint rules, unsigned arm64 Debug build, 15 unit tests, integration smoke test, and task/dev CI |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-T01 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T02 is ready to start on a fresh task branch.
+T02 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T03 is ready to start on a fresh task branch.
 
 ## Gate status
 
@@ -69,14 +70,14 @@ T01 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN
 - No current blocker.
 - The app is intentionally unsigned for local and CI verification; a developer signing identity is required only for separately installed signed builds.
 
-## T01 handoff
+## T02 handoff
 
-T01 is complete. T02 can start from the latest `dev` baseline on a fresh `task/t02-*` branch.
+T02 is complete. T03 can start from the latest `dev` baseline on a fresh `task/t03-*` branch.
 
-- `dev` and `main` point to the same verified initial runnable baseline.
-- The native `LocalLectureSTT.xcodeproj` contains the app, unit test, and integration test targets, plus a shared `LocalLectureSTT` scheme.
-- `docs/ARCHITECTURE.md` records the current logical App/Domain/Application/Infrastructure/Features boundaries; `docs/DEVELOPMENT.md` records verified commands.
-- Actual recording, STT, model, persistence, and session features are still absent by design.
+- `dev` contains the T02 domain contracts; `main` remains at the verified T01 baseline.
+- `LocalLectureSTT/Domain` now contains Foundation-only identifiers, timestamp/media-time values, schema-v1 DTOs, lifecycle validation, and finalization checkpoint progression. No file I/O is implemented.
+- `LocalLectureSTTTests/DomainModelTests.swift` covers JSON round-trips, schema rejection, lifecycle/recovery rules, and checkpoint ordering. The app and integration smoke test remain unchanged.
+- T03 can add the file repository, security-scoped root access, atomic JSON writes, and JSONL appends using these DTOs; recording, STT, model installation, and SQLite remain absent by design.
 
 ## Status update rules
 
