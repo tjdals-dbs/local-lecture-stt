@@ -81,4 +81,14 @@ The pre-existing T03 `StorageRootControlling` selection/reauthorization methods 
 
 `CatalogStartupCoordinator` is composed once in the app and coalesces startup/root-change reconciliation. T04 deliberately does not add the T21 list UI.
 
-의도적으로 아직 구현하지 않은 항목은 실제 audio 생성·검사, recording lifecycle, STT, journal compact, derived file rendering, session recovery와 전체 세션 UI다.
+### T05 microphone capture and input signal monitor
+
+`MicrophonePermissionAuthorizing` separates side-effect-free authorization-status lookup from an explicit permission request. `MicrophoneCaptureController` is the single actor owner of capture lifecycle; the app composition and existing views do not construct it or request permission/start capture, so T07 will explicitly combine permission request, writer attachment, and UI state.
+
+`AVAudioEngineMicrophoneDriver` owns the AVAudioEngine input tap, Core Audio default-input/alive listeners, and configuration notification registration. It snapshots the current default input before start. A changed default identity or lost active input sends one terminal typed event and never continues the generation on a replacement device. The callback bridge copies the tap's planar Float32 buffers into a frame-major, interleaved, application-owned `PCMChunk`; AVFoundation buffers and Core Audio IDs never cross into Application.
+
+Each generation exposes independent bounded streams: recording uses `bufferingOldest` and treats every overflow or terminated enqueue as terminal `recordingBackpressure`; realtime speech uses `bufferingNewest`, reports a cumulative discontinuity count, and cannot block or terminate recording. The callback does only format validation, Float32 copy, bounded enqueue, and level aggregation; it does no I/O, inference, UI work, or actor await. A terminal overflow/event creates one asynchronous lifecycle cleanup action, not one task per frame.
+
+`InputSignalMonitor` supplies a throttled stream of normalized peak, RMS dBFS, peak dBFS, state, sequence, and monotonic time. It is independent of VAD. A scheduler checks for no frames as well as silent frames; after 5 seconds without signal at or above -60 dBFS it emits one `noInput` state without stopping capture. Signal at or above -55 dBFS clears it. T06 consumes recording PCM for the recovery writer; T07 consumes device/level/capture state; T18/T19 consume the best-effort speech stream and perform their own 16 kHz conversion/VAD.
+
+의도적으로 아직 구현하지 않은 항목은 actual audio file writer/finalization, recording-session lifecycle and UI, STT, journal compact, derived file rendering, session recovery와 전체 세션 UI다.

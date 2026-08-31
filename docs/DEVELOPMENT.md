@@ -81,3 +81,15 @@ The committed project intentionally has no development team. Unsigned build/test
 The app links macOS system `libsqlite3`; no package installation is required. Runtime catalog data is at `Application Support/LocalLectureSTT/Catalog/session-catalog.sqlite3`; damaged copies are retained under `Catalog/Corrupt/` and all of these runtime paths are ignored by Git.
 
 For a manual check, use disposable roots and synthetic metadata only. Close the app before moving/deleting a catalog DB and its `-wal`, `-shm`, and `-journal` sidecars, then restart to rebuild from accessible session folders. T21 has not added a catalog list UI yet, so automated tests are the acceptance evidence for catalog rows and statuses.
+
+## T05 microphone capture manual verification
+
+The default CI build is unsigned and its synthetic test driver does not prove TCC authorization, physical microphone input, or hardware route changes. Perform this opt-in check only with a locally signed build that retains the committed App Sandbox microphone entitlement and usage description; do not use a real lecture-session root or record diagnostic PCM to a file.
+
+1. Build and run the app from Xcode using one stable local signing identity. In System Settings, manually allow microphone access for that app when the future T07 explicit recording action requests it. Do not run `tccutil reset` or edit TCC databases.
+2. In the T07 recording flow, confirm the current system input's displayed name and its source sample rate/channel count. Speak or clap and confirm PCM chunks and the level meter change; do not log sample bytes or device IDs.
+3. Leave the input silent (or disconnect the source) for at least five seconds. Confirm exactly one no-input warning appears while capture remains running, then confirm speech clears the warning.
+4. Repeat explicit start/stop several times and confirm no duplicate-tap crash or duplicate level updates occur.
+5. When an external input is available, disconnect it or change the macOS default input during capture. Confirm the current generation reports a device/route failure and does not silently continue using another microphone. Reconnect only for a new explicit start.
+
+These steps require the T07 opt-in recording composition because T05 deliberately does not add debug recording UI, write session files, or prompt for permission during app/view construction.

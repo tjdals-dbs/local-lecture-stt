@@ -7,10 +7,10 @@
 
 ## Current position
 
-- Current milestone: M0 foundation
+- Current milestone: M1 safe recorder
 - Current Task: none in progress
-- Next action: T05 microphone capture and input signal monitor
-- Latest completed Task: T04 SQLite session catalog and filesystem reconciliation
+- Next action: T06 recoverable fragmented audio writer
+- Latest completed Task: T05 microphone capture and input signal monitor
 - Latest passed gate: T01 initial runnable baseline
 - Application implementation: executable initial SwiftUI shell
 
@@ -19,8 +19,8 @@
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
 - Local branch: `dev`
-- Remote baseline: `origin/dev` contains the verified T04 integration; `origin/main` remains the verified T01 runnable baseline
-- `dev` branch: T04 catalog integration branch, tracked at `origin/dev`
+- Remote baseline: `origin/dev` contains the verified T05 integration; `origin/main` remains the verified T01 runnable baseline
+- `dev` branch: T05 microphone capture integration branch, tracked at `origin/dev`
 - `main` branch: created and tracked at `origin/main`; it remains at the verified T01 baseline while `dev` has advanced through T02
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -40,12 +40,13 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T01 macOS project and module boundaries | Complete on `dev`; first `main` baseline created from the same verified commit | Xcode 26.6 unsigned arm64 Debug build, two smoke tests, manual app launch, and `task/**`/`dev`/`main` CI |
 | T02 domain model, schemas, and state machine | Complete on `dev`; `main` remains on the verified T01 baseline | Domain DTO and transcript journal round-trips, lifecycle/checkpoint rules, unsigned arm64 Debug build, 17 unit tests, integration smoke test, and task/dev CI |
 | T03 file repository and root folder permission | Complete on `dev`; `main` remains on the verified T01 baseline | Bookmark registry/access lifecycle, active/historical root catalog, session layout, atomic JSON, JSONL append, 38 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
-| T04 SQLite session catalog and filesystem reconciliation | Complete on `dev`; `main` remains on the verified T01 baseline | SQLite v1 schema/index validation, file-authoritative rebuild/reconciliation, unavailable-root and conflict preservation, corrupt-sidecar quarantine, 48 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
+| T04 SQLite session catalog and filesystem reconciliation | Complete on `dev`; `main` remains on the verified T01 baseline | SQLite v1 schema/index validation, file-authoritative rebuild/reconciliation, unavailable-root and conflict preservation, corrupt-sidecar quarantine, 76 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
+| T05 microphone capture and input signal monitor | Complete on `dev`; `main` remains on the verified T01 baseline | Typed permission/capture contracts, owned Float32 PCM, bounded recording/STT fan-out, throttled input level/no-input monitoring, active-device failure handling, 88 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-T04 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T05 is ready to start on a fresh task branch.
+T05 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T06 is ready to start on a fresh task branch.
 
 ## Gate status
 
@@ -72,14 +73,14 @@ T04 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN
 - No current blocker.
 - The app is intentionally unsigned for local and CI verification; a developer signing identity is required only for separately installed signed builds.
 
-## T04 handoff
+## T05 handoff
 
-T04 is complete. T05 can start from the latest `dev` baseline on a fresh `task/t05-*` branch.
+T05 is complete. T06 can start from the latest `dev` baseline on a fresh `task/t06-*` branch.
 
-- `dev` contains T03 file-authoritative session roots plus a rebuildable SQLite catalog at `Application Support/LocalLectureSTT/Catalog/session-catalog.sqlite3`; `main` remains at the verified T01 baseline.
-- T04 adds URL-free catalog contracts, lexical read-only root scanning, explicit startup failures, complete-only missing sweeps, and catalog-preserving handling for unreadable, unavailable, duplicate, and location-conflict sessions. Ready startup calls reuse their completed report; only successful root change events trigger a new reconciliation. A malformed/corrupt v1 database is sidecar-first quarantined and rebuilt; a future schema is left byte-for-byte untouched.
-- `LocalLectureSTTTests/SessionCatalogTests.swift` covers actual root-manager → scanner → reconciler → store rebuild, metadata updates, missing preservation, active/historical/unavailable roots, malformed metadata, transaction conflicts, schema/future/corrupt sidecar cases, quarantine faults, and startup coalescing. The unsigned CI does not prove signed sandbox bookmark persistence; the manual same-signed-build procedure remains in `docs/DEVELOPMENT.md`.
-- T05 can add microphone capture without coupling recording correctness to this rebuildable derived catalog.
+- `dev` now has framework-independent microphone permission/capture contracts, owned frame-major Float32 interleaved PCM chunks, and a single capture lifecycle actor. The live adapter uses `AVAudioEngine` input tap plus Core Audio default-input/alive checks without exposing framework types past Infrastructure.
+- Recording uses a bounded loss-intolerant stream: overflow is one typed terminal `recordingBackpressure` failure. The independent bounded STT stream keeps the newest chunks and reports discontinuities; it cannot stall or terminate recording. `InputSignalMonitor` provides throttled peak/RMS state and a controlled-clock 5-second no-input warning that does not stop capture.
+- `LocalLectureSTTTests/MicrophoneCaptureTests.swift` covers permission mapping/start side effects, owned PCM validation, slow STT fan-out, overflow, device-event races, repeated/concurrent lifecycle, rollback, signal level, throttling, no-input and recovery. Hardware/TCC remains manual only; the signed opt-in procedure is documented in `docs/DEVELOPMENT.md`.
+- T06 should attach its recovery writer to the recording PCM stream. It must preserve T05's loss-intolerant overflow behavior and must not require the STT stream to drain.
 
 ## Status update rules
 
