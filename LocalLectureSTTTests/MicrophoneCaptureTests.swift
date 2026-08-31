@@ -44,6 +44,62 @@ final class MicrophoneCaptureTests: XCTestCase {
         XCTAssertEqual(afterRequest, 1)
     }
 
+    func testStopWhilePermissionIsAwaitingInvalidatesTheStartAttempt() async {
+        let permission = ControlledPermission()
+        let driver = ControlledCaptureDriver()
+        let controller = MicrophoneCaptureController(permission: permission, driver: driver, monitor: testMonitor())
+        let start = Task.detached { await result { try await controller.start() } }
+
+        await permission.waitForAuthorizationStatus()
+        await controller.stop()
+        await permission.resumeAuthorization(with: .authorized)
+
+        let outcome = await start.value
+        XCTAssertEqual(captureErrorCode(outcome), .startInterrupted)
+        let lifecycle = await controller.currentLifecycle()
+        let counts = await driver.currentCounts()
+        XCTAssertEqual(lifecycle, .idle)
+        XCTAssertEqual(counts.prepare, 0)
+        XCTAssertEqual(counts.stop, 1)
+    }
+
+    func testStopWhilePrepareIsAwaitingCannotStartOrReturnAHandle() async {
+        let driver = ControlledCaptureDriver(pausePrepare: true)
+        let controller = MicrophoneCaptureController(permission: FakePermission(status: .authorized), driver: driver, monitor: testMonitor())
+        let start = Task.detached { await result { try await controller.start() } }
+
+        await driver.waitForPrepare()
+        await controller.stop()
+        await driver.resumePrepare()
+
+        let outcome = await start.value
+        XCTAssertEqual(captureErrorCode(outcome), .startInterrupted)
+        let lifecycle = await controller.currentLifecycle()
+        XCTAssertEqual(lifecycle, .idle)
+        let counts = await driver.currentCounts()
+        XCTAssertEqual(counts.prepare, 1)
+        XCTAssertEqual(counts.start, 0)
+        XCTAssertEqual(counts.stop, 1)
+    }
+
+    func testRuntimeFailureDuringStartingCannotReturnAHandleAndFinishesOnce() async {
+        let driver = ControlledCaptureDriver(pauseStart: true)
+        let controller = MicrophoneCaptureController(permission: FakePermission(status: .authorized), driver: driver, monitor: testMonitor())
+        let start = Task.detached { await result { try await controller.start() } }
+
+        await driver.waitForStart()
+        await driver.emitRuntime(.runtimeFailure)
+        await waitForLifecycle(controller, .failed(.runtimeFailure))
+        await driver.resumeStart()
+
+        let outcome = await start.value
+        XCTAssertEqual(captureErrorCode(outcome), .runtimeFailure)
+        let lifecycle = await controller.currentLifecycle()
+        XCTAssertEqual(lifecycle, .failed(.runtimeFailure))
+        let counts = await driver.currentCounts()
+        XCTAssertEqual(counts.stop, 1)
+    }
+
     func testOwnedPCMValidatesFormatAndCannotBeMutatedThroughSourceArray() throws {
         let format = try PCMFormatDescription(sampleRate: 48_000, channelCount: 2)
         var source: [Float] = [0.1, 0.2, 0.3, 0.4]
@@ -55,6 +111,35 @@ final class MicrophoneCaptureTests: XCTestCase {
         XCTAssertThrowsError(try PCMChunk(generation: 1, sequence: 0, format: format, frameCount: 3, sourceSampleTime: 0, samples: source))
         XCTAssertThrowsError(try PCMFormatDescription(sampleRate: .infinity, channelCount: 1))
         XCTAssertThrowsError(try PCMChunk(generation: 1, sequence: 0, format: format, frameCount: 2, sourceSampleTime: -1, samples: [0, 0, 0, 0]))
+    }
+
+    func testPlanarPCMConverterProducesOwnedInterleavedChunksAndValidatesInput() throws {
+        let mono = try PlanarPCMChunkConverter.makeChunk(
+            generation: 3,
+            sequence: 4,
+            sampleRate: 48_000,
+            sourceSampleTime: 240,
+            planarSamples: [[0.1, 0.2]]
+        )
+        XCTAssertEqual(mono.samples, [0.1, 0.2])
+        XCTAssertEqual(mono.format.channelCount, 1)
+        XCTAssertEqual(mono.sourceSampleTime, 240)
+
+        let stereo = try PlanarPCMChunkConverter.makeChunk(
+            generation: 3,
+            sequence: 5,
+            sampleRate: 48_000,
+            sourceSampleTime: 242,
+            planarSamples: [[0.1, 0.2], [0.3, 0.4]]
+        )
+        XCTAssertEqual(stereo.samples, [0.1, 0.3, 0.2, 0.4])
+        XCTAssertEqual(stereo.frameCount, 2)
+        XCTAssertEqual(stereo.sourceSampleTime, 242)
+
+        XCTAssertThrowsError(try PlanarPCMChunkConverter.makeChunk(generation: 0, sequence: 0, sampleRate: 48_000, sourceSampleTime: 0, planarSamples: []))
+        XCTAssertThrowsError(try PlanarPCMChunkConverter.makeChunk(generation: 0, sequence: 0, sampleRate: 48_000, sourceSampleTime: 0, planarSamples: [[0], [0, 1]]))
+        XCTAssertThrowsError(try PlanarPCMChunkConverter.makeChunk(generation: 0, sequence: 0, sampleRate: 48_000, sourceSampleTime: -1, planarSamples: [[0]]))
+        XCTAssertThrowsError(try PlanarPCMChunkConverter.makeChunk(generation: 0, sequence: 0, sampleRate: 48_000, sourceSampleTime: 0, planarSamples: [[.nan]]))
     }
 
     func testSlowOrNonConsumingSpeechDoesNotBlockRecordingAndReportsDrops() async throws {
@@ -108,6 +193,38 @@ final class MicrophoneCaptureTests: XCTestCase {
         XCTAssertEqual(counts.stop, 1)
     }
 
+    func testRecordingConsumerCancellationIsADistinctTerminalFailure() async throws {
+        let driver = SyntheticCaptureDriver()
+        let controller = MicrophoneCaptureController(permission: FakePermission(status: .authorized), driver: driver, monitor: testMonitor())
+        let handle = try await controller.start()
+        let reading = AsyncGate()
+        let consumer = Task { () -> Error? in
+            var iterator = handle.recordingPCM.makeAsyncIterator()
+            await reading.open()
+            do {
+                _ = try await iterator.next()
+                return nil
+            } catch {
+                return error
+            }
+        }
+
+        await reading.wait()
+        consumer.cancel()
+        _ = await consumer.value
+        guard await waitForDriverStop(driver) else {
+            await controller.stop()
+            return XCTFail("Recording cancellation did not terminate its owner stream")
+        }
+
+        let events = await collect(handle.events)
+        XCTAssertEqual(events.filter { $0 == .terminalFailure(.recordingConsumerTerminated) }.count, 1)
+        let lifecycle = await controller.currentLifecycle()
+        let counts = await driver.counts
+        XCTAssertEqual(lifecycle, .failed(.recordingConsumerTerminated))
+        XCTAssertEqual(counts.stop, 1)
+    }
+
     func testDeviceDisconnectRouteChangeAndLateEventsAreTerminalOnce() async throws {
         let driver = SyntheticCaptureDriver()
         let controller = MicrophoneCaptureController(permission: FakePermission(status: .authorized), driver: driver, monitor: testMonitor())
@@ -125,6 +242,33 @@ final class MicrophoneCaptureTests: XCTestCase {
         await driver.emitRuntime(.engineConfigurationChanged)
         let unchanged = await controller.currentLifecycle()
         XCTAssertEqual(unchanged, lifecycle)
+    }
+
+    func testStopAndTerminalFailureRaceFinishesStreamsAndDriverExactlyOnce() async throws {
+        let driver = ControlledCaptureDriver(pauseStop: true)
+        let controller = MicrophoneCaptureController(permission: FakePermission(status: .authorized), driver: driver, monitor: testMonitor())
+        let handle = try await controller.start()
+
+        await driver.emitRuntime(.activeDeviceDisconnected)
+        await waitForLifecycle(controller, .stopping)
+        await controller.stop() // Races the terminal cleanup while it is suspended in driver.stop().
+        await driver.waitForStop()
+        await driver.resumeStop()
+        await waitForLifecycle(controller, .failed(.activeDeviceDisconnected))
+
+        let lifecycle = await controller.currentLifecycle()
+        XCTAssertEqual(lifecycle, .failed(.activeDeviceDisconnected))
+        let events = await collect(handle.events)
+        XCTAssertEqual(events.filter { $0 == .terminalFailure(.activeDeviceDisconnected) }.count, 1)
+        XCTAssertEqual(events.count, 1)
+        do {
+            _ = try await collect(handle.recordingPCM)
+            XCTFail("Expected terminal recording failure")
+        } catch let error as CaptureError {
+            XCTAssertEqual(error.code, .activeDeviceDisconnected)
+        }
+        let counts = await driver.currentCounts()
+        XCTAssertEqual(counts.stop, 1)
     }
 
     func testStartStopRestartRejectsStaleGenerationAndRollsBackStartFailure() async throws {
@@ -181,6 +325,25 @@ final class MicrophoneCaptureTests: XCTestCase {
         XCTAssertEqual(collected[1].monotonicSeconds, 5, accuracy: 0.0001)
     }
 
+    func testHighFrequencyActiveFramesRespectTheDefaultTwentyHertzPublicationLimit() async throws {
+        let clock = ManualClock()
+        let scheduler = ManualScheduler()
+        let monitor = InputSignalMonitor(clock: clock, scheduler: scheduler)
+        let states = monitor.start(generation: 7)
+        for sequence in 0 ..< 200 {
+            clock.advance(by: 0.001)
+            monitor.receive(try chunk(sequence: UInt64(sequence), generation: 7, samples: [1]))
+        }
+        monitor.stop()
+
+        let collected = await collect(states)
+        let active = collected.filter { $0.state == .active }
+        XCTAssertEqual(active.count, 4)
+        for (actual, expected) in zip(active.map(\.monotonicSeconds), [0.001, 0.051, 0.101, 0.151]) {
+            XCTAssertEqual(actual, expected, accuracy: 0.000_001)
+        }
+    }
+
     func testNoInputDoesNotStopCaptureAndRepeatedTicksDoNotSpam() async throws {
         let clock = ManualClock()
         let scheduler = ManualScheduler()
@@ -229,6 +392,32 @@ private actor FakePermission: MicrophonePermissionAuthorizing {
     func requestAuthorization() async -> MicrophonePermissionStatus { requestCount += 1; return requestResult }
 }
 
+private actor ControlledPermission: MicrophonePermissionAuthorizing {
+    private var authorizationContinuation: CheckedContinuation<MicrophonePermissionStatus, Never>?
+    private var statusWaiters: [CheckedContinuation<Void, Never>] = []
+    private var statusWasRequested = false
+
+    func authorizationStatus() async -> MicrophonePermissionStatus {
+        statusWasRequested = true
+        let waiters = statusWaiters
+        statusWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        return await withCheckedContinuation { authorizationContinuation = $0 }
+    }
+
+    func requestAuthorization() async -> MicrophonePermissionStatus { .authorized }
+
+    func waitForAuthorizationStatus() async {
+        guard !statusWasRequested else { return }
+        await withCheckedContinuation { statusWaiters.append($0) }
+    }
+
+    func resumeAuthorization(with status: MicrophonePermissionStatus) {
+        authorizationContinuation?.resume(returning: status)
+        authorizationContinuation = nil
+    }
+}
+
 private actor SyntheticCaptureDriver: MicrophoneCaptureDriving {
     struct Counts: Sendable, Equatable { var prepare = 0; var start = 0; var stop = 0 }
     private var callback: (@Sendable (PCMChunk) -> Void)?
@@ -250,6 +439,88 @@ private actor SyntheticCaptureDriver: MicrophoneCaptureDriving {
     func emit(_ chunk: PCMChunk) { callback?(chunk) }
     func emitRuntime(_ runtime: CaptureRuntimeEvent) { event?(runtime) }
     func currentChunkCallback() -> (@Sendable (PCMChunk) -> Void)? { callback }
+}
+
+private final class ControlledCaptureDriver: MicrophoneCaptureDriving, @unchecked Sendable {
+    struct Counts: Sendable, Equatable { var prepare = 0; var start = 0; var stop = 0 }
+
+    private let lock = NSLock()
+    private let prepareGate: ControlledGate?
+    private let startGate: ControlledGate?
+    private let stopGate: ControlledGate?
+    private var counts = Counts()
+    private var callback: (@Sendable (PCMChunk) -> Void)?
+    private var runtimeEvent: (@Sendable (CaptureRuntimeEvent) -> Void)?
+
+    init(pausePrepare: Bool = false, pauseStart: Bool = false, pauseStop: Bool = false) {
+        prepareGate = pausePrepare ? ControlledGate() : nil
+        startGate = pauseStart ? ControlledGate() : nil
+        stopGate = pauseStop ? ControlledGate() : nil
+    }
+
+    func prepare(generation: UInt64, onChunk: @escaping @Sendable (PCMChunk) -> Void, onRuntimeEvent: @escaping @Sendable (CaptureRuntimeEvent) -> Void) async throws -> InputDeviceSnapshot {
+        lock.withLock {
+            counts.prepare += 1
+            callback = onChunk
+            runtimeEvent = onRuntimeEvent
+        }
+        await prepareGate?.arriveAndWait()
+        return InputDeviceSnapshot(identity: "controlled-input", displayName: "Controlled Input")
+    }
+
+    func start() async throws {
+        lock.withLock { counts.start += 1 }
+        await startGate?.arriveAndWait()
+    }
+
+    func stop() async {
+        lock.withLock { counts.stop += 1 }
+        await stopGate?.arriveAndWait()
+        lock.withLock {
+            callback = nil
+            runtimeEvent = nil
+        }
+    }
+
+    func emitRuntime(_ event: CaptureRuntimeEvent) async {
+        let callback = lock.withLock { runtimeEvent }
+        callback?(event)
+    }
+    func currentCounts() async -> Counts { lock.withLock { counts } }
+    func waitForPrepare() async { await prepareGate?.waitForArrival() }
+    func waitForStart() async { await startGate?.waitForArrival() }
+    func waitForStop() async { await stopGate?.waitForArrival() }
+    func resumePrepare() async { await prepareGate?.release() }
+    func resumeStart() async { await startGate?.release() }
+    func resumeStop() async { await stopGate?.release() }
+
+}
+
+private actor ControlledGate {
+    private var arrived = false
+    private var released = false
+    private var arrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func arriveAndWait() async {
+        arrived = true
+        let waiters = arrivalWaiters
+        arrivalWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { releaseContinuation = $0 }
+    }
+
+    func waitForArrival() async {
+        guard !arrived else { return }
+        await withCheckedContinuation { arrivalWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
 }
 
 private final class ManualClock: MonotonicClock, @unchecked Sendable {
@@ -285,4 +556,42 @@ private func result<T: Sendable>(_ operation: @escaping @Sendable () async throw
 
 private func XCTAssertThrowsErrorAsync<T>(_ expression: @autoclosure () async throws -> T, _ verify: (Error) -> Void) async {
     do { _ = try await expression(); XCTFail("Expected error") } catch { verify(error) }
+}
+
+private func captureErrorCode<T>(_ result: Result<T, Error>) -> CaptureErrorCode? {
+    guard case let .failure(error) = result else { return nil }
+    return (error as? CaptureError)?.code
+}
+
+private func waitForLifecycle(_ controller: MicrophoneCaptureController, _ expected: CaptureLifecycle) async {
+    for _ in 0 ..< 1_000 {
+        if await controller.currentLifecycle() == expected { return }
+        await Task.yield()
+    }
+    XCTFail("Lifecycle did not reach \(expected)")
+}
+
+private func waitForDriverStop(_ driver: SyntheticCaptureDriver) async -> Bool {
+    for _ in 0 ..< 1_000 {
+        if await driver.counts.stop == 1 { return true }
+        await Task.yield()
+    }
+    return false
+}
+
+private actor AsyncGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func open() {
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
 }

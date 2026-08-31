@@ -112,9 +112,11 @@ final class InputSignalMonitor: @unchecked Sendable {
         let isRecovery = stats.rmsDBFS >= configuration.recoveryThresholdDBFS
         let isSignificant = stats.rmsDBFS >= configuration.inactiveThresholdDBFS
         if isSignificant { lastActiveAt = now }
+        let previousState = signalState
         if signalState == .noInput && isRecovery { signalState = .active }
         else if signalState == .observing && isSignificant { signalState = .active }
-        publishIfNeeded(sequence: chunk.sequence, now: now, stats: stats, force: isRecovery)
+        // A transition must be visible immediately; otherwise normal active frames remain throttled.
+        publishIfNeeded(sequence: chunk.sequence, now: now, stats: stats, force: signalState != previousState)
     }
 
     func stop() {

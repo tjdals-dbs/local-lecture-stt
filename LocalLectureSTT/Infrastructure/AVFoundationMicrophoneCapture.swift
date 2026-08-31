@@ -185,14 +185,8 @@ private final class AVAudioTapBridge: @unchecked Sendable {
             emit(.pcmCopyFailed)
             return
         }
-        var copied: [Float] = []
-        copied.reserveCapacity(frames * channels)
-        for frame in 0 ..< frames {
-            for channel in 0 ..< channels {
-                let sample = channelData[channel][frame]
-                guard sample.isFinite else { emit(.pcmCopyFailed); return }
-                copied.append(sample)
-            }
+        let planarSamples = (0 ..< channels).map {
+            Array(UnsafeBufferPointer(start: channelData[$0], count: frames))
         }
         let sourceTime: Int64
         if time.sampleTime >= 0 {
@@ -202,8 +196,13 @@ private final class AVAudioTapBridge: @unchecked Sendable {
             sourceTime = sampleTimeFallback(frameCount: frames)
         }
         do {
-            let format = try PCMFormatDescription(sampleRate: buffer.format.sampleRate, channelCount: channels)
-            let chunk = try PCMChunk(generation: generation, sequence: sequence, format: format, frameCount: frames, sourceSampleTime: sourceTime, samples: copied)
+            let chunk = try PlanarPCMChunkConverter.makeChunk(
+                generation: generation,
+                sequence: sequence,
+                sampleRate: buffer.format.sampleRate,
+                sourceSampleTime: sourceTime,
+                planarSamples: planarSamples
+            )
             lock.lock(); let shouldDeliver = active; lock.unlock()
             if shouldDeliver { onChunk(chunk) }
         } catch {

@@ -85,6 +85,7 @@ enum CaptureErrorCode: String, Sendable, Equatable {
     case pcmCopyFailed
     case recordingBackpressure
     case recordingConsumerTerminated
+    case startInterrupted
     case activeDeviceDisconnected
     case inputRouteChanged
     case engineConfigurationChanged
@@ -161,6 +162,11 @@ actor MicrophoneCaptureController {
     private let monitor: InputSignalMonitor
     private var lifecycle: CaptureLifecycle = .idle
     private var generation: UInt64 = 0
+    private var activeAttempt: UInt64?
+    private var endingAttempt: UInt64?
+    private var endingFailure: CaptureError?
+    private var lastTerminalAttempt: UInt64?
+    private var lastTerminalFailure: CaptureError?
     private var distributor: PCMDistributor?
 
     init(
@@ -183,38 +189,47 @@ actor MicrophoneCaptureController {
         case .starting, .running, .stopping: throw CaptureError(.alreadyRunning)
         }
         // Mark before awaiting permission status so concurrent starts cannot both install a tap.
+        generation &+= 1
+        let currentAttempt = generation
+        activeAttempt = currentAttempt
+        lastTerminalAttempt = nil
+        lastTerminalFailure = nil
         lifecycle = .starting
         let status = await permission.authorizationStatus()
+        try ensureStarting(attempt: currentAttempt)
         guard status == .authorized else {
             let error = CaptureError.permissionError(for: status)
+            activeAttempt = nil
             lifecycle = .failed(error.code)
+            lastTerminalAttempt = currentAttempt
+            lastTerminalFailure = error
             throw error
         }
 
-        generation &+= 1
-        let currentGeneration = generation
         let distributor = PCMDistributor(configuration: buffers) { [weak self] error in
             // This is only invoked once for a terminal enqueue failure, never once per audio buffer.
-            Task { await self?.fail(error, generation: currentGeneration) }
+            Task { await self?.fail(error, attempt: currentAttempt) }
         }
         self.distributor = distributor
-        let signalStates = monitor.start(generation: currentGeneration)
+        let signalStates = monitor.start(generation: currentAttempt)
 
         do {
             let device = try await driver.prepare(
-                generation: currentGeneration,
+                generation: currentAttempt,
                 onChunk: { [weak distributor, weak monitor] chunk in
                     guard let distributor, distributor.accept(chunk) else { return }
                     monitor?.receive(chunk)
                 },
                 onRuntimeEvent: { [weak self] event in
-                    Task { await self?.fail(event.error, generation: currentGeneration) }
+                    Task { await self?.fail(event.error, attempt: currentAttempt) }
                 }
             )
+            try ensureStarting(attempt: currentAttempt)
             try await driver.start()
+            try ensureStarting(attempt: currentAttempt)
             lifecycle = .running
             return CaptureHandle(
-                generation: currentGeneration,
+                generation: currentAttempt,
                 device: device,
                 recordingPCM: distributor.recordingStream,
                 speechPCM: distributor.speechStream,
@@ -222,44 +237,80 @@ actor MicrophoneCaptureController {
                 inputSignalStates: signalStates
             )
         } catch let error as CaptureError {
-            await rollbackStart(error)
-            throw error
+            if error.code == .startInterrupted { throw error }
+            throw await rollbackStart(error, attempt: currentAttempt)
         } catch {
             let typed = CaptureError(.engineStartFailed)
-            await rollbackStart(typed)
-            throw typed
+            throw await rollbackStart(typed, attempt: currentAttempt)
         }
     }
 
     func stop() async {
-        guard lifecycle == .running || lifecycle == .starting else { return }
+        guard let attempt = activeAttempt, lifecycle == .running || lifecycle == .starting else { return }
         lifecycle = .stopping
-        distributor?.closeIntake()
-        await driver.stop()
-        monitor.stop()
-        distributor?.finishNormally()
+        endingAttempt = attempt
+        endingFailure = nil
+        let endingDistributor = distributor
         distributor = nil
+        endingDistributor?.closeIntake()
+        monitor.stop()
+        endingDistributor?.finishNormally()
+        await driver.stop()
+        guard activeAttempt == attempt, lifecycle == .stopping, endingAttempt == attempt else { return }
+        activeAttempt = nil
+        endingAttempt = nil
         lifecycle = .idle
     }
 
-    private func rollbackStart(_ error: CaptureError) async {
-        distributor?.closeIntake()
-        await driver.stop()
-        monitor.stop()
-        distributor?.finish(with: error)
+    private func rollbackStart(_ error: CaptureError, attempt: UInt64) async -> CaptureError {
+        guard activeAttempt == attempt, lifecycle == .starting else {
+            return interruptionError(for: attempt)
+        }
+        lifecycle = .stopping
+        endingAttempt = attempt
+        endingFailure = error
+        let endingDistributor = distributor
         distributor = nil
+        endingDistributor?.closeIntake()
+        monitor.stop()
+        endingDistributor?.finish(with: error)
+        await driver.stop()
+        guard activeAttempt == attempt, lifecycle == .stopping, endingAttempt == attempt else { return interruptionError(for: attempt) }
+        activeAttempt = nil
+        endingAttempt = nil
         lifecycle = .failed(error.code)
+        lastTerminalAttempt = attempt
+        lastTerminalFailure = error
+        return error
     }
 
-    private func fail(_ error: CaptureError, generation eventGeneration: UInt64) async {
-        guard eventGeneration == generation, lifecycle == .running || lifecycle == .starting else { return }
+    private func fail(_ error: CaptureError, attempt eventAttempt: UInt64) async {
+        guard activeAttempt == eventAttempt, lifecycle == .running || lifecycle == .starting else { return }
         lifecycle = .stopping
-        distributor?.closeIntake()
-        await driver.stop()
-        monitor.stop()
-        distributor?.finish(with: error)
+        endingAttempt = eventAttempt
+        endingFailure = error
+        let endingDistributor = distributor
         distributor = nil
+        endingDistributor?.closeIntake()
+        monitor.stop()
+        endingDistributor?.finish(with: error)
+        await driver.stop()
+        guard activeAttempt == eventAttempt, lifecycle == .stopping, endingAttempt == eventAttempt else { return }
+        activeAttempt = nil
+        endingAttempt = nil
         lifecycle = .failed(error.code)
+        lastTerminalAttempt = eventAttempt
+        lastTerminalFailure = error
+    }
+
+    private func ensureStarting(attempt: UInt64) throws {
+        guard activeAttempt == attempt, lifecycle == .starting else { throw interruptionError(for: attempt) }
+    }
+
+    private func interruptionError(for attempt: UInt64) -> CaptureError {
+        if endingAttempt == attempt, let endingFailure { return endingFailure }
+        if lastTerminalAttempt == attempt, let lastTerminalFailure { return lastTerminalFailure }
+        return CaptureError(.startInterrupted)
     }
 }
 
@@ -306,6 +357,10 @@ private final class PCMDistributor: @unchecked Sendable {
         var eventContinuation: AsyncStream<CaptureEvent>.Continuation!
         eventStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { eventContinuation = $0 }
         events = eventContinuation
+        recording.onTermination = { [weak self] _ in
+            // `finish` may synchronously invoke onTermination; hop out of its lock before inspecting state.
+            Task { self?.recordingConsumerTerminated() }
+        }
     }
 
     func accept(_ chunk: PCMChunk) -> Bool {
@@ -314,11 +369,19 @@ private final class PCMDistributor: @unchecked Sendable {
         guard acceptsInput, !finished else { lock.unlock(); return false }
         switch recording.yield(chunk) {
         case .enqueued: break
-        case .dropped, .terminated:
+        case .dropped:
             terminalError = CaptureError(.recordingBackpressure)
             acceptsInput = false
             finished = true
             events.yield(.terminalFailure(.recordingBackpressure))
+            recording.finish(throwing: terminalError)
+            speech.finish(throwing: terminalError)
+            events.finish()
+        case .terminated:
+            terminalError = CaptureError(.recordingConsumerTerminated)
+            acceptsInput = false
+            finished = true
+            events.yield(.terminalFailure(.recordingConsumerTerminated))
             recording.finish(throwing: terminalError)
             speech.finish(throwing: terminalError)
             events.finish()
@@ -345,6 +408,21 @@ private final class PCMDistributor: @unchecked Sendable {
 
     func closeIntake() {
         lock.lock(); acceptsInput = false; lock.unlock()
+    }
+
+    private func recordingConsumerTerminated() {
+        var terminalError: CaptureError?
+        lock.lock()
+        if acceptsInput, !finished {
+            terminalError = CaptureError(.recordingConsumerTerminated)
+            acceptsInput = false
+            finished = true
+            events.yield(.terminalFailure(.recordingConsumerTerminated))
+            speech.finish(throwing: terminalError)
+            events.finish()
+        }
+        lock.unlock()
+        if let terminalError { terminal(terminalError) }
     }
 
     func finishNormally() { finish(event: .stopped, error: nil) }
