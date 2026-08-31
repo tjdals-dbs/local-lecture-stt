@@ -92,3 +92,9 @@ Each generation exposes independent bounded streams: recording uses `bufferingOl
 `InputSignalMonitor` supplies a throttled stream of normalized peak, RMS dBFS, peak dBFS, state, sequence, and monotonic time. It is independent of VAD. A scheduler checks for no frames as well as silent frames; after 5 seconds without signal at or above -60 dBFS it emits one `noInput` state without stopping capture. Signal at or above -55 dBFS clears it. T06 consumes recording PCM for the recovery writer; T07 consumes device/level/capture state; T18/T19 consume the best-effort speech stream and perform their own 16 kHz conversion/VAD.
 
 의도적으로 아직 구현하지 않은 항목은 actual audio file writer/finalization, recording-session lifecycle and UI, STT, journal compact, derived file rendering, session recovery와 전체 세션 UI다.
+
+### T06 recoverable fragmented audio writer
+
+`AudioRecorder` is an Application-only contract with framework-free Sendable lifecycle, summary, error, and event values. `AVFoundationAudioRecorder` is its Infrastructure actor implementation. It fixes a `SessionLocation` and capture generation, verifies the pre-created non-symlink session/recovery layout, rejects an existing `recovery/audio.recovery.mov`, and never deletes a partial output.
+
+`StorageRootManager.acquireWriteLease` holds scoped root access from writer configuration through asynchronous `finishWriting`; `StorageRootWriteLease.release()` is idempotent. The writer emits an audio-only `.mov` with AAC-LC mono 48 kHz, 96 kbps target settings, a 1-second initial fragment interval and 10-second following interval. A persistent `AVAudioConverter` converts owned source PCM to mono 48 kHz; cumulative converted frames define a continuous zero-based output timeline. T07 will combine the capture stream, recorder events, and session journal; T08 will finalise the retained recovery MOV; T09 will recover incomplete sessions.

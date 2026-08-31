@@ -9,8 +9,8 @@
 
 - Current milestone: M1 safe recorder
 - Current Task: none in progress
-- Next action: T06 recoverable fragmented audio writer
-- Latest completed Task: T05 microphone capture and input signal monitor
+- Next action: T07 recording session coordinator and minimal recording UI
+- Latest completed Task: T06 recoverable fragmented audio writer
 - Latest passed gate: T01 initial runnable baseline
 - Application implementation: executable initial SwiftUI shell
 
@@ -42,11 +42,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T03 file repository and root folder permission | Complete on `dev`; `main` remains on the verified T01 baseline | Bookmark registry/access lifecycle, active/historical root catalog, session layout, atomic JSON, JSONL append, 38 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
 | T04 SQLite session catalog and filesystem reconciliation | Complete on `dev`; `main` remains on the verified T01 baseline | SQLite v1 schema/index validation, file-authoritative rebuild/reconciliation, unavailable-root and conflict preservation, corrupt-sidecar quarantine, 76 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
 | T05 microphone capture and input signal monitor | Complete on `dev`; `main` remains on the verified T01 baseline | Typed permission/capture contracts, owned Float32 PCM, bounded recording/STT fan-out, race-safe lifecycle, throttled input level/no-input monitoring, active-device failure handling, 95 unit tests, 1 integration test, unsigned arm64 Debug build, and task/dev CI |
+| T06 recoverable fragmented audio writer | Complete on `dev`; `main` remains on the verified T01 baseline | Framework-independent recorder contract, scoped write lease, stateful PCM conversion, AAC mono 48 kHz fragmented recovery MOV, active-prefix/read-decode test, 97 unit tests, 1 integration test, unsigned arm64 Debug build, and task/dev CI |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-T05 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T06 is ready to start on a fresh task branch.
+T06 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T07 is ready to start on a fresh task branch.
 
 ## Gate status
 
@@ -73,14 +74,13 @@ T05 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN
 - No current blocker.
 - The app is intentionally unsigned for local and CI verification; a developer signing identity is required only for separately installed signed builds.
 
-## T05 handoff
+## T06 handoff
 
-T05 is complete. T06 can start from the latest `dev` baseline on a fresh `task/t06-*` branch.
+T06 is complete. T07 can start from the latest `dev` baseline on a fresh `task/t07-*` branch.
 
-- `dev` now has framework-independent microphone permission/capture contracts, owned frame-major Float32 interleaved PCM chunks, and a single capture lifecycle actor. The live adapter uses `AVAudioEngine` input tap plus Core Audio default-input/alive checks without exposing framework types past Infrastructure.
-- Recording uses a bounded loss-intolerant stream: overflow is one typed terminal `recordingBackpressure` failure. The independent bounded STT stream keeps the newest chunks and reports discontinuities; it cannot stall or terminate recording. `InputSignalMonitor` provides throttled peak/RMS state and a controlled-clock 5-second no-input warning that does not stop capture.
-- The full suite now has 95 unit tests and 1 integration test (96 total); `LocalLectureSTTTests/MicrophoneCaptureTests.swift` includes controlled-continuation start-attempt invalidation during permission/prepare/start, runtime and stop/device-failure races, recording-consumer cancellation, 20 Hz meter throttling, and owned planar-to-interleaved PCM conversion. Hardware/TCC, physical input levels, and real route/device-disconnect behavior remain manual only; the signed opt-in procedure is documented in `docs/DEVELOPMENT.md`.
-- T06 should attach its recovery writer to the recording PCM stream. It must preserve T05's loss-intolerant overflow behavior and must not require the STT stream to drain.
+- `AudioRecorder` now exposes framework-free start/append/flush/stop, state, summary, stable failure code, and terminal event values. `AVFoundationAudioRecorder` is the serial owner of a persistent `AVAudioConverter` and audio-only `AVAssetWriter`; it produces `recovery/audio.recovery.mov` using AAC-LC mono 48 kHz/96 kbps with 1-second initial and 10-second subsequent fragments.
+- `StorageRootManager.acquireWriteLease` retains security-scoped root access until async writer finish, closes it exactly once, validates the pre-existing non-symlink session/recovery layout, rejects collision, and preserves partial artifacts on any writer failure. Recorder tests prove a synthetic recording works without any speech/STT consumer, sequence violations fail without silent loss, existing bytes are preserved, active writer output opens in AVFoundation, and the completed MOV has fragment evidence and a decodable AAC track.
+- The full suite now has 97 unit tests and 1 integration test (98 total). A locally signed sandbox root and physical microphone remain manual T07+ verification; forced-quit/power-loss recovery remains T09/T26 scope.
 
 ## Status update rules
 

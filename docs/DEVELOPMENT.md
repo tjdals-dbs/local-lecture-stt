@@ -21,6 +21,12 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
 The project is `LocalLectureSTT.xcodeproj` and its shared scheme is `LocalLectureSTT`.
 
+## T06 recovery-writer verification
+
+`AudioRecorderTests` generates PCM in a temporary disposable root; it does not request microphone permission or use a real lecture recording. It verifies a still-running fragmented MOV can be opened by `AVURLAsset`, then verifies the completed file has one AAC audio track at mono 48 kHz and contains fragmented-movie evidence. Run it with the normal test command below or target `LocalLectureSTTTests/AudioRecorderTests`.
+
+For a signed sandbox check after T07 supplies the recording UI, choose an empty disposable root (never a real lecture root), record for at least 20 seconds, stop, and inspect `recovery/audio.recovery.mov` in QuickTime Player or with AVFoundation. At T06, the MOV remains and `audio.m4a` must not exist; T08 owns finalization. This unsigned CI procedure does not prove persisted sandbox scope behavior, physical microphone behavior, power-loss windows, or forced-quit recovery; T09/T26 cover the latter recovery matrix. Do not commit any test recordings.
+
 ## Verification record
 
 On 2026-08-30, this baseline was verified with Xcode 26.6 (Build 17F113), Swift 6.3.3, macOS 26.6.2, and an arm64 host. The unsigned Debug build and unit/integration tests passed. The app exposes the minimal storage-root state in its main window and Settings; signed sandbox bookmark persistence still requires the manual procedure below.
