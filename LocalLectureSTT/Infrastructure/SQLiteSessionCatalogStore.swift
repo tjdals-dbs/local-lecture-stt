@@ -196,8 +196,15 @@ actor SQLiteSessionCatalogStore: SessionCatalogStore {
         }
         guard let sessionUUID = UUID(uuidString: try text(0)), let rootUUID = UUID(uuidString: try text(1)),
               let status = SessionStatus(rawValue: try text(6)), let outcome = CaptureOutcome(rawValue: try text(7)), let presence = CatalogPresence(rawValue: try text(8)) else { throw CatalogError(.invalidStoredValue) }
-        let duration = try MediaMilliseconds(try integer(5))
-        return SessionCatalogItem(sessionID: SessionID(sessionUUID), rootID: StorageRootID(rootUUID), folderName: try SessionFolderName(validating: text(2)), title: try text(3), createdAt: time(try integer(4)), activeDuration: duration, metadataStatus: status, captureOutcome: outcome, presence: presence, metadataLastUpdatedAt: time(try integer(9)), catalogUpdatedAt: time(try integer(10)))
+        let duration: MediaMilliseconds
+        let folderName: SessionFolderName
+        do {
+            duration = try MediaMilliseconds(try integer(5))
+            folderName = try SessionFolderName(validating: text(2))
+        } catch {
+            throw CatalogError(.invalidStoredValue)
+        }
+        return SessionCatalogItem(sessionID: SessionID(sessionUUID), rootID: StorageRootID(rootUUID), folderName: folderName, title: try text(3), createdAt: time(try integer(4)), activeDuration: duration, metadataStatus: status, captureOutcome: outcome, presence: presence, metadataLastUpdatedAt: time(try integer(9)), catalogUpdatedAt: time(try integer(10)))
     }
 
     private static func prepareDirectory(_ directory: URL) throws {

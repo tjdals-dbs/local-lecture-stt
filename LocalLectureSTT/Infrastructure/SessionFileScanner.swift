@@ -56,12 +56,12 @@ actor SessionFileScanner: SessionFileScanning {
 
         for child in children {
             let folder = child.lastPathComponent
-            guard (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
-            let values = try? child.resourceValues(forKeys: [.isSymbolicLinkKey])
+            let values = try? child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
             if values?.isSymbolicLink == true {
                 issues.append(CatalogIssue(code: .sessionDirectorySymlink, rootID: rootID, folderName: folder))
                 continue
             }
+            guard values?.isDirectory == true else { continue }
             let folderName: SessionFolderName
             do { folderName = try SessionFolderName(validating: folder) }
             catch {
