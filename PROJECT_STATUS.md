@@ -21,7 +21,7 @@
 - Local branch: `dev`
 - Remote baseline: `origin/dev` contains the verified T05 integration; `origin/main` remains the verified T01 runnable baseline
 - `dev` branch: T05 microphone capture integration branch, tracked at `origin/dev`
-- `main` branch: created and tracked at `origin/main`; it remains at the verified T01 baseline while `dev` has advanced through T02
+- `main` branch: created and tracked at `origin/main`; it remains at the verified T01 baseline while `dev` has advanced through T05
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
 - Task policy: one fresh implementation session and one `task/tNN-*` branch per Task
@@ -41,7 +41,7 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T02 domain model, schemas, and state machine | Complete on `dev`; `main` remains on the verified T01 baseline | Domain DTO and transcript journal round-trips, lifecycle/checkpoint rules, unsigned arm64 Debug build, 17 unit tests, integration smoke test, and task/dev CI |
 | T03 file repository and root folder permission | Complete on `dev`; `main` remains on the verified T01 baseline | Bookmark registry/access lifecycle, active/historical root catalog, session layout, atomic JSON, JSONL append, 38 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
 | T04 SQLite session catalog and filesystem reconciliation | Complete on `dev`; `main` remains on the verified T01 baseline | SQLite v1 schema/index validation, file-authoritative rebuild/reconciliation, unavailable-root and conflict preservation, corrupt-sidecar quarantine, 76 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
-| T05 microphone capture and input signal monitor | Complete on `dev`; `main` remains on the verified T01 baseline | Typed permission/capture contracts, owned Float32 PCM, bounded recording/STT fan-out, race-safe lifecycle, throttled input level/no-input monitoring, active-device failure handling, 96 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
+| T05 microphone capture and input signal monitor | Complete on `dev`; `main` remains on the verified T01 baseline | Typed permission/capture contracts, owned Float32 PCM, bounded recording/STT fan-out, race-safe lifecycle, throttled input level/no-input monitoring, active-device failure handling, 95 unit tests, 1 integration test, unsigned arm64 Debug build, and task/dev CI |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
@@ -79,7 +79,7 @@ T05 is complete. T06 can start from the latest `dev` baseline on a fresh `task/t
 
 - `dev` now has framework-independent microphone permission/capture contracts, owned frame-major Float32 interleaved PCM chunks, and a single capture lifecycle actor. The live adapter uses `AVAudioEngine` input tap plus Core Audio default-input/alive checks without exposing framework types past Infrastructure.
 - Recording uses a bounded loss-intolerant stream: overflow is one typed terminal `recordingBackpressure` failure. The independent bounded STT stream keeps the newest chunks and reports discontinuities; it cannot stall or terminate recording. `InputSignalMonitor` provides throttled peak/RMS state and a controlled-clock 5-second no-input warning that does not stop capture.
-- The full suite now has 96 tests; `LocalLectureSTTTests/MicrophoneCaptureTests.swift` includes controlled-continuation start-attempt invalidation during permission/prepare/start, runtime and stop/device-failure races, recording-consumer cancellation, 20 Hz meter throttling, and owned planar-to-interleaved PCM conversion. Hardware/TCC, physical input levels, and real route/device-disconnect behavior remain manual only; the signed opt-in procedure is documented in `docs/DEVELOPMENT.md`.
+- The full suite now has 95 unit tests and 1 integration test (96 total); `LocalLectureSTTTests/MicrophoneCaptureTests.swift` includes controlled-continuation start-attempt invalidation during permission/prepare/start, runtime and stop/device-failure races, recording-consumer cancellation, 20 Hz meter throttling, and owned planar-to-interleaved PCM conversion. Hardware/TCC, physical input levels, and real route/device-disconnect behavior remain manual only; the signed opt-in procedure is documented in `docs/DEVELOPMENT.md`.
 - T06 should attach its recovery writer to the recording PCM stream. It must preserve T05's loss-intolerant overflow behavior and must not require the STT stream to drain.
 
 ## Status update rules
