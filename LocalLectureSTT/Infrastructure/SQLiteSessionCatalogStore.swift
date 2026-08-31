@@ -72,6 +72,17 @@ actor SQLiteSessionCatalogStore: SessionCatalogStore {
 
     func recoveredFromCorruption() -> Bool { didRecoverFromCorruption }
 
+    func sessionID(at rootID: StorageRootID, folderName: SessionFolderName) throws -> SessionID? {
+        let statement = try prepare("SELECT session_id FROM sessions WHERE root_id=? AND folder_name=?")
+        defer { sqlite3_finalize(statement) }
+        try bindText(rootID.rawValue.uuidString.lowercased(), to: statement, index: 1)
+        try bindText(folderName.rawValue, to: statement, index: 2)
+        let result = sqlite3_step(statement)
+        if result == SQLITE_DONE { return nil }
+        guard result == SQLITE_ROW, let value = sqlite3_column_text(statement, 0), let uuid = UUID(uuidString: String(cString: value)) else { throw CatalogError(.invalidStoredValue) }
+        return SessionID(uuid)
+    }
+
     func apply(_ results: [RootScanResult], catalogUpdatedAt: AbsoluteTime) throws {
         var allIDs = Set<SessionID>()
         var allLocations = Set<String>()

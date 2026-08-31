@@ -40,7 +40,7 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T01 macOS project and module boundaries | Complete on `dev`; first `main` baseline created from the same verified commit | Xcode 26.6 unsigned arm64 Debug build, two smoke tests, manual app launch, and `task/**`/`dev`/`main` CI |
 | T02 domain model, schemas, and state machine | Complete on `dev`; `main` remains on the verified T01 baseline | Domain DTO and transcript journal round-trips, lifecycle/checkpoint rules, unsigned arm64 Debug build, 17 unit tests, integration smoke test, and task/dev CI |
 | T03 file repository and root folder permission | Complete on `dev`; `main` remains on the verified T01 baseline | Bookmark registry/access lifecycle, active/historical root catalog, session layout, atomic JSON, JSONL append, 38 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
-| T04 SQLite session catalog and filesystem reconciliation | Complete on `dev`; `main` remains on the verified T01 baseline | SQLite v1 schema/index validation, file-authoritative rebuild/reconciliation, unavailable-root and conflict preservation, corrupt-sidecar quarantine, 47 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
+| T04 SQLite session catalog and filesystem reconciliation | Complete on `dev`; `main` remains on the verified T01 baseline | SQLite v1 schema/index validation, file-authoritative rebuild/reconciliation, unavailable-root and conflict preservation, corrupt-sidecar quarantine, 48 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
@@ -77,7 +77,7 @@ T04 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN
 T04 is complete. T05 can start from the latest `dev` baseline on a fresh `task/t05-*` branch.
 
 - `dev` contains T03 file-authoritative session roots plus a rebuildable SQLite catalog at `Application Support/LocalLectureSTT/Catalog/session-catalog.sqlite3`; `main` remains at the verified T01 baseline.
-- T04 adds URL-free catalog contracts, lexical read-only root scanning, explicit startup failures, complete-only missing sweeps, and catalog-preserving handling for unreadable, unavailable, duplicate, and location-conflict sessions. A malformed/corrupt v1 database is sidecar-first quarantined and rebuilt; a future schema is left byte-for-byte untouched.
+- T04 adds URL-free catalog contracts, lexical read-only root scanning, explicit startup failures, complete-only missing sweeps, and catalog-preserving handling for unreadable, unavailable, duplicate, and location-conflict sessions. Ready startup calls reuse their completed report; only successful root change events trigger a new reconciliation. A malformed/corrupt v1 database is sidecar-first quarantined and rebuilt; a future schema is left byte-for-byte untouched.
 - `LocalLectureSTTTests/SessionCatalogTests.swift` covers actual root-manager → scanner → reconciler → store rebuild, metadata updates, missing preservation, active/historical/unavailable roots, malformed metadata, transaction conflicts, schema/future/corrupt sidecar cases, quarantine faults, and startup coalescing. The unsigned CI does not prove signed sandbox bookmark persistence; the manual same-signed-build procedure remains in `docs/DEVELOPMENT.md`.
 - T05 can add microphone capture without coupling recording correctness to this rebuildable derived catalog.
 

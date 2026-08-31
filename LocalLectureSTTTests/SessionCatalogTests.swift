@@ -88,6 +88,26 @@ final class SessionCatalogTests: XCTestCase {
         try await store.close()
     }
 
+    func testExistingLocationConflictPreservesLastKnownRowAsUnreadable() async throws {
+        let root = StorageRootID()
+        let existing = try projection(id: "abababab-2222-3333-4444-555555555555", created: 100, title: "last known", status: .completed, root: root)
+        let conflictingID = SessionID(UUID(uuidString: "cdcdcdcd-2222-3333-4444-555555555555")!)
+        let metadata = try SessionMetadataDocument(sessionId: conflictingID, title: "must not overwrite", status: .recording, captureOutcome: .inProgress, createdAt: existing.createdAt, activeDurationMs: existing.activeDuration, languageMode: .automatic, transcript: TranscriptSummary(segmentCount: try TranscriptSegmentCount(0)), appVersion: "test", osVersion: "test", lastUpdatedAt: existing.metadataLastUpdatedAt)
+        let conflict = CatalogProjection(metadata: metadata, location: SessionLocation(rootID: root, sessionID: conflictingID, folderName: existing.location.folderName))
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: temporaryDirectory)
+        try await store.apply([result(rootID: root, projections: [existing])], catalogUpdatedAt: AbsoluteTime(Date()))
+        let reconciler = SessionCatalogReconciler(scanner: StaticScanner(results: [result(rootID: root, projections: [conflict])]), store: store)
+        let report = try await reconciler.reconcile()
+        XCTAssertTrue(report.issues.contains { $0.code == .locationConflict })
+        let items = try await reconciler.orderedItems()
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0].sessionID, existing.location.sessionID)
+        XCTAssertEqual(items[0].title, "last known")
+        XCTAssertEqual(items[0].presence, .unreadable)
+        XCTAssertEqual(items[0].displayStatus, .error)
+        try await store.close()
+    }
+
     func testLiveRootScannerReconcilerRebuildsAndPreservesMissingRows() async throws {
         let root = temporaryDirectory.appendingPathComponent("root", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -221,6 +241,17 @@ final class SessionCatalogTests: XCTestCase {
         XCTAssertEqual(calls, 2)
         try await Task.sleep(nanoseconds: 40_000_000)
         if case .ready = coordinator.state {} else { XCTFail("expected ready state") }
+        coordinator.start(); coordinator.start()
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let readyCalls = await catalog.callCount()
+        XCTAssertEqual(readyCalls, 2, "ready start must reuse the completed report")
+        coordinator.refreshAfterRootChange()
+        for _ in 0..<100 {
+            if await catalog.callCount() == 3 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let refreshedCalls = await catalog.callCount()
+        XCTAssertEqual(refreshedCalls, 3)
     }
 
     private func projection(id: String, created: TimeInterval, title: String, status: SessionStatus, root: StorageRootID = StorageRootID()) throws -> CatalogProjection {
@@ -282,6 +313,12 @@ private actor TestCatalog: SessionCataloging {
     }
     func orderedItems() async throws -> [SessionCatalogItem] { [] }
     func callCount() -> Int { calls }
+}
+
+private actor StaticScanner: SessionFileScanning {
+    let results: [RootScanResult]
+    init(results: [RootScanResult]) { self.results = results }
+    func scan() async throws -> [RootScanResult] { results }
 }
 
 private actor CatalogBookmarkCodec: SecurityScopedBookmarkCodec {

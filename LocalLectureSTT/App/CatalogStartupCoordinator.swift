@@ -17,6 +17,16 @@ final class CatalogStartupCoordinator: ObservableObject {
     init(catalog: any SessionCataloging) { self.catalog = catalog }
 
     func start() {
+        if case .ready = state { return }
+        beginReconciliation()
+    }
+
+    func refreshAfterRootChange() {
+        if startupTask != nil { refreshPending = true }
+        else { beginReconciliation() }
+    }
+
+    private func beginReconciliation() {
         if startupTask != nil { return }
         state = .starting
         startupTask = Task { [weak self] in
@@ -32,13 +42,8 @@ final class CatalogStartupCoordinator: ObservableObject {
             self.startupTask = nil
             if self.refreshPending {
                 self.refreshPending = false
-                self.start()
+                self.beginReconciliation()
             }
         }
-    }
-
-    func refreshAfterRootChange() {
-        if startupTask != nil { refreshPending = true }
-        else { start() }
     }
 }

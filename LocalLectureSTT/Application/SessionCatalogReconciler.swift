@@ -23,7 +23,7 @@ actor SessionCatalogReconciler: SessionCataloging {
                 throw CatalogError(.filesystemScanFailed)
             }
         }
-        let (results, _) = Self.withConflictIssues(scanned)
+        let results = try await withConflictIssues(scanned)
         let issues = results.flatMap(\.issues)
         let recovered = await store.recoveredFromCorruption()
         try await store.apply(results, catalogUpdatedAt: now())
@@ -35,7 +35,7 @@ actor SessionCatalogReconciler: SessionCataloging {
     /// A file catalog is authoritative only when a single scan gives each session one
     /// unambiguous location.  Keep prior catalog rows unreadable rather than replacing
     /// or sweeping them when folders conflict.
-    private static func withConflictIssues(_ scanned: [RootScanResult]) -> ([RootScanResult], [CatalogIssue]) {
+    private func withConflictIssues(_ scanned: [RootScanResult]) async throws -> [RootScanResult] {
         var idCounts: [SessionID: Int] = [:]
         var locationCounts: [String: Int] = [:]
         for result in scanned {
@@ -45,8 +45,8 @@ actor SessionCatalogReconciler: SessionCataloging {
                 locationCounts[location, default: 0] += 1
             }
         }
-        var conflictIssues: [CatalogIssue] = []
-        let results = scanned.map { result -> RootScanResult in
+        var results: [RootScanResult] = []
+        for result in scanned {
             var projections: [CatalogProjection] = []
             var unreadable = Set(result.unreadableFolderNames)
             var issues = result.issues
@@ -59,15 +59,21 @@ actor SessionCatalogReconciler: SessionCataloging {
                 if let code {
                     let issue = CatalogIssue(code: code, rootID: result.rootID, folderName: projection.location.folderName.rawValue)
                     issues.append(issue)
-                    conflictIssues.append(issue)
                     unreadable.insert(projection.location.folderName.rawValue)
                 } else {
-                    projections.append(projection)
+                    if let existing = try await store.sessionID(at: projection.location.rootID, folderName: projection.location.folderName), existing != projection.location.sessionID {
+                        // Preserve the last known row and mark it error; never let the
+                        // file projection overwrite a different identity at this location.
+                        issues.append(CatalogIssue(code: .locationConflict, rootID: result.rootID, folderName: projection.location.folderName.rawValue))
+                        unreadable.insert(projection.location.folderName.rawValue)
+                    } else {
+                        projections.append(projection)
+                    }
                 }
             }
-            return RootScanResult(rootID: result.rootID, outcome: result.outcome, projections: projections, unreadableFolderNames: unreadable.sorted(), missingFolderNames: result.missingFolderNames, issues: issues)
+            results.append(RootScanResult(rootID: result.rootID, outcome: result.outcome, projections: projections, unreadableFolderNames: unreadable.sorted(), missingFolderNames: result.missingFolderNames, issues: issues))
         }
-        return (results, conflictIssues)
+        return results
     }
 }
 

@@ -126,6 +126,8 @@ protocol SessionFileScanning: Sendable {
 }
 
 protocol SessionCatalogStore: Sendable {
+    /// The current identity occupying a physical session location, if any.
+    func sessionID(at rootID: StorageRootID, folderName: SessionFolderName) async throws -> SessionID?
     func apply(_ results: [RootScanResult], catalogUpdatedAt: AbsoluteTime) async throws
     func orderedItems() async throws -> [SessionCatalogItem]
     func recoveredFromCorruption() async -> Bool
