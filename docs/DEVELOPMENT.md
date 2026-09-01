@@ -23,13 +23,36 @@ The project is `LocalLectureSTT.xcodeproj` and its shared scheme is `LocalLectur
 
 ## T06 recovery-writer verification
 
-`AudioRecorderTests` generates PCM in a temporary disposable root; it does not request microphone permission or use a real lecture recording. It verifies a still-running fragmented MOV can be opened by `AVURLAsset`, then verifies the completed file has one AAC audio track at mono 48 kHz and contains fragmented-movie evidence. Run it with the normal test command below or target `LocalLectureSTTTests/AudioRecorderTests`.
+`AudioRecorderTests` generates PCM in temporary disposable roots; it does not request microphone permission, touch a user root, or use a real lecture recording. The test groups are:
 
-For a signed sandbox check after T07 supplies the recording UI, choose an empty disposable root (never a real lecture root), record for at least 20 seconds, stop, and inspect `recovery/audio.recovery.mov` in QuickTime Player or with AVFoundation. At T06, the MOV remains and `audio.m4a` must not exist; T08 owns finalization. This unsigned CI procedure does not prove persisted sandbox scope behavior, physical microphone behavior, power-loss windows, or forced-quit recovery; T09/T26 cover the latter recovery matrix. Do not commit any test recordings.
+- `AudioRecorderContractAndFaultTests`: framework boundary, storage/writer/converter/readiness/sample/append/disk-full/flush/finish/cancellation faults, first-error retention, late event, partial-byte preservation, and exact-once cleanup.
+- `AudioRecorderLifecycleTests`: ordering and format violations, repeated/concurrent lifecycle, append-stop-failure races, cleanup-gated restart, stale-operation isolation, contiguous PTS, one tail drain, and per-chunk bounded conversion high-water.
+- `AudioRecorderStorageAndConversionTests`: fixed location-root path, collision and symlink rejection, active-root change isolation, security-scope balance, and stateful 44.1 kHz mono/48 kHz stereo/32 kHz mono conversion with explicit two-channel contribution.
+- `AudioRecorderFragmentedMOVIntegrationTests`: streams 22 seconds of small irregular synthetic chunks, asserts at least two top-level `moof` boxes in a byte-for-byte active-file snapshot, and decodes that prefix with a separate `AVAssetReader` before normal finish. It then independently verifies the normally finished file by decoding nonempty first and last sample buffers and checking AAC-LC, mono 48 kHz, audio-only tracks, duration, fixed path, and absence of `audio.m4a`.
+
+`AVAssetWriter.finishWriting()` may canonicalize the completed movie so the completed file is not used as evidence for the pre-finish recovery fragments. The test records the completed top-level `moof` count for diagnostics, while the multiple-fragment assertion is on the active output snapshot and the completed-file assertions are on its independently decoded payload. This distinction prevents a normally finished asset from being mislabeled as active-prefix recovery evidence.
+
+Run all T06 groups with the normal test command below, or target them explicitly:
+
+```sh
+xcodebuild \
+  -project LocalLectureSTT.xcodeproj \
+  -scheme LocalLectureSTT \
+  -configuration Debug \
+  -destination 'platform=macOS,arch=arm64' \
+  CODE_SIGNING_ALLOWED=NO \
+  -only-testing:LocalLectureSTTTests/AudioRecorderContractAndFaultTests \
+  -only-testing:LocalLectureSTTTests/AudioRecorderLifecycleTests \
+  -only-testing:LocalLectureSTTTests/AudioRecorderStorageAndConversionTests \
+  -only-testing:LocalLectureSTTTests/AudioRecorderFragmentedMOVIntegrationTests \
+  test
+```
+
+For a signed sandbox check after T07 supplies the recording UI, choose an empty disposable root (never a real lecture root), record for at least 20 seconds, stop, and inspect `recovery/audio.recovery.mov` in QuickTime Player or with AVFoundation. Confirm root access remains valid through stop and that exactly one recovery MOV remains. At T06, the MOV remains and `audio.m4a` must not exist; T08 owns finalization. Before T07 there is intentionally no production UI that starts capture or the writer, so the synthetic AVFoundation test above is the current executable acceptance evidence. Unsigned local/CI results do not prove persisted sandbox enforcement, TCC authorization, physical microphone behavior, hardware routes, process-kill loss windows, or power-loss recovery; T09/T26 cover the latter recovery matrix. Do not commit any test recordings.
 
 ## Verification record
 
-On 2026-08-30, this baseline was verified with Xcode 26.6 (Build 17F113), Swift 6.3.3, macOS 26.6.2, and an arm64 host. The unsigned Debug build and unit/integration tests passed. The app exposes the minimal storage-root state in its main window and Settings; signed sandbox bookmark persistence still requires the manual procedure below.
+On 2026-09-01, this baseline was verified with Xcode 26.6 (Build 17F113), Swift 6.3.3, macOS 26.6.2, and an arm64 host. The unsigned Debug build and unit/integration tests passed. The app exposes the minimal storage-root state in its main window and Settings; signed sandbox bookmark persistence and physical microphone behavior still require the manual procedures below.
 
 ## Build and test
 

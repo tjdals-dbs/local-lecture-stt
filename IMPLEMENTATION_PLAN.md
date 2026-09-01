@@ -412,7 +412,8 @@ fix(transcript): prevent overlap duplication (T18)
 완료 기준:
 
 - 생성된 recovery 파일이 재생 또는 AVFoundation으로 읽기 가능하다.
-- 반복 시작/종료와 writer 실패 테스트가 있다.
+- 22초 이상의 합성 입력에서 여러 active fragment와 finish 전 prefix decode, 정상 완료 파일의 시작·끝 decode를 검증한다.
+- 반복·동시 시작/종료, cancellation, writer/converter/storage fault, terminal event와 finish/scope exact-once cleanup 테스트가 있다.
 - STT를 연결하지 않아도 오디오가 독립적으로 저장된다.
 
 ### T07. 녹음 세션 coordinator와 최소 녹음 UI

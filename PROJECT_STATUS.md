@@ -1,7 +1,7 @@
 # Local Lecture STT Project Status
 
 - Status document version: 1.0
-- Last updated: 2026-08-31
+- Last updated: 2026-09-01
 - Specification baseline: `MVP_SPEC.md` 1.0, confirmed
 - Implementation plan: `IMPLEMENTATION_PLAN.md` 1.2
 
@@ -10,7 +10,7 @@
 - Current milestone: M1 safe recorder
 - Current Task: none in progress
 - Next action: T07 recording session coordinator and minimal recording UI
-- Latest completed Task: T06 recoverable fragmented audio writer
+- Latest completed Task: T06 recoverable fragmented audio writer hardening
 - Latest passed gate: T01 initial runnable baseline
 - Application implementation: executable initial SwiftUI shell
 
@@ -19,9 +19,9 @@
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
 - Local branch: `dev`
-- Remote baseline: `origin/dev` contains the verified T05 integration; `origin/main` remains the verified T01 runnable baseline
-- `dev` branch: T05 microphone capture integration branch, tracked at `origin/dev`
-- `main` branch: created and tracked at `origin/main`; it remains at the verified T01 baseline while `dev` has advanced through T05
+- Remote baseline: `origin/dev` contains the verified T06 hardening integration; `origin/main` remains the verified T01 runnable baseline
+- `dev` branch: verified through T06 writer hardening, tracked at `origin/dev`
+- `main` branch: created and tracked at `origin/main`; it remains at the verified T01 baseline while `dev` has advanced through T06 hardening
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
 - Task policy: one fresh implementation session and one `task/tNN-*` branch per Task
@@ -42,7 +42,7 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T03 file repository and root folder permission | Complete on `dev`; `main` remains on the verified T01 baseline | Bookmark registry/access lifecycle, active/historical root catalog, session layout, atomic JSON, JSONL append, 38 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
 | T04 SQLite session catalog and filesystem reconciliation | Complete on `dev`; `main` remains on the verified T01 baseline | SQLite v1 schema/index validation, file-authoritative rebuild/reconciliation, unavailable-root and conflict preservation, corrupt-sidecar quarantine, 76 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
 | T05 microphone capture and input signal monitor | Complete on `dev`; `main` remains on the verified T01 baseline | Typed permission/capture contracts, owned Float32 PCM, bounded recording/STT fan-out, race-safe lifecycle, throttled input level/no-input monitoring, active-device failure handling, 95 unit tests, 1 integration test, unsigned arm64 Debug build, and task/dev CI |
-| T06 recoverable fragmented audio writer | Complete on `dev`; `main` remains on the verified T01 baseline | Framework-independent recorder contract, scoped write lease, stateful PCM conversion, AAC mono 48 kHz fragmented recovery MOV, active-prefix/read-decode test, 97 unit tests, 1 integration test, unsigned arm64 Debug build, and task/dev CI |
+| T06 recoverable fragmented audio writer | Complete and audit-hardened on `dev`; `main` remains on the verified T01 baseline | Shared production/fault seams, operation ownership and exact-once terminal cleanup, stateful multi-format/downmix conversion, 22-second AAC mono 48 kHz fragmented recovery MOV with active-prefix and completed-file sample decode, 114 unit tests, 1 integration test, unsigned arm64 Debug build, and task/dev CI |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
@@ -78,9 +78,10 @@ T06 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN
 
 T06 is complete. T07 can start from the latest `dev` baseline on a fresh `task/t07-*` branch.
 
-- `AudioRecorder` now exposes framework-free start/append/flush/stop, state, summary, stable failure code, and terminal event values. `AVFoundationAudioRecorder` is the serial owner of a persistent `AVAudioConverter` and audio-only `AVAssetWriter`; it produces `recovery/audio.recovery.mov` using AAC-LC mono 48 kHz/96 kbps with 1-second initial and 10-second subsequent fragments.
-- `StorageRootManager.acquireWriteLease` retains security-scoped root access until async writer finish, closes it exactly once, validates the pre-existing non-symlink session/recovery layout, rejects collision, and preserves partial artifacts on any writer failure. Recorder tests prove a synthetic recording works without any speech/STT consumer, sequence violations fail without silent loss, existing bytes are preserved, active writer output opens in AVFoundation, and the completed MOV has fragment evidence and a decodable AAC track.
-- The full suite now has 97 unit tests and 1 integration test (98 total). A locally signed sandbox root and physical microphone remain manual T07+ verification; forced-quit/power-loss recovery remains T09/T26 scope.
+- `AudioRecorder` exposes framework-free start/append/flush/stop, state, summary, stable failure code, and a late-subscriber-safe terminal event. `AVFoundationAudioRecorder` owns one recording behind a serial operation gate and operation token; cleanup remains in `.stopping`, preserves the first typed error, and cannot release or finish a newer operation. Production output-lease/converter/writer seams are also the deterministic fault-injection boundaries.
+- `StorageRootManager.acquireWriteLease` retains security-scoped root access until async writer finish and closes it exactly once. Start validates session/recovery/destination symlinks and collisions without overwriting existing bytes. Converter, readiness, sample-buffer, append, flush, finish, disk-full, and cancellation paths preserve partial artifacts, emit one typed event, mark/finish/release once, and never call deletion-capable `cancelWriting()`.
+- Actual AVFoundation acceptance streams 22 seconds of irregular 44.1 kHz stereo PCM without duration-proportional input accumulation. Before finish, a byte-identical snapshot contains two top-level `moof` fragments and decodes through 20.969 seconds; after normal finish, the AAC-LC mono 48 kHz file decodes 129 nonempty sample buffers through exactly 22.0 seconds, including nonempty first and last payloads. Stateful converter tests also cover 44.1 kHz mono, 48 kHz stereo, 32 kHz mono, explicit left/right contribution, contiguous PTS, tail-once, and per-chunk high-water.
+- The full suite now has 114 unit tests and 1 integration test (115 total). A locally signed sandbox root and physical microphone remain manual T07+ verification; forced-quit/power-loss recovery remains T09/T26 scope.
 
 ## Status update rules
 

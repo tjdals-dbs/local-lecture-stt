@@ -40,6 +40,10 @@ enum AudioRecorderErrorCode: String, Sendable, Equatable {
     case alreadyStarted
     case invalidLifecycle
     case storageAccess
+    case storageRootUnavailable
+    case storageReauthorizationRequired
+    case storageRootMissing
+    case storageRootNotWritable
     case unsafeSessionLayout
     case recoveryArtifactExists
     case inputGenerationMismatch
@@ -47,8 +51,12 @@ enum AudioRecorderErrorCode: String, Sendable, Equatable {
     case inputFormatChanged
     case sequenceDiscontinuity
     case conversionFailed
+    case sampleBufferCreationFailed
+    case writerCreationFailed
     case writerConfigurationFailed
     case writerStartFailed
+    case writerSessionStartFailed
+    case writerReadinessFailed
     case writerAppendFailed
     case writerFinishFailed
     case diskFull
