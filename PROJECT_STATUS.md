@@ -3,7 +3,7 @@
 - Status document version: 1.0
 - Last updated: 2026-09-01
 - Specification baseline: `MVP_SPEC.md` 1.0, confirmed
-- Implementation plan: `IMPLEMENTATION_PLAN.md` 1.2
+- Implementation plan: `IMPLEMENTATION_PLAN.md` 1.3
 
 ## Current position
 
@@ -24,8 +24,9 @@
 - `main` branch: created and tracked at `origin/main`; it remains at the verified T01 baseline while `dev` has advanced through T06 hardening
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
-- Task policy: one fresh implementation session and one `task/tNN-*` branch per Task
-- Pull Request policy: no PR for normal Tasks; verified local squash merge into `dev`
+- Task policy: one fresh implementation session and one `task/tNN-*` branch per Task; the same session handles review fixes and later authorized integration
+- Review policy: implementation sessions stop at a task-branch CI-backed review candidate; this coordinator independently approves before any completion status or `dev` integration
+- Pull Request policy: no PR for normal Tasks; independently reviewed work is locally squash merged into `dev` only through a separate integration prompt
 
 The actual Git status and remote state must be rechecked at the start of every task. This snapshot is informational and must not override Git.
 
@@ -62,8 +63,11 @@ T06 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN
 ## Confirmed workflow decisions
 
 - The coordinator session writes specifications, plans, prompts, and gate decisions but does not implement the app.
-- Each Task uses a fresh implementation session and stays in that session until the Task is completed or safely blocked.
-- Same-Task fixes and CI failures remain in the same implementation session.
+- Each Task uses a fresh implementation session and stays in that session through implementation, review fixes, and any later authorized integration, or until safely blocked.
+- The initial implementation prompt ends after task-branch commit/push/CI with `review ready`; it does not authorize official completion, status/checklist updates, `dev` integration, or branch deletion.
+- This coordinator independently verifies the acceptance matrix, diff, tests, and CI. A completion message or green CI by itself is not sufficient.
+- Same-Task review fixes and CI failures remain in the same implementation session and task branch.
+- After independent approval, this coordinator sends a separate integration prompt to that same session; only then may it update completion status, squash merge into `dev`, verify/push `dev`, and delete the task branch.
 - A new implementation session starts for the next Task.
 - G1~G4 should use a fresh validation session when practical.
 - New implementation sessions load `AGENTS.md`, this status file, their Task section, and only the relevant specification sections.
@@ -85,7 +89,7 @@ T06 is complete. T07 can start from the latest `dev` baseline on a fresh `task/t
 
 ## Status update rules
 
-When a Task is successfully integrated into `dev`, update this file with:
+Only after independent review approval, when a Task is successfully integrated into `dev`, update this file with:
 
 - Current milestone and next Task
 - Newly completed Task and concise outcome

@@ -4,7 +4,9 @@
 
 당신은 `/Users/andyoon/stt` 저장소의 **T07만 담당하는 새 구현 세션**이다. 최신 `dev`의 T01~T06 기반 위에 T03 `SessionRepository`, T04 `SessionCatalog`, T05 `MicrophoneCaptureController`, T06 `AudioRecorder`를 하나의 안전한 recording-session lifecycle로 조합하고, 사용자가 실제로 제목을 정해 녹음을 시작·종료하며 경과 시간과 입력 레벨을 볼 수 있는 최소 macOS SwiftUI 화면을 완성하라.
 
-이 세션은 분석이나 중간 보고만 하고 멈추는 세션이 아니다. 아래 acceptance matrix를 같은 T07 세션에서 구현·검증하고, 실제 명세 충돌이나 복구 오디오를 보존할 수 없는 사용자 결정만 없다면 task branch commit·push·CI·`dev` 통합까지 끝낸다. 구현량, 아직 작성하지 않은 테스트, 실제 마이크를 쓸 수 없는 CI 환경은 그 자체로 blocker가 아니다.
+이 세션은 분석이나 중간 보고만 하고 멈추는 세션이 아니다. 아래 acceptance matrix를 같은 T07 세션에서 구현·검증하고, 실제 명세 충돌이나 복구 오디오를 보존할 수 없는 사용자 결정만 없다면 task branch commit·push·CI까지 끝내 **독립 검토 가능한 구현 후보**를 제출한다. 구현량, 아직 작성하지 않은 테스트, 실제 마이크를 쓸 수 없는 CI 환경은 그 자체로 blocker가 아니다.
+
+이 프롬프트는 T07의 공식 완료 판정이나 `dev` 통합을 허가하지 않는다. task branch 제출 뒤 조정 세션이 acceptance matrix, diff, 테스트와 CI 근거를 독립 검토한다. 보완이 필요하면 같은 세션과 branch에서 계속 수정하고, 승인된 경우에만 조정 세션이 별도의 통합 프롬프트를 보낸다.
 
 T07에서는 STT, 모델 설치/선택, 최종 `audio.m4a` 변환, 시작 시 복구, 잠자기·창·앱 종료 정책, pause/resume, 세션 목록과 완성형 transcript UI를 구현하지 않는다. 각각 T08 이후 범위다.
 
@@ -38,20 +40,18 @@ T07은 전체 MVP의 중간 단계이므로 다음 차이는 의도된 Task 경�
 - metadata와 events 파일이 source of truth이며 SQLite catalog 실패가 오디오 녹음을 중단시키지 않는다.
 - 실제 app composition이 live T03/T04/T05/T06 구현을 연결하지만 view/app construction만으로 side effect를 시작하지 않는다.
 - 기존 T01~T06 테스트, unsigned arm64 Debug build와 전체 test suite가 통과한다.
-- 검증된 결과가 하나의 squash commit으로 `dev`에 통합되고 task branch와 `dev` CI가 모두 성공한다.
-- `main`은 변경하거나 승격하지 않는다.
+- 구현과 문서가 task branch의 하나 이상의 T07 commit으로 보존되고 정확한 task commit의 CI가 성공한다.
+- `PROJECT_STATUS.md` 완료 상태, 구현 계획 T07 checklist, `dev`와 `main`은 변경하지 않고 task branch를 독립 검토용으로 유지한다.
 
 ## 허가된 외부 변경
 
-완료 조건을 모두 충족하는 경우에 한해 다음을 허가한다.
+이 프롬프트는 다음 외부 변경만 허가한다. task commit과 push는 로컬 구현·검증·diff 조건을 충족한 뒤 수행하고, 그 정확한 commit의 task CI 성공까지 확인해야 독립 검토 후보가 된다.
 
 - `task/t07-recording-session-coordinator-ui` 브랜치 생성과 push
 - task branch의 GitHub Actions 실행과 결과 확인
-- 검증된 task branch를 로컬에서 squash merge하여 `dev` push
-- merge된 `dev`의 GitHub Actions 실행과 결과 확인
-- `origin/dev`가 안전하고 CI까지 통과한 뒤 T07 task branch 삭제
+- 같은 task branch에 T07 범위의 보완 commit을 추가하고 다시 push/CI 확인
 
-Pull Request, `main` 변경·push·승격, tag, GitHub Release, branch protection 변경, 저장소 공개 범위 변경, 외부 package/dependency 설치, 실제 사용자 session root 변경, 실제 강의 녹음을 자동 테스트에 사용하는 작업은 허가하지 않는다.
+이 프롬프트로는 `PROJECT_STATUS.md`의 T07 완료 기록, `IMPLEMENTATION_PLAN.md` T07 checklist 변경, `dev` merge/push, task branch 삭제를 허가하지 않는다. Pull Request, `main` 변경·push·승격, tag, GitHub Release, branch protection 변경, 저장소 공개 범위 변경, 외부 package/dependency 설치, 실제 사용자 session root 변경, 실제 강의 녹음을 자동 테스트에 사용하는 작업도 허가하지 않는다.
 
 테스트는 임시 directory, synthetic PCM, fake permission/capture/recorder/catalog/time source를 사용한다. 생성한 `.mov`, session folder, DerivedData와 runtime Application Support 자료를 Git에 포함하지 않는다.
 
@@ -554,8 +554,8 @@ T07에는 실제 사용 가능한 UI가 생기므로 `docs/DEVELOPMENT.md`에 lo
 - `docs/ARCHITECTURE.md`: start/stop data flow, source-of-truth ordering, terminal settlement와 T08 handoff
 - `docs/DEVELOPMENT.md`: T07 synthetic tests와 signed manual procedure
 - `LocalLectureSTT.xcodeproj/project.pbxproj`: 새 source/test files와 app version setting
-- `PROJECT_STATUS.md`: dev 통합 시 T07 결과, 정확한 test count, next T08, manual risk
-- `IMPLEMENTATION_PLAN.md`: dev 통합 시에만 T07 checklist `[x]`
+
+`docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`와 boundary 문서는 구현 후보의 실제 구조와 검증 방법이므로 task branch에서 함께 갱신한다. 반면 `PROJECT_STATUS.md`의 T07 완료 기록과 `IMPLEMENTATION_PLAN.md`의 T07 checklist `[x]`는 조정 세션의 독립 검토 승인 후 별도 통합 프롬프트에서만 갱신한다. 이 구현 프롬프트에서는 두 완료 상태 문서를 변경하지 않는다.
 
 문서가 실제 구현보다 넓은 기능을 주장하지 않게 한다. T07에서 actual microphone, signed sandbox, finalization, app-close/sleep recovery를 자동 검증했다고 쓰지 않는다.
 
@@ -589,7 +589,7 @@ xcodebuild \
 
 ## 17. Git과 CI workflow
 
-완료 조건을 모두 만족한 경우에만 다음을 수행한다.
+로컬 구현·검증·diff 조건을 만족하면 다음 순서로 task branch 후보를 제출한다. task CI까지 성공해야 18장의 독립 검토 제출 조건이 완성된다.
 
 1. `git status`, task branch 전체 diff와 `git diff --check`를 검토한다.
 2. 실제 recording/model/session data, DerivedData, `.mov`, SQLite, Application Support가 추적되지 않는지 확인한다.
@@ -598,21 +598,19 @@ xcodebuild \
 5. Task ID가 포함된 commit을 만든다. 예: `feat(recording): add session coordinator and minimal UI (T07)`.
 6. `task/t07-recording-session-coordinator-ui`를 push한다.
 7. 정확한 task commit의 GitHub Actions 성공을 확인한다.
-8. 그 사이 `dev`가 바뀌었다면 task branch에 안전하게 반영하고 전체 검증/CI를 다시 수행한다.
-9. 최신 local `dev`에서 검증된 task branch를 `--squash` merge한다.
-10. `PROJECT_STATUS.md`, T07 checklist와 필요한 architecture/development 문서 갱신을 포함한 하나의 T07 integration commit을 만든다.
-11. merge된 `dev`에서 unsigned arm64 Debug build와 전체 test를 다시 실행한다.
-12. `dev`를 push하고 정확한 `dev` commit의 CI 성공을 확인한다.
-13. `origin/dev`와 local `dev` SHA가 일치하는지 확인한다.
-14. 그 뒤에만 local/remote task branch를 삭제한다.
+8. task branch가 clean하고 local/remote task commit이 일치하는지 확인한다.
+9. `PROJECT_STATUS.md` 완료 상태와 T07 checklist, `dev`, `main`이 기준선 그대로인지 확인한다.
+10. task branch를 삭제하지 않고 독립 검토를 위해 유지한다.
 
-정상 Task에는 PR을 만들지 않는다. `main`을 checkout하여 merge하거나 push하지 않는다.
+정상 Task에는 PR을 만들지 않는다. `dev` 또는 `main`을 checkout하여 merge하거나 push하지 않는다.
 
-task branch CI 또는 merge 후 `dev` CI가 실패하면 완료로 보고하지 않는다. 같은 T07 세션과 branch에서 원인을 고치고 필요한 검증 단계를 반복한다.
+task branch CI가 실패하면 검토 준비 완료로 보고하지 않는다. 같은 T07 세션과 branch에서 원인을 고치고 필요한 검증 단계를 반복한다. task branch CI가 성공해도 공식 T07 완료가 아니며, 조정 세션의 독립 검토 전에는 상태 문서나 `dev`를 변경하지 않는다.
 
-## 18. 완료 조건
+독립 검토에서 보완 요청을 받으면 이 세션과 task branch를 그대로 유지하여 수정·재검증·commit·push·task CI를 반복한다. 독립 검토 승인 후 별도 통합 프롬프트를 받았을 때만 최신 `dev` 동기화, 필요 시 재검증, 상태 문서 갱신, squash merge, merge 후 build/test, `dev` push/CI와 task branch 삭제를 수행한다.
 
-다음이 모두 참일 때만 T07을 완료라고 보고한다.
+## 18. 독립 검토 제출 조건
+
+다음이 모두 참일 때만 `T07 구현 후보: 검토 준비 완료`라고 보고한다. 이 표현은 공식 Task 완료나 `dev` 통합을 뜻하지 않는다.
 
 - 2~10장의 coordinator ownership, start/stop ordering, metadata/event, UI와 failure 계약이 실제 구현에 존재한다.
 - 12장 acceptance matrix가 빠짐없이 통과한다.
@@ -630,22 +628,22 @@ task branch CI 또는 merge 후 `dev` CI가 실패하면 완료로 보고하지 
 - T08 이후 기능을 선행 구현하지 않았다.
 - 전체 unit/integration tests와 unsigned arm64 Debug build가 통과한다.
 - synthetic/수동 검증 절차와 CI 한계가 문서화됐다.
-- task branch와 merge된 `dev` CI가 성공했다.
-- `PROJECT_STATUS.md`, T07 checklist와 관련 architecture/development 문서가 실제 상태와 일치한다.
-- `origin/dev`에 verified squash commit이 있고 `main`은 그대로다.
+- 관련 architecture/development/boundary 문서가 task branch의 실제 구현과 일치한다.
+- 정확한 task commit의 CI가 성공하고 local/remote task branch가 일치한다.
+- `PROJECT_STATUS.md`의 T07 완료 상태, T07 checklist, `dev`와 `main`은 변경되지 않았다.
+- task branch가 독립 검토와 같은 Task 보완을 위해 남아 있다.
 
-항목 하나라도 불확실하면 `dev`에 merge하지 않는다. 다만 구현 또는 테스트가 아직 덜 끝난 상태는 안전 차단 사유가 아니므로 같은 branch와 세션에서 계속 완료한다.
+항목 하나라도 불확실하면 검토 준비 완료라고 보고하지 않는다. 다만 구현 또는 테스트가 아직 덜 끝난 상태는 안전 차단 사유가 아니므로 같은 branch와 세션에서 계속 구현·검증한다. 실제 명세 충돌이나 데이터 안전 결정을 사용자에게 받아야 하는 경우에만 `차단`으로 보고한다.
 
 ## 19. 최종 보고 형식
 
 최종 응답은 다음 순서로 구체적으로 보고한다.
 
-1. `T07 상태`: 완료 또는 차단
+1. `T07 구현 후보 상태`: 검토 준비 완료 또는 차단
 2. branch와 commit
    - task commit SHA
-   - squash된 `dev` commit SHA
-   - local/remote 일치 여부
-   - `main` 불변 SHA
+   - local/remote task branch 일치 여부
+   - `dev`와 `main`의 불변 SHA
 3. 변경 파일과 핵심 설계
    - coordinator/application contracts와 operation ownership
    - permission 및 start transaction
@@ -663,10 +661,12 @@ task branch CI 또는 merge 후 `dev` CI가 실패하면 완료로 보고하지 
    - final m4a/checkpoint/transcript 부재
 6. 실제 실행한 build/test 명령과 unit/integration test 수/결과
 7. race test 반복 횟수와 결과
-8. task branch CI와 `dev` CI run URL/결과
+8. task branch CI run URL/결과
 9. 수행한 수동 검증 또는 아직 필요한 절차
 10. 명세 이탈 여부
 11. 남은 위험과 known diagnostics
-12. T08 시작 가능 여부
+12. 조정 세션이 독립 검토할 때 특히 확인해야 할 항목
+
+공식 `T07 완료`, T08 시작 가능, `dev` 통합 완료를 선언하지 않는다. 그것들은 조정 세션의 독립 검토와 별도 통합 프롬프트 이후에만 확정한다.
 
 단순히 “테스트 통과”라고만 쓰지 말고, concurrent start, buffered drain, no-STT audio, exact-once settlement, metadata/event ordering, interrupted failure와 live file creation을 어떤 test가 증명했는지 연결한다. 실제 수행하지 않은 microphone/TCC/signed sandbox/window/sleep/finalization 검증을 성공했다고 주장하지 않는다.

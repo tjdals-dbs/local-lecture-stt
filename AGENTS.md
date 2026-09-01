@@ -26,7 +26,9 @@ If these disagree, do not silently choose one. Preserve data, stop at a safe poi
 
 - A planning or review request does not authorize implementation.
 - An implementation session is assigned exactly one `TNN` Task unless the user explicitly expands it.
-- Finish implementation, same-Task fixes, tests, commit, and authorized `dev` integration for that Task in the same session.
+- Finish implementation, same-Task fixes, tests, task-branch commit/push/CI, and any later authorized `dev` integration for that Task in the same session.
+- The initial implementation prompt ends at a review-ready task branch. It does not authorize official Task completion, status/checklist completion, `dev` integration, or task-branch deletion.
+- The coordinator session independently reviews the task branch. Only a later explicit integration prompt issued after that review authorizes status/checklist updates and `dev` integration.
 - Do not implement the next Task early.
 - Do not implement post-MVP features merely because an interface could support them.
 - Gate verification sessions are read-only unless the user separately authorizes a fix.
@@ -60,18 +62,29 @@ For normal `TNN` implementation:
 - Do not force-push `main`, `dev`, or a shared task branch.
 - Pull Requests are not used for normal Tasks.
 
-When the task prompt authorizes commit, push, and integration:
+Normal `TNN` work uses two phases.
+
+Phase 1 — implementation candidate:
 
 1. Run the relevant local build and tests.
 2. Review the complete task-branch diff and staged diff.
 3. Commit with the Task ID in the message and push the task branch.
 4. Confirm task-branch CI when CI exists.
-5. If and only if every completion condition passes, squash merge locally into the latest `dev`.
-6. Update `PROJECT_STATUS.md` and the implementation-plan checklist as part of the `dev` integration commit.
-7. Re-run build and tests on merged `dev`, then push `dev` and confirm its CI.
-8. Delete the task branch only after `dev` is safely pushed and verified.
+5. Report either `review ready` or `blocked`; do not call the Task officially complete.
+6. Leave `PROJECT_STATUS.md`, the implementation-plan checklist, `dev`, and `main` unchanged, and keep the task branch available for independent review and same-Task fixes.
 
-If any completion condition is uncertain or failing, leave the work on the task branch, do not merge into `dev`, and report the blocker. V00 and `dev → main` gate promotions are special workflows defined by their own prompts.
+The coordinator then reviews the acceptance matrix, diff, tests, and CI independently. A green implementation report or task CI alone is not approval.
+
+Phase 2 — explicitly authorized integration:
+
+1. Continue in the same implementation session and task branch after receiving a separate integration prompt.
+2. Recheck the latest `dev`; if it changed, safely incorporate it and repeat affected validation and task CI before integration.
+3. Update `PROJECT_STATUS.md` and the implementation-plan checklist as part of the `dev` integration commit.
+4. Squash merge locally into the latest `dev` only when every reviewed completion condition still passes.
+5. Re-run build and tests on merged `dev`, then push `dev` and confirm its exact-commit CI.
+6. Delete the task branch only after `dev` is safely pushed and verified.
+
+Without a separate integration prompt, or if any completion condition is uncertain or failing, leave the work on the task branch, do not update completion status, do not merge into `dev`, and report the blocker. V00 and `dev → main` gate promotions are special workflows defined by their own prompts.
 
 ## 6. Repository data policy
 
@@ -101,11 +114,11 @@ Commit `Package.resolved`, source, tests, shared schemes, entitlements, manifest
 
 Every implementation session must report:
 
-- Task ID and completion status
-- Branches and resulting `dev` commit, if integrated
+- Task ID and phase status: `review ready`, `blocked`, or `integrated` only after explicit authorization
+- Task branch and commit; resulting `dev` commit only when separately authorized and integrated
 - Changed files and key design decisions
 - Tests and commands actually run, with results
 - Any manual verification still required
 - Deviations from the specification, if any
 - Remaining risks or known issues
-- Whether the next Task is safe to start
+- Whether the next Task is safe to start; a phase-1 candidate must state that this remains the coordinator's post-review decision
