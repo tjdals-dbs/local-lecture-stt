@@ -133,7 +133,7 @@ protocol SessionCatalogStore: Sendable {
     func recoveredFromCorruption() async -> Bool
 }
 
-protocol SessionCataloging: Sendable {
+protocol SessionCataloging: RecordingCatalogRefreshing {
     func reconcile() async throws -> CatalogReconciliationReport
     func orderedItems() async throws -> [SessionCatalogItem]
 }

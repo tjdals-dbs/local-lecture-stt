@@ -48,11 +48,48 @@ xcodebuild \
   test
 ```
 
-For a signed sandbox check after T07 supplies the recording UI, choose an empty disposable root (never a real lecture root), record for at least 20 seconds, stop, and inspect `recovery/audio.recovery.mov` in QuickTime Player or with AVFoundation. Confirm root access remains valid through stop and that exactly one recovery MOV remains. At T06, the MOV remains and `audio.m4a` must not exist; T08 owns finalization. Before T07 there is intentionally no production UI that starts capture or the writer, so the synthetic AVFoundation test above is the current executable acceptance evidence. Unsigned local/CI results do not prove persisted sandbox enforcement, TCC authorization, physical microphone behavior, hardware routes, process-kill loss windows, or power-loss recovery; T09/T26 cover the latter recovery matrix. Do not commit any test recordings.
+For a signed sandbox check through the T07 recording UI, choose an empty disposable root (never a real lecture root), record for at least 20 seconds, stop, and inspect `recovery/audio.recovery.mov` in QuickTime Player or with AVFoundation. Confirm root access remains valid through stop and that exactly one recovery MOV remains. At T07, the MOV remains and `audio.m4a` must not exist; T08 owns finalization. The synthetic AVFoundation tests are the automated acceptance evidence, while the signed physical-microphone procedure below remains manual. Unsigned local/CI results do not prove persisted sandbox enforcement, TCC authorization, physical microphone behavior, hardware routes, process-kill loss windows, or power-loss recovery; T09/T26 cover the latter recovery matrix. Do not commit any test recordings.
+
+## T07 coordinator and file-authoritative integration verification
+
+`RecordingSessionCoordinatorTests` uses controlled continuation gates, fake time/ticker, and fake root/permission/capture/recorder/repository/catalog implementations. It verifies explicit-start-only side effects; no-root, reauthorization, and failed-root rejection with no resource effects; and created-folder root-change rejection with best-effort `.error/.notStarted` metadata rather than deletion. The writer-start tests assert the exact accepted PCM sequence is appended after user stop, caller-task cancellation, or capture terminal, and assert drain/finish/terminal-persistence ordering with exact-once terminal effects. A recording-metadata and recording-start-event gate matrix injects primary-stream throw, capture terminal, recorder terminal, and caller cancellation while start durability is pending; it proves the first typed failure is retained, no separate settlement runs before persistence returns, and exactly one terminal metadata/event path follows. A second matrix releases the same gated write into a persistence fault after that terminal wins, and verifies public `start()`, snapshot, and last result all retain the terminal failure while the persistence code is surfaced as a warning. The suite also covers unexpected normal primary-stream finish, primary backpressure, `recordingEnded` persistence failure, artifact non-deletion, and a gated prior-pump proof: a new start is busy until the old pump drains and capture/recorder observer streams terminate. View-model tests emit fake snapshots for preparing, recording, securing, secured-awaiting-finalization, interrupted, and error display/action states, and prove observation cancellation/re-subscription does not stop the coordinator-owned recording lifetime. These deterministic tests use no real sleeps or user data.
+
+`RecordingSessionFileIntegrationTests` connects production `MicrophoneCaptureController`, `FileSessionRepository`, `StorageRootManager`, `AVFoundationAudioRecorder`, scanner, and SQLite catalog to a disposable temporary root. A synthetic capture driver yields 32 ordered mono 48 kHz chunks (65,536 frames) without any speech/STT consumer. The test decodes the finished recovery MOV with `AVAssetReader`, checks `.securing/.completed` metadata and ordered start/end events, verifies the catalog projection, proves final audio/transcript/checkpoint artifacts are absent, and requires balanced fake bookmark scope counts. It never requests TCC permission, selects a user root, or contains real lecture audio.
+
+Run T07 tests alone with:
+
+```sh
+xcodebuild \
+  -project LocalLectureSTT.xcodeproj \
+  -scheme LocalLectureSTT \
+  -configuration Debug \
+  -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/LocalLectureSTT-T07-DerivedData \
+  CODE_SIGNING_ALLOWED=NO \
+  -only-testing:LocalLectureSTTTests/RecordingSessionCoordinatorTests \
+  -only-testing:LocalLectureSTTIntegrationTests/RecordingSessionFileIntegrationTests \
+  test
+```
+
+### T07 locally signed opt-in recording check
+
+This procedure is manual and remains pending until explicitly performed. Use only a newly created empty disposable root and one stable local signing identity; never use a real lecture root or reset/edit the system TCC database.
+
+1. Run the locally signed app and select the disposable root.
+2. Enter a title, choose a language, and press **녹음 시작**.
+3. On the first request only, confirm the microphone permission prompt appears.
+4. Speak for at least 20 seconds and confirm device name, elapsed time, and input level update.
+5. Stay quiet for at least five seconds; confirm one no-input warning appears while recording continues.
+6. Speak again and confirm the warning clears.
+7. Press **녹음 종료** and confirm the UI says recovery audio is stored and finalization is pending, not final completion.
+8. In the session folder, confirm `metadata.json`, `events.jsonl`, and `recovery/audio.recovery.mov` exist and `audio.m4a` does not.
+9. Open the recovery MOV in QuickTime Player or decode it with AVFoundation.
+
+Unsigned build/CI and this synthetic test do not prove a signed sandbox bookmark across relaunch, real TCC authorization, physical microphone/hardware-route behavior, window/app termination, system sleep/wake, process-kill recovery, or T08 finalization.
 
 ## Verification record
 
-On 2026-09-01, this baseline was verified with Xcode 26.6 (Build 17F113), Swift 6.3.3, macOS 26.6.2, and an arm64 host. The unsigned Debug build and unit/integration tests passed. The app exposes the minimal storage-root state in its main window and Settings; signed sandbox bookmark persistence and physical microphone behavior still require the manual procedures below.
+On 2026-09-01, this baseline was verified with Xcode 26.6 (Build 17F113), Swift 6.3.3, macOS 26.6.2, and an arm64 host. The unsigned Debug build and unit/integration tests passed. The app exposes storage-root state plus the minimal T07 recording flow; signed sandbox bookmark persistence and physical microphone behavior still require the manual procedures below.
 
 ## Build and test
 
@@ -115,7 +152,7 @@ For a manual check, use disposable roots and synthetic metadata only. Close the 
 
 The default CI build is unsigned and its synthetic test driver does not prove TCC authorization, physical microphone input, or hardware route changes. Perform this opt-in check only with a locally signed build that retains the committed App Sandbox microphone entitlement and usage description; do not use a real lecture-session root or record diagnostic PCM to a file.
 
-1. Build and run the app from Xcode using one stable local signing identity. In System Settings, manually allow microphone access for that app when the future T07 explicit recording action requests it. Do not run `tccutil reset` or edit TCC databases.
+1. Build and run the app from Xcode using one stable local signing identity. In System Settings, manually allow microphone access for that app when the explicit recording action requests it. Do not run `tccutil reset` or edit TCC databases.
 2. In the T07 recording flow, confirm the current system input's displayed name and its source sample rate/channel count. Speak or clap and confirm PCM chunks and the level meter change; do not log sample bytes or device IDs.
 3. Leave the input silent (or disconnect the source) for at least five seconds. Confirm exactly one no-input warning appears while capture remains running, then confirm speech clears the warning.
 4. Repeat explicit start/stop several times and confirm no duplicate-tap crash or duplicate level updates occur.

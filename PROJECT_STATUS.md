@@ -1,7 +1,7 @@
 # Local Lecture STT Project Status
 
 - Status document version: 1.0
-- Last updated: 2026-09-01
+- Last updated: 2026-09-03
 - Specification baseline: `MVP_SPEC.md` 1.0, confirmed
 - Implementation plan: `IMPLEMENTATION_PLAN.md` 1.3
 
@@ -9,18 +9,18 @@
 
 - Current milestone: M1 safe recorder
 - Current Task: none in progress
-- Next action: T07 recording session coordinator and minimal recording UI
-- Latest completed Task: T06 recoverable fragmented audio writer hardening
+- Next action: T08 final audio finalization pipeline
+- Latest completed Task: T07 recording session coordinator and minimal recording UI
 - Latest passed gate: T01 initial runnable baseline
-- Application implementation: executable initial SwiftUI shell
+- Application implementation: executable audio-recording SwiftUI flow through recovery-audio securing
 
 ## Repository state at this handoff
 
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
 - Local branch: `dev`
-- Remote baseline: `origin/dev` contains the verified T06 hardening integration; `origin/main` remains the verified T01 runnable baseline
-- `dev` branch: verified through T06 writer hardening, tracked at `origin/dev`
+- Remote baseline: `origin/dev` contains the verified T07 integration; `origin/main` remains the verified T01 runnable baseline
+- `dev` branch: verified through T07 recording coordinator/UI integration, tracked at `origin/dev`
 - `main` branch: created and tracked at `origin/main`; it remains at the verified T01 baseline while `dev` has advanced through T06 hardening
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -44,11 +44,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T04 SQLite session catalog and filesystem reconciliation | Complete on `dev`; `main` remains on the verified T01 baseline | SQLite v1 schema/index validation, file-authoritative rebuild/reconciliation, unavailable-root and conflict preservation, corrupt-sidecar quarantine, 76 unit tests, integration smoke test, unsigned arm64 Debug build, and task/dev CI |
 | T05 microphone capture and input signal monitor | Complete on `dev`; `main` remains on the verified T01 baseline | Typed permission/capture contracts, owned Float32 PCM, bounded recording/STT fan-out, race-safe lifecycle, throttled input level/no-input monitoring, active-device failure handling, 95 unit tests, 1 integration test, unsigned arm64 Debug build, and task/dev CI |
 | T06 recoverable fragmented audio writer | Complete and audit-hardened on `dev`; `main` remains on the verified T01 baseline | Shared production/fault seams, operation ownership and exact-once terminal cleanup, stateful multi-format/downmix conversion, 22-second AAC mono 48 kHz fragmented recovery MOV with active-prefix and completed-file sample decode, 114 unit tests, 1 integration test, unsigned arm64 Debug build, and task/dev CI |
+| T07 recording session coordinator and minimal recording UI | Complete on `dev`; `main` remains on the verified T01 baseline | One-session coordinator ownership, metadata/event journal lifecycle, bounded primary PCM drain, minimal recording UI, and production synthetic recovery-MOV integration. Unsigned arm64 Debug build and 135 unit/integration tests passed; the approved task CI passed. |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-T06 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T07 is ready to start on a fresh task branch.
+T07 is complete on `dev`. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T08 final audio finalization is next.
 
 ## Gate status
 
@@ -78,14 +79,14 @@ T06 is complete. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN
 - No current blocker.
 - The app is intentionally unsigned for local and CI verification; a developer signing identity is required only for separately installed signed builds.
 
-## T06 handoff
+## T07 handoff
 
-T06 is complete. T07 can start from the latest `dev` baseline on a fresh `task/t07-*` branch.
+T07 is complete on `dev`. T08 can start in a new session from this verified integration baseline.
 
-- `AudioRecorder` exposes framework-free start/append/flush/stop, state, summary, stable failure code, and a late-subscriber-safe terminal event. `AVFoundationAudioRecorder` owns one recording behind a serial operation gate and operation token; cleanup remains in `.stopping`, preserves the first typed error, and cannot release or finish a newer operation. Production output-lease/converter/writer seams are also the deterministic fault-injection boundaries.
-- `StorageRootManager.acquireWriteLease` retains security-scoped root access until async writer finish and closes it exactly once. Start validates session/recovery/destination symlinks and collisions without overwriting existing bytes. Converter, readiness, sample-buffer, append, flush, finish, disk-full, and cancellation paths preserve partial artifacts, emit one typed event, mark/finish/release once, and never call deletion-capable `cancelWriting()`.
-- Actual AVFoundation acceptance streams 22 seconds of irregular 44.1 kHz stereo PCM without duration-proportional input accumulation. Before finish, a byte-identical snapshot contains two top-level `moof` fragments and decodes through 20.969 seconds; after normal finish, the AAC-LC mono 48 kHz file decodes 129 nonempty sample buffers through exactly 22.0 seconds, including nonempty first and last payloads. Stateful converter tests also cover 44.1 kHz mono, 48 kHz stereo, 32 kHz mono, explicit left/right contribution, contiguous PTS, tail-once, and per-chunk high-water.
-- The full suite now has 114 unit tests and 1 integration test (115 total). A locally signed sandbox root and physical microphone remain manual T07+ verification; forced-quit/power-loss recovery remains T09/T26 scope.
+- `RecordingSessionCoordinator` is the serialized owner of the active location, capture, recorder, primary PCM pump, observers, first failure, and terminal settlement. It persists `preparing → recording` only after capture/writer readiness, drains all accepted primary PCM before recovery-writer finish, and leaves normal sessions at `.securing/.completed` for T08 rather than creating final audio.
+- Controlled-gate tests cover writer-start stop/cancellation/capture races, pre-durable terminal persistence, secondary start-persistence faults, terminal-event failure, root changes, and prior-pump isolation. They retain the first typed failure, record terminal metadata/events exactly once where durable, preserve recovery artifacts, and block a new start until cleanup completes.
+- `RecordingSessionFileIntegrationTests` connects production capture, repository, root manager, recorder, scanner, and catalog with 32 ordered synthetic mono 48 kHz chunks (65,536 frames). It decodes the recovery MOV, verifies `.securing/.completed` metadata and ordered events/catalog projection, and proves final audio/transcript/checkpoint artifacts are absent.
+- The integrated unsigned arm64 Debug build and full suite passed with 135 tests. Task CI passed. A locally signed sandbox root, physical microphone/TCC, and hardware-route verification remain manual; forced-quit/power-loss recovery remains T09/T26 scope.
 
 ## Status update rules
 

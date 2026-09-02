@@ -97,7 +97,7 @@ private struct StorageRootRegistryEntry: Codable, Sendable {
     }
 }
 
-actor StorageRootManager: StorageRootControlling {
+actor StorageRootManager: StorageRootControlling, RecordingStorageRootChecking {
     private let registryURL: URL
     private let bookmarkCodec: any SecurityScopedBookmarkCodec
     private let atomicWriter: AtomicFileWriter

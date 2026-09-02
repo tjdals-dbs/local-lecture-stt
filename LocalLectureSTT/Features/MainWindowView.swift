@@ -3,10 +3,16 @@ import SwiftUI
 struct MainWindowView: View {
     @ObservedObject private var storageRoots: StorageRootViewModel
     @ObservedObject private var catalogStartup: CatalogStartupCoordinator
+    @ObservedObject private var recording: RecordingSessionViewModel
 
-    init(storageRoots: StorageRootViewModel = .preview, catalogStartup: CatalogStartupCoordinator = CatalogStartupCoordinator(catalog: UnavailableSessionCatalog(error: .openFailed))) {
+    init(
+        storageRoots: StorageRootViewModel = .preview,
+        catalogStartup: CatalogStartupCoordinator = CatalogStartupCoordinator(catalog: UnavailableSessionCatalog(error: .openFailed)),
+        recording: RecordingSessionViewModel = .preview
+    ) {
         self.storageRoots = storageRoots
         self.catalogStartup = catalogStartup
+        self.recording = recording
     }
 
     var body: some View {
@@ -23,10 +29,16 @@ struct MainWindowView: View {
                     Button("저장 폴더 선택") { Task { await storageRoots.chooseActiveRoot() } }
                 }
             case let .available(root, refreshedBookmark):
-                ContentUnavailableView {
-                    Label("저장 폴더 사용 가능", systemImage: "folder.fill")
-                } description: {
-                    Text(refreshedBookmark ? "\(root.displayName) — 접근 권한을 갱신했습니다." : root.displayPath)
+                VStack(spacing: 0) {
+                    HStack {
+                        Label(root.displayName, systemImage: "folder.fill")
+                        Spacer()
+                        if refreshedBookmark { Text("접근 권한 갱신됨").foregroundStyle(.secondary) }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    Divider()
+                    RecordingSessionView(viewModel: recording)
                 }
             case .reauthorizationRequired:
                 ContentUnavailableView {
@@ -48,7 +60,9 @@ struct MainWindowView: View {
         }
         .accessibilityIdentifier("initial-project-shell")
         .task {
+            recording.startObserving()
             await storageRoots.restore()
+            await recording.refreshPermissionStatus()
             catalogStartup.start()
         }
     }
