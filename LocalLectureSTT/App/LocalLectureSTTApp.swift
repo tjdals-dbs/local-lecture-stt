@@ -38,8 +38,10 @@ struct LocalLectureSTTApp: App {
                 osVersion: ProcessInfo.processInfo.operatingSystemVersionString
             )
         )
+        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: roots, catalog: catalog))
+        let lifetime = RecordingFinalizationCoordinator(recording: recordingCoordinator, finalization: finalization)
         _catalogStartup = StateObject(wrappedValue: coordinator)
-        _recording = StateObject(wrappedValue: RecordingSessionViewModel(coordinator: recordingCoordinator))
+        _recording = StateObject(wrappedValue: RecordingSessionViewModel(coordinator: lifetime, finalization: finalization))
         _storageRoots = StateObject(wrappedValue: StorageRootViewModel(
             controller: roots,
             directorySelector: OpenPanelDirectorySelector(),

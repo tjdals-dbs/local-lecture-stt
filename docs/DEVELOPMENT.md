@@ -159,3 +159,31 @@ The default CI build is unsigned and its synthetic test driver does not prove TC
 5. When an external input is available, disconnect it or change the macOS default input during capture. Confirm the current generation reports a device/route failure and does not silently continue using another microphone. Reconnect only for a new explicit start.
 
 These steps require the T07 opt-in recording composition because T05 deliberately does not add debug recording UI, write session files, or prompt for permission during app/view construction.
+
+## T08 audio finalization verification
+
+T08 uses no packages, downloaded media, FFmpeg, network runtime, or microphone input in automated tests. New tests use disposable temporary roots and generated AAC. `AudioFinalizationTests` covers actual-file checkpoints, exclusive publication, retained staging, corruption/identity conflicts, full-completion proof gates, and controlled lifecycle continuations. `RecordingSessionFileIntegrationTests.testAppOwnedFinalizationDoesNotBlockEssentialSaveOrNextRecording` uses production capture/repository/root/recorder/catalog/finalizer composition with synthetic asymmetric endpoint signals. The original standalone T07 recovery-only assertion remains in place.
+
+`AudioFinalizationLongMediaTests.testTwoHourContinuousAACProductionFinalizationAndRevalidation` runs in the default shared scheme and CI. A bounded synthetic PCM seed supplies a real encoded AAC packet and sample description. The test writes repeated payload in <=64 KiB batches and a compact QuickTime sample table with 337,500 consecutive 1,024-frame packets at 48 kHz. It does not wait two hours, insert sparse silence, or load whole media into memory. Production readers independently assert packet count, continuous timeline coverage, duration, provenance, and nonempty first/end PCM seek decode. Fixture generation, audio finalization, and revalidation times are logged separately; `getrusage(RUSAGE_SELF).ru_maxrss` records process peak RSS on macOS, while the media buffer high-water and fixed scratch limits explain bounded application buffering. Process RSS includes the test host and AVFoundation caches and is not an isolated allocator measurement. A 60-second whole-MVP target is not established by this audio-only test.
+
+Use a task-specific derived-data directory:
+
+```sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/LocalLectureSTT-T08-DerivedData \
+  CODE_SIGNING_ALLOWED=NO build
+
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/LocalLectureSTT-T08-DerivedData \
+  CODE_SIGNING_ALLOWED=NO test
+```
+
+See [T08 acceptance](T08_ACCEPTANCE.md) for exact targeted/repeated commands and current results. Logs, media, xcresult and generated artifacts stay outside Git. Zero tests or a missing/unknown xcresult is not a pass.
+
+The passthrough choice follows Apple's [source format hint contract](https://developer.apple.com/documentation/avfoundation/avassetwriterinput/sourceformathint) and the installed SDK's `AVAssetWriterInput.h` description of `outputSettings: nil` and reader trim attachments. Endpoint readers set a [time range before starting](https://developer.apple.com/documentation/avfoundation/avassetreader/timerange). The deterministic fixture uses Apple's [sample duration table](https://developer.apple.com/documentation/quicktime-file-format/time-to-sample_atom/time-to-sample_table). The chosen APIs predate macOS 15; deployment target and arm64 requirement remain unchanged.
+
+### Manual T08 check (pending)
+
+Use one stable local signing identity and a newly created disposable root only. Record at least 20 seconds with different beginning/end signals. On Stop, confirm “안전하게 저장 중” is followed by audio-finalization stages and “오디오 파일 준비 완료 · 나머지 마무리 대기”. Open `audio.m4a` in QuickTime and inspect both endpoints. Confirm recovery MOV remains, metadata is `finalizing` with the original capture outcome, and no transcript/derived placeholders appear. Start a second recording while prior finalization is in progress and confirm its capture UI remains independent. Reopen the view and verify background progress persists. Permission reauthorization, signed sandbox enforcement, physical microphone/TCC latency and hardware routes remain manual. Process-kill, sleep/window/quit policy and power-loss scenarios remain T09/T10/T26 work; unsigned synthetic evidence does not establish them.

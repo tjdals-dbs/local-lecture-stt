@@ -4,6 +4,73 @@ import XCTest
 @testable import LocalLectureSTT
 
 final class RecordingSessionFileIntegrationTests: XCTestCase {
+    func testAppOwnedFinalizationDoesNotBlockEssentialSaveOrNextRecording() async throws {
+        let fixture = try RecordingFileIntegrationFixture()
+        defer { fixture.cleanup() }
+        let roots = StorageRootManager(applicationSupportDirectory: fixture.applicationSupport, bookmarkCodec: fixture.bookmarks)
+        _ = try await roots.registerSelectedDirectory(fixture.root)
+        let permission = AuthorizedIntegrationPermission()
+        let driver = SyntheticIntegrationCaptureDriver(chunkCount: 32, framesPerChunk: 2048, endFrequency: 1320)
+        let capture = MicrophoneCaptureController(permission: permission, driver: driver,
+            buffers: CaptureBufferConfiguration(recordingCapacity: 64, speechCapacity: 4),
+            monitor: InputSignalMonitor(clock: FixedIntegrationMonotonicClock(), scheduler: NoopIntegrationSignalScheduler()))
+        let repository = FileSessionRepository(roots: roots)
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: fixture.applicationSupport)
+        let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: store)
+        let recording = RecordingSessionCoordinator(roots: roots, permission: permission, capture: capture,
+            recorders: ClosureAudioRecorderFactory { AVFoundationAudioRecorder(roots: roots) }, repository: repository,
+            catalog: catalog, environment: RecordingSessionEnvironment(appVersion: "T08-integration", osVersion: "synthetic"))
+        let gate = AppFinalizationGate()
+        var worker = FileAudioFinalizer(roots: roots, catalog: catalog)
+        worker.hook = { if $0 == .beforeExport { await gate.blockOnce() } }
+        let finalization = AudioFinalizationCoordinator(worker: worker)
+        let app = RecordingFinalizationCoordinator(recording: recording, finalization: finalization)
+        _ = try await app.start(.init(title: "First synthetic", timeZone: .gmt))
+        let essentialStart = ProcessInfo.processInfo.systemUptime
+        let stopped = await app.stop()
+        let essentialSeconds = ProcessInfo.processInfo.systemUptime - essentialStart
+        guard case let .secured(first) = stopped else { return XCTFail("Essential save failed: \(stopped)") }
+        await gate.waitEntered()
+        let pending = await finalization.currentSnapshot(at: first.location)
+        XCTAssertNil(pending?.result)
+        let second = try await app.start(.init(title: "Second synthetic", timeZone: .gmt))
+        XCTAssertEqual(second.phase, .recording)
+        XCTAssertNotEqual(second.sessionID, first.location.sessionID)
+        let finalizationStart = ProcessInfo.processInfo.systemUptime
+        await gate.open()
+        let firstResult = await finalization.waitForResult(at: first.location)
+        let finalizationSeconds = ProcessInfo.processInfo.systemUptime - finalizationStart
+        XCTAssertNil(firstResult?.failure, "\(String(describing: firstResult))")
+        let media = try XCTUnwrap(firstResult?.media)
+        XCTAssertGreaterThan(media.first.byteCount, 0)
+        XCTAssertGreaterThan(media.last.byteCount, 0)
+        XCTAssertGreaterThan(media.last.zeroCrossings, media.first.zeroCrossings * 2)
+        let stillRecording = await app.currentSnapshot()
+        XCTAssertEqual(stillRecording.sessionID, second.sessionID)
+        XCTAssertEqual(stillRecording.phase, .recording)
+        let metadata = try await repository.readMetadata(at: first.location)
+        XCTAssertEqual(metadata.status, .finalizing)
+        XCTAssertEqual(metadata.captureOutcome, .completed)
+        let session = fixture.root.appendingPathComponent(first.location.folderName.rawValue)
+        let source = session.appendingPathComponent(SessionArtifact.recoveryAudio.relativePath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: session.appendingPathComponent("transcript.json").path))
+        let independentSource = try await AVFoundationFinalizationMedia().inspect(source, requiresM4A: false, control: .init())
+        XCTAssertEqual(media.payloadSHA256, independentSource.payloadSHA256)
+        XCTAssertEqual(media.first.rms, independentSource.first.rms, accuracy: 0.001)
+        XCTAssertEqual(media.last.rms, independentSource.last.rms, accuracy: 0.001)
+        let ended = await app.stop()
+        guard case let .secured(secondSecured) = ended else { return XCTFail("Second essential save failed") }
+        let secondResult = await finalization.waitForResult(at: secondSecured.location)
+        XCTAssertNil(secondResult?.failure)
+        let items = try await catalog.orderedItems()
+        XCTAssertEqual(items.count, 2)
+        XCTAssertTrue(items.allSatisfy { $0.metadataStatus == .finalizing })
+        let scopes = await fixture.bookmarks.counts()
+        XCTAssertEqual(scopes.start, scopes.stop)
+        print("T08 A02/C02 essentialSave=\(essentialSeconds)s audioFinalizationAfterGate=\(finalizationSeconds)s")
+    }
+
     func testProductionCaptureRepositoryRootRecorderAndCatalogPersistDecodableRecoveryAudio() async throws {
         let fixture = try RecordingFileIntegrationFixture()
         defer { fixture.cleanup() }
@@ -176,7 +243,10 @@ private actor SyntheticIntegrationCaptureDriver: MicrophoneCaptureDriving {
     private var chunkCallback: (@Sendable (PCMChunk) -> Void)?
     private var value = IntegrationDriverCounts(prepare: 0, start: 0, stop: 0)
 
-    init(chunkCount: Int, framesPerChunk: Int) {
+    let endFrequency: Double
+
+    init(chunkCount: Int, framesPerChunk: Int, endFrequency: Double = 440) {
+        self.endFrequency = endFrequency
         self.chunkCount = chunkCount
         self.framesPerChunk = framesPerChunk
     }
@@ -199,7 +269,8 @@ private actor SyntheticIntegrationCaptureDriver: MicrophoneCaptureDriving {
         for sequence in 0 ..< chunkCount {
             let sampleOffset = sequence * framesPerChunk
             let samples = (0 ..< framesPerChunk).map { frame -> Float in
-                let phase = Double(sampleOffset + frame) * 2 * Double.pi * 440 / 48_000
+                let frequency = sequence < chunkCount / 2 ? 440 : endFrequency
+                let phase = Double(sampleOffset + frame) * 2 * Double.pi * frequency / 48_000
                 return Float(sin(phase) * 0.2)
             }
             let chunk = try PCMChunk(
@@ -324,4 +395,21 @@ private func decodeIntegrationEvents(at url: URL) throws -> [SessionEventRecord]
     return try data.split(separator: 0x0A).map { line in
         try JSONDecoder().decode(SessionEventRecord.self, from: Data(line))
     }
+}
+
+private actor AppFinalizationGate {
+    private var entered = false
+    private var openState = false
+    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+    private var blocked: CheckedContinuation<Void, Never>?
+    func blockOnce() async {
+        guard !entered else { return }
+        entered = true
+        for waiter in entryWaiters { waiter.resume() }; entryWaiters.removeAll()
+        if !openState { await withCheckedContinuation { blocked = $0 } }
+    }
+    func waitEntered() async {
+        if !entered { await withCheckedContinuation { entryWaiters.append($0) } }
+    }
+    func open() { openState = true; blocked?.resume(); blocked = nil }
 }

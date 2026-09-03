@@ -975,7 +975,7 @@ fix(transcript): prevent overlap duplication (T18)
 - [x] T05 마이크 캡처와 입력 모니터
 - [x] T06 fragmented 오디오 writer
 - [x] T07 녹음 coordinator와 최소 UI
-- [ ] T08 오디오 마무리
+- [x] T08 오디오 마무리
 - [ ] T09 시작 시 복구
 - [ ] T10 앱 생명주기
 - [ ] T11 STTEngine 계약과 fake

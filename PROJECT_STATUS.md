@@ -9,19 +9,19 @@
 
 - Current milestone: M1 safe recorder
 - Current Task: none in progress
-- Next action: T08 final audio finalization pipeline
-- Latest completed Task: T07 recording session coordinator and minimal recording UI
+- Next action: T09 app-start session recovery; await a separate implementation prompt
+- Latest completed Task: T08 final audio finalization pipeline
 - Latest passed gate: T01 initial runnable baseline
-- Application implementation: executable audio-recording SwiftUI flow through recovery-audio securing
+- Application implementation: recording plus app-owned final M4A generation, verification and resumable audio checkpoints; STT/transcript finalization remains unimplemented
 
 ## Repository state at this handoff
 
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
 - Local branch: `dev`
-- Remote baseline: `origin/dev` contains the verified T07 integration; `origin/main` remains the verified T01 runnable baseline
-- `dev` branch: verified through T07 recording coordinator/UI integration, tracked at `origin/dev`
-- `main` branch: created and tracked at `origin/main`; it remains at the verified T01 baseline while `dev` has advanced through T06 hardening
+- Approved T08 source: `de7cf16b193942c836aa64f230f5d1a911740fad`, independently reviewed and explicitly authorized for Phase 2 integration
+- `dev` branch: T08 squash integration from `178471ce00de7b7ca7ecc7dfc77c7e9b45bd9697`, tracked at `origin/dev`; exact integration validation is reported separately from candidate evidence below
+- `main` and `origin/main`: preserved at the verified T01 baseline `38e126f92ac823d29306ea8c1f7703f7060a5818`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
 - Task policy: one fresh implementation session and one `task/tNN-*` branch per Task; the same session handles review fixes and later authorized integration
@@ -45,11 +45,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T05 microphone capture and input signal monitor | Complete on `dev`; `main` remains on the verified T01 baseline | Typed permission/capture contracts, owned Float32 PCM, bounded recording/STT fan-out, race-safe lifecycle, throttled input level/no-input monitoring, active-device failure handling, 95 unit tests, 1 integration test, unsigned arm64 Debug build, and task/dev CI |
 | T06 recoverable fragmented audio writer | Complete and audit-hardened on `dev`; `main` remains on the verified T01 baseline | Shared production/fault seams, operation ownership and exact-once terminal cleanup, stateful multi-format/downmix conversion, 22-second AAC mono 48 kHz fragmented recovery MOV with active-prefix and completed-file sample decode, 114 unit tests, 1 integration test, unsigned arm64 Debug build, and task/dev CI |
 | T07 recording session coordinator and minimal recording UI | Complete on `dev`; `main` remains on the verified T01 baseline | One-session coordinator ownership, metadata/event journal lifecycle, bounded primary PCM drain, minimal recording UI, and production synthetic recovery-MOV integration. Unsigned arm64 Debug build and 135 unit/integration tests passed; the approved task CI passed. |
+| T08 final audio finalization pipeline | Complete on `dev` through separately authorized squash integration | Approved candidate: unsigned arm64 Debug build, 162 tests including 2-hour AAC, 11 related tests × 20 iterations (220 executions), and exact-task CI passed; independently confirmed by the coordinator. Integration-SHA validation is separate. |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-T07 is complete on `dev`. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T08 final audio finalization is next.
+T08 is integrated into `dev`. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T09 app-start session recovery is next and has not started. G1 remains pending.
 
 ## Gate status
 
@@ -79,14 +80,14 @@ T07 is complete on `dev`. The canonical checklist is in section 9 of `IMPLEMENTA
 - No current blocker.
 - The app is intentionally unsigned for local and CI verification; a developer signing identity is required only for separately installed signed builds.
 
-## T07 handoff
+## T08 handoff
 
-T07 is complete on `dev`. T08 can start in a new session from this verified integration baseline.
-
-- `RecordingSessionCoordinator` is the serialized owner of the active location, capture, recorder, primary PCM pump, observers, first failure, and terminal settlement. It persists `preparing → recording` only after capture/writer readiness, drains all accepted primary PCM before recovery-writer finish, and leaves normal sessions at `.securing/.completed` for T08 rather than creating final audio.
-- Controlled-gate tests cover writer-start stop/cancellation/capture races, pre-durable terminal persistence, secondary start-persistence faults, terminal-event failure, root changes, and prior-pump isolation. They retain the first typed failure, record terminal metadata/events exactly once where durable, preserve recovery artifacts, and block a new start until cleanup completes.
-- `RecordingSessionFileIntegrationTests` connects production capture, repository, root manager, recorder, scanner, and catalog with 32 ordered synthetic mono 48 kHz chunks (65,536 frames). It decodes the recovery MOV, verifies `.securing/.completed` metadata and ordered events/catalog projection, and proves final audio/transcript/checkpoint artifacts are absent.
-- The integrated unsigned arm64 Debug build and full suite passed with 135 tests. Task CI passed. A locally signed sandbox root, physical microphone/TCC, and hardware-route verification remain manual; forced-quit/power-loss recovery remains T09/T26 scope.
+- Live finalization creates and verifies AAC-LC mono 48 kHz `audio.m4a` through checkpoint prefix 3 (`workingAudioSecured`, `finalM4ACreated`, `finalM4AVerified`). Metadata remains `finalizing` with its original capture outcome, and recovery audio is preserved. T07 essential save returns without waiting for this app-owned work; another recording can start.
+- Recovery-audio deletion is a separate implemented and tested API requiring verified whole-session completion evidence. T08 does not implement STT, canonical transcript generation, derived TXT/MD generation, or the complete remaining-finalization pipeline. Already-terminal sessions return an explicit audio-revalidation result without rewriting metadata/checkpoints or deleting recovery.
+- Media processing checks pinned directory/file ownership inside framework await and writer I/O boundaries. Independent review regression tests verify no output in a replaced session directory, original/replacement file preservation, exactly-once cleanup/scope release, and completed-session result/snapshot/UI mapping.
+- Approved candidate `de7cf16b193942c836aa64f230f5d1a911740fad`: full build/test **162 passed**, related tests **11 × 20 = 220 passed**, and [exact-task CI passed](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/33730646383). These are candidate results, independently confirmed by the coordinator; they do not stand in for validation of the new squash commit. For targeted/full validation of the squash commit, consult its exact-SHA integration report and GitHub Actions result.
+- [T08 acceptance](docs/T08_ACCEPTANCE.md) is the historical Phase 1 requirement/assertion record; its Phase 1 restrictions are superseded only by the explicit T08 integration authorization. [Architecture](docs/ARCHITECTURE.md#t08-final-audio-and-application-lifetime) records the implemented boundaries, and [Development](docs/DEVELOPMENT.md#manual-t08-check-pending) records the pending manual procedure.
+- Physical microphone/TCC, signed Sandbox/bookmark and hardware-route verification remain manual and unperformed. Startup recovery, forced termination, window/quit/sleep and power-loss validation remain later work. No G1 pass is claimed. T09 requires a separate prompt.
 
 ## Status update rules
 

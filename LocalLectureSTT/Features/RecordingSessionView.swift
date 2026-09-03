@@ -22,7 +22,7 @@ struct RecordingSessionView: View {
                 resultView(
                     title: "복구 오디오 저장 완료 · 마무리 대기",
                     systemImage: "checkmark.shield",
-                    detail: "최종 audio.m4a 생성은 다음 마무리 단계에서 진행됩니다."
+                    detail: "복구 원본을 보존하며 오디오 마무리를 진행합니다."
                 )
             case .interrupted:
                 resultView(
@@ -36,6 +36,26 @@ struct RecordingSessionView: View {
                     systemImage: "xmark.octagon",
                     detail: "생성된 세션 자료가 있다면 그대로 보존했습니다."
                 )
+            }
+            if let value = viewModel.finalizations.last {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("세션 \(value.location.folderName.rawValue)").font(.caption)
+                    if value.result == nil {
+                        ProgressView(RecordingSessionViewModel.finalizationText(value.phase))
+                    } else {
+                        Text(RecordingSessionViewModel.finalizationText(value.phase))
+                    }
+                    if let result = value.result {
+                        if let failure = result.failure { Text("오류: \(failure.rawValue)").monospaced() }
+                        ForEach(Array(result.warnings.enumerated()), id: \.offset) { _, warning in
+                            Text("추가 경고: \(warning)").font(.caption)
+                        }
+                        if result.canRetry {
+                            Button("오디오 마무리 재시도") { Task { await viewModel.retryFinalization(value) } }
+                        }
+                    }
+                }
+                .accessibilityIdentifier("audio-finalization-state")
             }
         }
         .padding(28)
