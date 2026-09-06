@@ -3,7 +3,11 @@ import Foundation
 /// App-owned serial queue. Only small requests/proofs/results are retained here;
 /// all blocking file/media work runs in a detached worker, outside capture's actor.
 actor AudioFinalizationCoordinator {
-    private struct Key: Hashable { let root: StorageRootID; let session: SessionID }
+    private struct Key: Hashable {
+        let root: StorageRootID
+        let session: SessionID
+        let operation: AudioFinalizationOperation
+    }
     private struct Job {
         let request: AudioFinalizationRequest
         let evidence: FinalizationCompletionEvidence?
@@ -20,14 +24,19 @@ actor AudioFinalizationCoordinator {
     private var observers: [UUID: AsyncStream<[AudioFinalizationSnapshot]>.Continuation] = [:]
 
     init(worker: any AudioFinalizationWorking) { self.worker = worker }
-    private func key(_ location: SessionLocation) -> Key { .init(root: location.rootID, session: location.sessionID) }
+    private func key(_ request: AudioFinalizationRequest) -> Key {
+        .init(root: request.location.rootID, session: request.location.sessionID, operation: request.operation)
+    }
+    private func key(_ location: SessionLocation, operation: AudioFinalizationOperation = .resume) -> Key {
+        .init(root: location.rootID, session: location.sessionID, operation: operation)
+    }
 
     @discardableResult
     func enqueue(_ request: AudioFinalizationRequest, retry: Bool = false) -> AudioFinalizationSnapshot {
         enqueue(request, evidence: nil, retry: retry)
     }
     private func enqueue(_ request: AudioFinalizationRequest, evidence: FinalizationCompletionEvidence?, retry: Bool) -> AudioFinalizationSnapshot {
-        let key = key(request.location)
+        let key = key(request)
         if request.schemaVersion != 1 { return rejected(request, code: .unsupportedSchema) }
         guard request.location.folderName.matches(request.location.sessionID),
               snapshotsByKey[key].map({ $0.location == request.location }) ?? true else {
@@ -37,7 +46,7 @@ actor AudioFinalizationCoordinator {
         generation += 1
         let job = Job(request: request, evidence: evidence, generation: generation, control: .init())
         pending.append(job)
-        let snapshot = AudioFinalizationSnapshot(location: request.location, generation: generation, phase: .queued, result: nil)
+        let snapshot = AudioFinalizationSnapshot(location: request.location, generation: generation, operation: request.operation, phase: .queued, result: nil)
         snapshotsByKey[key] = snapshot
         publish()
         if !pumping {
@@ -49,7 +58,7 @@ actor AudioFinalizationCoordinator {
     private func rejected(_ request: AudioFinalizationRequest, code: AudioFinalizationCode) -> AudioFinalizationSnapshot {
         let result = AudioFinalizationResult(location: request.location, phase: .failed, failure: code, warnings: [],
             media: nil, source: nil, final: nil, completedSteps: [], retainedPaths: [], presentPaths: [], recoveryWasRemoved: false)
-        return .init(location: request.location, generation: 0, phase: .failed, result: result)
+        return .init(location: request.location, generation: 0, operation: request.operation, phase: .failed, result: result)
     }
     func finalize(_ request: AudioFinalizationRequest, retry: Bool = false) async -> AudioFinalizationResult {
         let submitted = enqueue(request, retry: retry)
@@ -63,29 +72,31 @@ actor AudioFinalizationCoordinator {
         }
         return await wait(enqueue(.init(location: evidence.location), evidence: evidence, retry: true))
     }
-    func waitForResult(at location: SessionLocation) async -> AudioFinalizationResult? {
-        guard let snapshot = snapshotsByKey[key(location)], snapshot.location == location else { return nil }
+    func waitForResult(at location: SessionLocation, operation: AudioFinalizationOperation = .resume) async -> AudioFinalizationResult? {
+        guard let snapshot = snapshotsByKey[key(location, operation: operation)], snapshot.location == location else { return nil }
         return await wait(snapshot)
     }
     private func wait(_ snapshot: AudioFinalizationSnapshot) async -> AudioFinalizationResult {
         if let result = snapshot.result { return result }
         // Actor serialization makes registering this waiter atomic with completing a job.
-        if let current = snapshotsByKey[key(snapshot.location)], current.generation == snapshot.generation,
+        if let current = snapshotsByKey[key(snapshot.location, operation: snapshot.operation)], current.generation == snapshot.generation,
            let result = current.result { return result }
         return await withCheckedContinuation { waiters[snapshot.generation, default: []].append($0) }
     }
     func cancel(at location: SessionLocation) async -> AudioFinalizationResult? {
-        let key = key(location)
-        guard let snapshot = snapshotsByKey[key], snapshot.location == location else { return nil }
-        if active.map({ self.key($0.request.location) }) == key { active?.control.cancel() }
-        for job in pending where self.key(job.request.location) == key { job.control.cancel() }
-        if snapshot.result == nil {
-            snapshotsByKey[key] = .init(location: location, generation: snapshot.generation, phase: .cancelling, result: nil)
-            publish()
+        let matching = snapshotsByKey.filter { $0.key.root == location.rootID && $0.key.session == location.sessionID && $0.value.location == location }
+        guard let (_, snapshot) = matching.max(by: { $0.value.generation < $1.value.generation }) else { return nil }
+        if active.map({ $0.request.location == location }) == true { active?.control.cancel() }
+        for job in pending where job.request.location == location { job.control.cancel() }
+        for (key, value) in matching where value.result == nil {
+            snapshotsByKey[key] = .init(location: location, generation: value.generation, operation: key.operation, phase: .cancelling, result: nil)
         }
+        publish()
         return await wait(snapshot)
     }
-    func currentSnapshot(at location: SessionLocation) -> AudioFinalizationSnapshot? { snapshotsByKey[key(location)] }
+    func currentSnapshot(at location: SessionLocation, operation: AudioFinalizationOperation = .resume) -> AudioFinalizationSnapshot? {
+        snapshotsByKey[key(location, operation: operation)]
+    }
     func snapshots() -> AsyncStream<[AudioFinalizationSnapshot]> {
         let id = UUID()
         return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
@@ -99,9 +110,9 @@ actor AudioFinalizationCoordinator {
     private func publish() { let values = values(); for observer in observers.values { observer.yield(values) } }
     private func update(_ phase: AudioFinalizationPhase, job: Job) {
         guard active?.generation == job.generation else { return }
-        let key = key(job.request.location)
+        let key = key(job.request)
         guard snapshotsByKey[key]?.generation == job.generation else { return }
-        snapshotsByKey[key] = .init(location: job.request.location, generation: job.generation, phase: phase, result: nil)
+        snapshotsByKey[key] = .init(location: job.request.location, generation: job.generation, operation: job.request.operation, phase: phase, result: nil)
         publish()
     }
     private func pump() async {
@@ -117,9 +128,9 @@ actor AudioFinalizationCoordinator {
             let result = await task.value
             guard active?.generation == job.generation else { continue }
             active = nil
-            let key = key(job.request.location)
+            let key = key(job.request)
             if snapshotsByKey[key]?.generation == job.generation {
-                snapshotsByKey[key] = .init(location: job.request.location, generation: job.generation, phase: result.phase, result: result)
+                snapshotsByKey[key] = .init(location: job.request.location, generation: job.generation, operation: job.request.operation, phase: result.phase, result: result)
                 publish()
             }
             let completions = waiters.removeValue(forKey: job.generation) ?? []
@@ -134,17 +145,31 @@ actor AudioFinalizationCoordinator {
 actor RecordingFinalizationCoordinator: RecordingSessionCoordinating {
     private let recording: any RecordingSessionCoordinating
     let finalization: AudioFinalizationCoordinator
-    init(recording: any RecordingSessionCoordinating, finalization: AudioFinalizationCoordinator) {
-        self.recording = recording; self.finalization = finalization
+    private let startupRecovery: SessionRecoveryCoordinator?
+    private let activity: SessionActivityRegistry?
+    init(recording: any RecordingSessionCoordinating, finalization: AudioFinalizationCoordinator,
+         startupRecovery: SessionRecoveryCoordinator? = nil, activity: SessionActivityRegistry? = nil) {
+        self.recording = recording; self.finalization = finalization; self.startupRecovery = startupRecovery; self.activity = activity
     }
     func snapshots() async -> AsyncStream<RecordingSessionSnapshot> { await recording.snapshots() }
     func currentSnapshot() async -> RecordingSessionSnapshot { await recording.currentSnapshot() }
     func refreshPermissionStatus() async { await recording.refreshPermissionStatus() }
-    func start(_ configuration: RecordingStartConfiguration) async throws -> RecordingSessionSnapshot { try await recording.start(configuration) }
+    func start(_ configuration: RecordingStartConfiguration) async throws -> RecordingSessionSnapshot {
+        // This is deliberately only the bounded filesystem-discovery gate; it
+        // never waits for old media export/verification.
+        await startupRecovery?.waitForInitialDiscovery()
+        return try await recording.start(configuration)
+    }
     func stop() async -> RecordingSessionResult {
         let result = await recording.stop()
         if case let .secured(secured) = result {
             await finalization.enqueue(.init(location: secured.location))
+            let finalization = finalization
+            let activity = activity
+            Task {
+                _ = await finalization.waitForResult(at: secured.location)
+                await activity?.releaseRecordingOrFinalization(at: secured.location)
+            }
         }
         return result
     }

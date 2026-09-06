@@ -1,11 +1,42 @@
 import Foundation
 
+/// A request kind is part of finalization identity.  In particular, a settled
+/// export result must never satisfy a later evidence-only verification request.
+enum AudioFinalizationOperation: String, Codable, Sendable, Equatable {
+    case resume
+    case verifyExistingCanonical
+}
+
 /// Only explicit, settled locations enter this boundary. No root discovery occurs here.
 struct AudioFinalizationRequest: Codable, Sendable, Equatable {
     var schemaVersion: Int = 1
     let location: SessionLocation
+    var operation: AudioFinalizationOperation = .resume
     /// Required to revalidate after the full pipeline has already removed recovery.
     var completionEvidence: FinalizationCompletionEvidence? = nil
+
+    init(location: SessionLocation, operation: AudioFinalizationOperation = .resume,
+         completionEvidence: FinalizationCompletionEvidence? = nil) {
+        self.location = location
+        self.operation = operation
+        self.completionEvidence = completionEvidence
+    }
+
+    private enum CodingKeys: String, CodingKey { case schemaVersion, location, operation, completionEvidence }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        location = try container.decode(SessionLocation.self, forKey: .location)
+        operation = try container.decodeIfPresent(AudioFinalizationOperation.self, forKey: .operation) ?? .resume
+        completionEvidence = try container.decodeIfPresent(FinalizationCompletionEvidence.self, forKey: .completionEvidence)
+    }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(location, forKey: .location)
+        try container.encode(operation, forKey: .operation)
+        try container.encodeIfPresent(completionEvidence, forKey: .completionEvidence)
+    }
 }
 
 enum AudioFinalizationCode: String, Codable, Sendable, Error, CaseIterable {
@@ -83,8 +114,32 @@ struct AudioFinalizationResult: Codable, Sendable, Equatable {
 struct AudioFinalizationSnapshot: Codable, Sendable, Equatable {
     let location: SessionLocation
     let generation: UInt64
+    let operation: AudioFinalizationOperation
     let phase: AudioFinalizationPhase
     let result: AudioFinalizationResult?
+
+    private enum CodingKeys: String, CodingKey { case location, generation, operation, phase, result }
+
+    /// Snapshots are diagnostic state, but an older queued snapshot may still be
+    /// present when the app is upgraded.  Its only historical meaning was a
+    /// resumable finalization, never evidence-only verification.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        location = try container.decode(SessionLocation.self, forKey: .location)
+        generation = try container.decode(UInt64.self, forKey: .generation)
+        operation = try container.decodeIfPresent(AudioFinalizationOperation.self, forKey: .operation) ?? .resume
+        phase = try container.decode(AudioFinalizationPhase.self, forKey: .phase)
+        result = try container.decodeIfPresent(AudioFinalizationResult.self, forKey: .result)
+    }
+
+    init(location: SessionLocation, generation: UInt64, operation: AudioFinalizationOperation,
+         phase: AudioFinalizationPhase, result: AudioFinalizationResult?) {
+        self.location = location
+        self.generation = generation
+        self.operation = operation
+        self.phase = phase
+        self.result = result
+    }
 }
 
 /// Issued only after a trusted remaining-pipeline verifier checks these exact bytes.

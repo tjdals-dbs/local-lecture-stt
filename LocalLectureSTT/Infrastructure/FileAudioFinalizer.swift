@@ -21,7 +21,10 @@ struct FileAudioFinalizer: AudioFinalizationWorking {
 
     func finalize(_ request: AudioFinalizationRequest, control: AudioFinalizationControl,
                   progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
-        await execute(request, evidence: nil, control: control, progress: progress)
+        if request.operation == .verifyExistingCanonical {
+            return await verifyExistingCanonical(request, control: control, progress: progress)
+        }
+        return await execute(request, evidence: nil, control: control, progress: progress)
     }
     func removeRecovery(_ evidence: FinalizationCompletionEvidence, control: AudioFinalizationControl,
                         progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
@@ -77,6 +80,45 @@ struct FileAudioFinalizer: AudioFinalizationWorking {
             retainedPaths: run?.retained ?? [], presentPaths: presentPaths, recoveryWasRemoved: run?.removed ?? false)
     }
 
+    /// T09 terminal recovery uses the production T08 inspection and provenance
+    /// path, but it deliberately obtains only read access and never enters the
+    /// remux/checkpoint/projection/cleanup path.
+    private func verifyExistingCanonical(_ request: AudioFinalizationRequest,
+                                         control: AudioFinalizationControl,
+                                         progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
+        var run: FinalizationRun?
+        var lease: StorageRootWriteLease?
+        do {
+            guard request.schemaVersion == 1 else { throw AudioFinalizationCode.unsupportedSchema }
+            guard request.location.folderName.matches(request.location.sessionID) else { throw AudioFinalizationCode.invalidRequest }
+            try control.check()
+            lease = try await roots.acquireReadLease(to: request.location.rootID)
+            try control.check()
+            guard let lease else { throw AudioFinalizationCode.storageAccess }
+            let access = try FinalizationFileAccess(root: lease.rootURL, location: request.location)
+            let operation = try FinalizationRun(access: access, worker: self, control: control, progress: progress)
+            run = operation
+            try await operation.verifyExistingCanonical()
+        } catch {
+            control.fail(Self.code(error))
+        }
+        do {
+            try await hook(.beforeRelease)
+            try run?.validate()
+        } catch {
+            if Self.code(error) == .identityChanged { control.fail(.identityChanged) }
+            else { control.warning("cleanup.\(Self.code(error).rawValue)") }
+        }
+        let presentPaths = run?.presentPaths() ?? []
+        await lease?.release()
+        let (failure, warnings) = control.outcome()
+        return AudioFinalizationResult(location: request.location,
+            phase: failure == nil ? .audioRevalidated : .failed,
+            failure: failure, warnings: warnings, media: run?.report, source: run?.source,
+            final: run?.final, completedSteps: run?.checkpoint.completedSteps ?? [], retainedPaths: [],
+            presentPaths: presentPaths, recoveryWasRemoved: false)
+    }
+
     static func code(_ error: Error) -> AudioFinalizationCode {
         if let error = error as? StorageError {
             switch error.code {
@@ -93,6 +135,15 @@ struct FileAudioFinalizer: AudioFinalizationWorking {
 }
 
 private final class FinalizationRun {
+    private enum SourceObservation {
+        case absent
+        case present(FinalizationFileEvidence)
+    }
+    private enum TerminalSourceState {
+        case absent
+        case present(FinalizationFileEvidence)
+        case removedAfterPresent
+    }
     let files: FinalizationFileAccess
     let worker: FileAudioFinalizer
     let control: AudioFinalizationControl
@@ -106,6 +157,9 @@ private final class FinalizationRun {
     var report: AudioMediaReport?
     var retained: [String] = []
     var removed = false
+    private let initialSourceObservation: SourceObservation
+    private var terminalSourceState: TerminalSourceState?
+    private var terminalPermitsSourceRemoval = false
     var isCompletedSession: Bool {
         checkpoint.completedSteps.contains(.catalogUpdated) &&
             ((metadata.status == .completed && metadata.captureOutcome == .completed) ||
@@ -130,6 +184,11 @@ private final class FinalizationRun {
         for path in [FinalizationFileAccess.staging, FinalizationFileAccess.canonical, FinalizationFileAccess.source, "events.jsonl"] {
             _ = try files.identity(path)
         }
+        if try files.identity(FinalizationFileAccess.source) == nil {
+            initialSourceObservation = .absent
+        } else {
+            initialSourceObservation = .present(try files.fingerprint(FinalizationFileAccess.source))
+        }
     }
 
     func validate() throws {
@@ -138,7 +197,8 @@ private final class FinalizationRun {
               try files.identity(FinalizationFileAccess.checkpoint) == checkpointIdentity else {
             throw AudioFinalizationCode.identityChanged
         }
-        if let source, !removed { try files.verify(source) }
+        if terminalSourceState != nil { try validateTerminalSourceState() }
+        else if let source, !removed { try files.verify(source) }
         if let final { try files.verify(final) }
     }
     func presentPaths() -> [String] {
@@ -155,6 +215,44 @@ private final class FinalizationRun {
         try validate(); try control.check()
     }
 
+    /// Terminal verification has no mutation that could justify silently
+    /// changing its source contract.  Prefix 8 may observe a present source
+    /// disappear, but the resulting absence must remain stable through lease
+    /// release; an initially absent source may never reappear.
+    func beginTerminalSourceObservation() throws {
+        guard terminalSourceState == nil else { return }
+        terminalPermitsSourceRemoval = checkpoint.completedSteps.contains(.recoveryDataRemoved)
+        switch initialSourceObservation {
+        case .absent:
+            guard terminalPermitsSourceRemoval else { throw AudioFinalizationCode.sourceMissing }
+            terminalSourceState = .absent
+        case let .present(evidence):
+            terminalSourceState = .present(evidence)
+        }
+        try validate()
+    }
+
+    private var terminalSourceEvidence: FinalizationFileEvidence? {
+        guard case let .some(.present(evidence)) = terminalSourceState else { return nil }
+        return evidence
+    }
+
+    private func validateTerminalSourceState() throws {
+        guard let terminalSourceState else { return }
+        let current = try files.identity(FinalizationFileAccess.source)
+        switch terminalSourceState {
+        case .absent, .removedAfterPresent:
+            guard current == nil else { throw AudioFinalizationCode.identityChanged }
+        case let .present(expected):
+            guard current != nil else {
+                guard terminalPermitsSourceRemoval else { throw AudioFinalizationCode.sourceMissing }
+                self.terminalSourceState = .removedAfterPresent
+                return
+            }
+            try files.verify(expected, contents: true)
+        }
+    }
+
     func mark(_ step: FinalizationStep, before: FinalizationPoint, after: FinalizationPoint) async throws {
         guard !checkpoint.completedSteps.contains(step) else { return }
         try await reach(before)
@@ -169,7 +267,7 @@ private final class FinalizationRun {
             let event = try SessionEventRecord(sessionId: files.location.sessionID, eventId: SessionEventID(),
                 occurredAt: AbsoluteTime(Date()), kind: .finalizationStepTransition,
                 detail: SessionEventDetail(code: step.rawValue))
-            try JSONLWriter().append(event, to: files.url("events.jsonl"))
+            try SafeSessionEventAppender.append(event, access: files)
         } catch { control.warning("diagnostic.\(FileAudioFinalizer.code(error).rawValue)") }
         try control.check()
     }
@@ -281,6 +379,28 @@ private final class FinalizationRun {
         try validate(); try control.check()
     }
 
+    /// This is intentionally separate from `finalize()`: it may inspect a
+    /// terminal canonical file but it cannot create a staging file, publish,
+    /// write metadata/checkpoints, refresh the catalog, issue a proof, or
+    /// remove recovery audio.
+    func verifyExistingCanonical() async throws {
+        try beginTerminalSourceObservation()
+        try await phase(.verifying)
+        let canonical = try files.fingerprint(FinalizationFileAccess.canonical)
+        let inspected = try await worker.media.inspect(files.url(FinalizationFileAccess.canonical), requiresM4A: true, control: control)
+        try validate(); try files.verify(canonical, contents: true)
+        final = canonical
+        report = inspected
+        if let expectedSource = terminalSourceEvidence {
+            let sourceReport = try await worker.media.inspect(files.url(FinalizationFileAccess.source), requiresM4A: false, control: control)
+            try validate(); try files.verify(canonical, contents: true)
+            if let confirmedSource = terminalSourceEvidence {
+                try match(inspected, sourceReport)
+                source = confirmedSource
+            }
+        }
+    }
+
     private func match(_ candidate: AudioMediaReport, _ source: AudioMediaReport) throws {
         try AudioFinalizationPolicy.validateDuration(candidate.durationSeconds, against: source.durationSeconds)
         guard candidate.payloadSHA256 == source.payloadSHA256, candidate.packetCount == source.packetCount,
@@ -345,6 +465,34 @@ private final class FinalizationRun {
             removed = true
         }
         try await mark(.recoveryDataRemoved, before: .beforeRemovedCheckpoint, after: .afterRemovedCheckpoint)
+    }
+}
+
+/// Diagnostics must never "repair" a damaged authoritative event journal by
+/// appending after an incomplete/corrupt line.  Media/checkpoint work may
+/// continue, but the original bytes remain evidence for recovery and review.
+enum SafeSessionEventAppender {
+    static func append(_ event: SessionEventRecord, access: FinalizationFileAccess) throws {
+        let path = SessionArtifact.events.relativePath
+        if try access.identity(path) != nil {
+            let handle = try FileHandle(forReadingFrom: access.url(path))
+            defer { try? handle.close() }
+            var pending = Data()
+            while let chunk = try handle.read(upToCount: 65_536), !chunk.isEmpty {
+                pending.append(chunk)
+                guard pending.count <= 262_144 else { throw AudioFinalizationCode.corruptDocument }
+                while let newline = pending.firstIndex(of: 0x0A) {
+                    let line = pending.prefix(upTo: newline)
+                    pending.removeSubrange(...newline)
+                    guard !line.isEmpty else { continue }
+                    let existing = try JSONDecoder().decode(SessionEventRecord.self, from: line)
+                    guard existing.sessionId == event.sessionId else { throw AudioFinalizationCode.corruptDocument }
+                }
+            }
+            guard pending.isEmpty else { throw AudioFinalizationCode.corruptDocument }
+        }
+        try JSONLWriter().append(event, to: access.url(path))
+        try access.validateDirectories()
     }
 }
 

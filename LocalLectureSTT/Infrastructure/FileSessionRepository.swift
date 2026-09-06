@@ -103,3 +103,147 @@ actor FileSessionRepository: SessionRepository {
     }
 
 }
+
+extension FileSessionRepository: SessionRecoveryPersisting {
+    /// The recovery coordinator supplies the exact document observed during its
+    /// read-only pass.  Re-reading through pinned descriptors prevents a late
+    /// scan from overwriting a newly created/current-process session.
+    func markInterruptedForRecovery(
+        at location: SessionLocation,
+        expected: SessionMetadataDocument,
+        updatedAt: AbsoluteTime
+    ) async throws -> SessionMetadataDocument {
+        let lifecycle = try SessionLifecycle(status: expected.status, captureOutcome: expected.captureOutcome)
+        guard lifecycle.status == .recording || lifecycle.status == .paused else { return expected }
+        let target = try lifecycle.transition(to: .interrupted)
+        return try await replaceRecoveryMetadata(at: location, expected: expected, status: target.status,
+                                                 outcome: target.captureOutcome, updatedAt: updatedAt)
+    }
+
+    func markPreparationAbandonedForRecovery(
+        at location: SessionLocation,
+        expected: SessionMetadataDocument,
+        updatedAt: AbsoluteTime
+    ) async throws -> SessionMetadataDocument {
+        let lifecycle = try SessionLifecycle(status: expected.status, captureOutcome: expected.captureOutcome)
+        guard lifecycle.status == .preparing else { return expected }
+        let target = try lifecycle.transition(to: .error)
+        return try await replaceRecoveryMetadata(at: location, expected: expected, status: target.status,
+                                                 outcome: target.captureOutcome, updatedAt: updatedAt)
+    }
+
+    func appendRecoveryEventIfSafe(
+        at location: SessionLocation, kind: SessionEventKind,
+        code: String,
+        message: String?,
+        occurredAt: AbsoluteTime
+    ) async -> String? {
+        let lease: StorageRootWriteLease
+        do {
+            lease = try await roots.acquireWriteLease(to: location.rootID)
+        } catch let error as AudioFinalizationCode {
+            return "diagnostic.\(error.rawValue)"
+        } catch {
+            return "diagnostic.persistence"
+        }
+        do {
+            let access = try FinalizationFileAccess(root: lease.rootURL, location: location)
+            let eventPath = SessionArtifact.events.relativePath
+            if try recoveryEventAlreadyRecorded(access: access, kind: kind, code: code, sessionID: location.sessionID) {
+                await lease.release()
+                return nil
+            }
+            let event = try SessionEventRecord(sessionId: location.sessionID, eventId: SessionEventID(),
+                                               occurredAt: occurredAt, kind: kind,
+                                               detail: SessionEventDetail(code: code, message: message))
+            try jsonlWriter.append(event, to: access.url(eventPath))
+            try access.validateDirectories()
+            await lease.release()
+            return nil
+        } catch let error as AudioFinalizationCode {
+            await lease.release()
+            return "diagnostic.\(error.rawValue)"
+        } catch {
+            await lease.release()
+            return "diagnostic.persistence"
+        }
+    }
+
+    private func replaceRecoveryMetadata(
+        at location: SessionLocation,
+        expected: SessionMetadataDocument,
+        status: SessionStatus,
+        outcome: CaptureOutcome,
+        updatedAt: AbsoluteTime
+    ) async throws -> SessionMetadataDocument {
+        let lease = try await roots.acquireWriteLease(to: location.rootID)
+        do {
+        let access = try FinalizationFileAccess(root: lease.rootURL, location: location)
+        let current = try access.readJSON(SessionMetadataDocument.self, SessionArtifact.metadata.relativePath)
+        guard current == expected else { throw AudioFinalizationCode.identityChanged }
+        guard current.sessionId == location.sessionID else { throw AudioFinalizationCode.invalidRequest }
+        guard current.status != status || current.captureOutcome != outcome else {
+            await lease.release()
+            return current
+        }
+        let replacement = try SessionMetadataDocument(
+            schemaVersion: current.schemaVersion,
+            sessionId: current.sessionId,
+            title: current.title,
+            status: status,
+            captureOutcome: outcome,
+            createdAt: current.createdAt,
+            recordingStartedAt: current.recordingStartedAt,
+            recordingEndedAt: current.recordingEndedAt,
+            activeDurationMs: current.activeDurationMs,
+            languageMode: current.languageMode,
+            detectedLanguage: current.detectedLanguage,
+            engine: current.engine,
+            model: current.model,
+            audio: current.audio,
+            transcript: current.transcript,
+            appVersion: current.appVersion,
+            osVersion: current.osVersion,
+            lastUpdatedAt: updatedAt
+        )
+        try access.writeJSON(replacement, SessionArtifact.metadata.relativePath)
+        _ = try access.readJSON(SessionMetadataDocument.self, SessionArtifact.metadata.relativePath)
+        try access.validateDirectories()
+        await lease.release()
+        return replacement
+        } catch {
+            await lease.release()
+            throw error
+        }
+    }
+
+    /// A damaged or exceptionally long JSONL line is deliberately not healed or
+    /// appended after.  The caller still resumes audio and reports this warning.
+    private func recoveryEventAlreadyRecorded(
+        access: FinalizationFileAccess,
+        kind: SessionEventKind,
+        code: String,
+        sessionID: SessionID
+    ) throws -> Bool {
+        guard try access.identity(SessionArtifact.events.relativePath) != nil else { return false }
+        let url = try access.url(SessionArtifact.events.relativePath)
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var pending = Data()
+        while let chunk = try handle.read(upToCount: 65_536), !chunk.isEmpty {
+            pending.append(chunk)
+            guard pending.count <= 262_144 else { throw AudioFinalizationCode.corruptDocument }
+            while let newline = pending.firstIndex(of: 0x0A) {
+                let line = pending.prefix(upTo: newline)
+                pending.removeSubrange(...newline)
+                guard !line.isEmpty else { continue }
+                let record = try JSONDecoder().decode(SessionEventRecord.self, from: line)
+                guard record.sessionId == sessionID else { throw AudioFinalizationCode.corruptDocument }
+                if record.kind == kind, record.detail?.code == code { return true }
+            }
+        }
+        guard pending.isEmpty else { throw AudioFinalizationCode.corruptDocument }
+        try access.validateDirectories()
+        return false
+    }
+}

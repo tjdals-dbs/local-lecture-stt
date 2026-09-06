@@ -818,6 +818,910 @@ final class SessionCatalogTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: untouchedSupport.path), "Injected view construction must not create an Application Support catalog")
     }
 
+    func testRecoveryScannerFindsFilesystemSessionAndPinnedTransitionPreservesFields() async throws {
+        let root = temporaryDirectory.appendingPathComponent("recovery-root", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let roots = StorageRootManager(applicationSupportDirectory: temporaryDirectory, bookmarkCodec: CatalogBookmarkCodec())
+        let summary = try await roots.registerSelectedDirectory(root)
+        let repository = FileSessionRepository(roots: roots)
+        let id = SessionID(UUID(uuidString: "a9000000-2222-3333-4444-555555555555")!)
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 123))
+        let location = try await repository.createSession(sessionID: id, createdAt: time, timeZone: .gmt)
+        XCTAssertEqual(location.rootID, summary.id)
+        let original = try SessionMetadataDocument(sessionId: id, title: "preserve title", status: .recording,
+            captureOutcome: .inProgress, createdAt: time, recordingStartedAt: time,
+            activeDurationMs: try MediaMilliseconds(12_345), languageMode: .english,
+            transcript: TranscriptSummary(segmentCount: try TranscriptSegmentCount(4)), appVersion: "test", osVersion: "test", lastUpdatedAt: time)
+        try await repository.writeMetadata(original, at: location)
+        let scans = try await SessionFileScanner(roots: roots).scanForRecovery()
+        let candidate = try XCTUnwrap(scans.flatMap(\.candidates).first)
+        XCTAssertEqual(candidate.location, location)
+        XCTAssertEqual(candidate.metadata, original)
+        XCTAssertFalse(candidate.sourcePresent)
+        let updated = try await repository.markInterruptedForRecovery(at: location, expected: original,
+            updatedAt: AbsoluteTime(Date(timeIntervalSince1970: 456)))
+        XCTAssertEqual(updated.status, .interrupted)
+        XCTAssertEqual(updated.captureOutcome, .interrupted)
+        XCTAssertEqual(updated.title, original.title)
+        XCTAssertEqual(updated.recordingStartedAt, original.recordingStartedAt)
+        XCTAssertEqual(updated.activeDurationMs, original.activeDurationMs)
+        XCTAssertEqual(updated.transcript, original.transcript)
+        let persisted = try await repository.readMetadata(at: location)
+        XCTAssertEqual(persisted, updated)
+        let bytes = try Data(contentsOf: root.appendingPathComponent(location.folderName.rawValue).appendingPathComponent("metadata.json"))
+        _ = try JSONDecoder().decode(SessionMetadataDocument.self, from: bytes)
+    }
+
+    func testT09RecoveryPayloadsRoundTripWithoutStartingFilesystemWork() throws {
+        let rootID = StorageRootID()
+        let sessionID = SessionID()
+        let issue = SessionRecoveryIssue(rootID: rootID, folderName: nil,
+            sessionID: sessionID, code: .finalizationFailed, preserved: true, retryable: true,
+            warning: "exportStart", warnings: ["exportStart", "diagnostic.persistence", "cleanup.persistence"])
+        let report = SessionRecoveryReport(items: [issue], catalogWarning: .openFailed, discoveryWarning: "catalog.openFailed")
+        let snapshot = SessionRecoverySnapshot(generation: 7, phase: .ready, report: report)
+        XCTAssertEqual(try JSONDecoder().decode(SessionRecoverySnapshot.self, from: JSONEncoder().encode(snapshot)), snapshot)
+        XCTAssertEqual(try JSONDecoder().decode(SessionRecoveryIssue.self, from: JSONEncoder().encode(issue)), issue)
+        acceptSendable(snapshot)
+        acceptSendable(issue)
+        let sourceRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: sourceRoot.appendingPathComponent("LocalLectureSTT/Application/SessionCatalog.swift"), encoding: .utf8)
+        let payloadRegion = try XCTUnwrap(source.range(of: "enum SessionRecoveryCode", options: .literal))
+        XCTAssertFalse(source[payloadRegion.lowerBound...].contains("AVFoundation"))
+    }
+
+    func testT09ScannerPreservesDamagedMetadataCheckpointAndUnsafeLayoutBytes() async throws {
+        let root = temporaryDirectory.appendingPathComponent("t09-layout-root", isDirectory: true)
+        let external = temporaryDirectory.appendingPathComponent("external-audio")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("external".utf8).write(to: external)
+        let roots = StorageRootManager(applicationSupportDirectory: temporaryDirectory, bookmarkCodec: CatalogBookmarkCodec())
+        _ = try await roots.registerSelectedDirectory(root)
+        let repository = FileSessionRepository(roots: roots)
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 126))
+
+        let corruptMetadata = try await repository.createSession(sessionID: SessionID(), createdAt: time, timeZone: .gmt)
+        let corruptMetadataURL = root.appendingPathComponent(corruptMetadata.folderName.rawValue).appendingPathComponent("metadata.json")
+        try Data("{ damaged metadata".utf8).write(to: corruptMetadataURL)
+        let corruptCheckpoint = try await repository.createSession(sessionID: SessionID(), createdAt: time, timeZone: .gmt)
+        let checkpointMetadata = try SessionMetadataDocument(sessionId: corruptCheckpoint.sessionID, title: "checkpoint", status: .error,
+            captureOutcome: .interrupted, createdAt: time, activeDurationMs: try MediaMilliseconds(0), languageMode: .korean,
+            transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "T09", osVersion: "test", lastUpdatedAt: time)
+        try await repository.writeMetadata(checkpointMetadata, at: corruptCheckpoint)
+        let checkpointURL = root.appendingPathComponent(corruptCheckpoint.folderName.rawValue)
+            .appendingPathComponent(SessionArtifact.finalizationCheckpoint.relativePath)
+        try Data("{ damaged checkpoint".utf8).write(to: checkpointURL)
+        let unsafe = try await repository.createSession(sessionID: SessionID(), createdAt: time, timeZone: .gmt)
+        let unsafeMetadata = try SessionMetadataDocument(sessionId: unsafe.sessionID, title: "unsafe", status: .error,
+            captureOutcome: .interrupted, createdAt: time, activeDurationMs: try MediaMilliseconds(0), languageMode: .korean,
+            transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "T09", osVersion: "test", lastUpdatedAt: time)
+        try await repository.writeMetadata(unsafeMetadata, at: unsafe)
+        let unsafeAudio = root.appendingPathComponent(unsafe.folderName.rawValue).appendingPathComponent(SessionArtifact.recoveryAudio.relativePath)
+        try FileManager.default.createSymbolicLink(atPath: unsafeAudio.path, withDestinationPath: external.path)
+        let missing = try await repository.createSession(sessionID: SessionID(), createdAt: time, timeZone: .gmt)
+        let missingMetadata = try SessionMetadataDocument(sessionId: missing.sessionID, title: "missing", status: .error,
+            captureOutcome: .interrupted, createdAt: time, activeDurationMs: try MediaMilliseconds(0), languageMode: .korean,
+            transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "T09", osVersion: "test", lastUpdatedAt: time)
+        try await repository.writeMetadata(missingMetadata, at: missing)
+        try FileManager.default.removeItem(at: root.appendingPathComponent(missing.folderName.rawValue).appendingPathComponent("metadata.json"))
+        let unrelated = root.appendingPathComponent("not-a-session", isDirectory: true)
+        try FileManager.default.createDirectory(at: unrelated.appendingPathComponent("nested", isDirectory: true), withIntermediateDirectories: true)
+        try Data("unrelated".utf8).write(to: unrelated.appendingPathComponent("nested/metadata.json"))
+
+        let before = try treeSnapshot(root)
+        let scanner = SessionFileScanner(roots: roots)
+        let scanned = try await scanner.scanForRecovery()
+        let issues = scanned.flatMap(\.issues)
+        XCTAssertTrue(issues.contains { $0.code == .metadataCorrupt && $0.folderName == corruptMetadata.folderName.rawValue })
+        XCTAssertTrue(issues.contains { $0.code == .checkpointCorrupt && $0.folderName == corruptCheckpoint.folderName.rawValue })
+        XCTAssertTrue(issues.contains { $0.code == .unsafeLayout && $0.folderName == unsafe.folderName.rawValue })
+        XCTAssertTrue(issues.contains { $0.code == .metadataMissing && $0.folderName == missing.folderName.rawValue })
+        XCTAssertFalse(issues.contains { $0.folderName == "not-a-session" }, "T09 must not recurse into unrelated folders")
+
+        let recovery = SessionRecoveryCoordinator(scanner: scanner, persistence: repository,
+            finalization: AudioFinalizationCoordinator(worker: RecoveryWorkerStub()),
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        await recovery.start(); await recovery.waitForCurrentPassSettlement()
+        XCTAssertEqual(try treeSnapshot(root), before, "diagnosis must retain every damaged or unsafe artifact byte-for-byte")
+    }
+
+    func testT09RecoverySeparatelyQuarantinesFutureSchemaIdentityAndCheckpointPrefix() async throws {
+        let root = temporaryDirectory.appendingPathComponent("t09-schema-identity-root", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let roots = StorageRootManager(applicationSupportDirectory: temporaryDirectory, bookmarkCodec: CatalogBookmarkCodec())
+        _ = try await roots.registerSelectedDirectory(root)
+        let repository = FileSessionRepository(roots: roots)
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 126))
+
+        func session(_ title: String) async throws -> (SessionLocation, SessionMetadataDocument) {
+            let location = try await repository.createSession(sessionID: SessionID(), createdAt: time, timeZone: .gmt)
+            let metadata = try SessionMetadataDocument(sessionId: location.sessionID, title: title, status: .securing,
+                captureOutcome: .completed, createdAt: time, activeDurationMs: try MediaMilliseconds(0), languageMode: .korean,
+                transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "T09", osVersion: "test", lastUpdatedAt: time)
+            try await repository.writeMetadata(metadata, at: location)
+            return (location, metadata)
+        }
+        func mutateJSON(_ url: URL, _ update: (inout [String: Any]) -> Void) throws {
+            var object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+            update(&object)
+            try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: url)
+        }
+
+        let (futureMetadata, _) = try await session("future metadata")
+        let futureMetadataURL = root.appendingPathComponent(futureMetadata.folderName.rawValue).appendingPathComponent("metadata.json")
+        try mutateJSON(futureMetadataURL) { $0["schemaVersion"] = 2 }
+
+        let (mismatchedMetadata, metadata) = try await session("mismatched metadata")
+        let mismatchedMetadataURL = root.appendingPathComponent(mismatchedMetadata.folderName.rawValue).appendingPathComponent("metadata.json")
+        let otherID = SessionID()
+        let otherMetadata = try SessionMetadataDocument(sessionId: otherID, title: metadata.title, status: metadata.status,
+            captureOutcome: metadata.captureOutcome, createdAt: metadata.createdAt, activeDurationMs: metadata.activeDurationMs,
+            languageMode: metadata.languageMode, transcript: metadata.transcript, appVersion: metadata.appVersion,
+            osVersion: metadata.osVersion, lastUpdatedAt: metadata.lastUpdatedAt)
+        try JSONEncoder().encode(otherMetadata).write(to: mismatchedMetadataURL)
+
+        let (futureCheckpoint, _) = try await session("future checkpoint")
+        let futureCheckpointURL = root.appendingPathComponent(futureCheckpoint.folderName.rawValue).appendingPathComponent(SessionArtifact.finalizationCheckpoint.relativePath)
+        try JSONEncoder().encode(try FinalizationCheckpointDocument(sessionId: futureCheckpoint.sessionID, updatedAt: time)).write(to: futureCheckpointURL)
+        try mutateJSON(futureCheckpointURL) { $0["schemaVersion"] = 2 }
+
+        let (skippedPrefix, _) = try await session("skipped checkpoint")
+        let skippedPrefixURL = root.appendingPathComponent(skippedPrefix.folderName.rawValue).appendingPathComponent(SessionArtifact.finalizationCheckpoint.relativePath)
+        try JSONEncoder().encode(try FinalizationCheckpointDocument(sessionId: skippedPrefix.sessionID, updatedAt: time,
+            completedSteps: [.workingAudioSecured])).write(to: skippedPrefixURL)
+        try mutateJSON(skippedPrefixURL) { $0["completedSteps"] = [FinalizationStep.finalM4ACreated.rawValue] }
+
+        let before = try treeSnapshot(root)
+        let scanner = SessionFileScanner(roots: roots)
+        let scanned = try await scanner.scanForRecovery()
+        let issues = scanned.flatMap(\.issues)
+        XCTAssertTrue(issues.contains { $0.folderName == futureMetadata.folderName.rawValue && $0.code == .metadataUnsupported })
+        XCTAssertTrue(issues.contains { $0.folderName == mismatchedMetadata.folderName.rawValue && $0.code == .sessionIDMismatch })
+        XCTAssertTrue(issues.contains { $0.sessionID == futureCheckpoint.sessionID && $0.code == .checkpointUnsupported })
+        XCTAssertTrue(issues.contains { $0.sessionID == skippedPrefix.sessionID && $0.code == .checkpointInconsistent })
+        let worker = RecoveryWorkerStub()
+        let recovery = SessionRecoveryCoordinator(scanner: scanner, persistence: repository,
+            finalization: AudioFinalizationCoordinator(worker: worker),
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        await recovery.start(); await recovery.waitForCurrentPassSettlement()
+        let calls = await worker.calls()
+        XCTAssertEqual(calls, 0)
+        XCTAssertEqual(try treeSnapshot(root), before, "T09 must diagnose future/identity/prefix inputs without rewriting them")
+    }
+
+    func testT09DiscoversActiveAndHistoricalRootsWithoutCatalogRowsAndQuarantinesDuplicates() async throws {
+        let historical = temporaryDirectory.appendingPathComponent("t09-historical", isDirectory: true)
+        let active = temporaryDirectory.appendingPathComponent("t09-active", isDirectory: true)
+        try FileManager.default.createDirectory(at: historical, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: active, withIntermediateDirectories: true)
+        let roots = StorageRootManager(applicationSupportDirectory: temporaryDirectory, bookmarkCodec: CatalogBookmarkCodec())
+        let historicalSummary = try await roots.registerSelectedDirectory(historical)
+        let repository = FileSessionRepository(roots: roots)
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 127))
+        let duplicateID = SessionID()
+        let oldLocation = try await repository.createSession(sessionID: duplicateID, createdAt: time, timeZone: .gmt)
+        let metadata = try SessionMetadataDocument(sessionId: duplicateID, title: "duplicate", status: .error,
+            captureOutcome: .interrupted, createdAt: time, activeDurationMs: try MediaMilliseconds(0), languageMode: .korean,
+            transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "T09", osVersion: "test", lastUpdatedAt: time)
+        try await repository.writeMetadata(metadata, at: oldLocation)
+        let activeSummary = try await roots.registerSelectedDirectory(active)
+        let duplicateLocation = try await repository.createSession(sessionID: duplicateID, createdAt: time, timeZone: .gmt)
+        try await repository.writeMetadata(metadata, at: duplicateLocation)
+        let uniqueID = SessionID()
+        let uniqueTime = AbsoluteTime(Date(timeIntervalSince1970: 128))
+        let unique = try await repository.createSession(sessionID: uniqueID, createdAt: uniqueTime, timeZone: .gmt)
+        let uniqueMetadata = try SessionMetadataDocument(sessionId: uniqueID, title: "unique", status: .error,
+            captureOutcome: .interrupted, createdAt: uniqueTime, activeDurationMs: try MediaMilliseconds(0), languageMode: .english,
+            transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "T09", osVersion: "test", lastUpdatedAt: time)
+        try await repository.writeMetadata(uniqueMetadata, at: unique)
+        try FileManager.default.createDirectory(at: active.appendingPathComponent("not-a-session/deeper", isDirectory: true), withIntermediateDirectories: true)
+
+        let duplicateBefore = [
+            try Data(contentsOf: historical.appendingPathComponent(oldLocation.folderName.rawValue).appendingPathComponent("metadata.json")),
+            try Data(contentsOf: active.appendingPathComponent(duplicateLocation.folderName.rawValue).appendingPathComponent("metadata.json"))
+        ]
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: temporaryDirectory.appendingPathComponent("empty-catalog"))
+        let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: store)
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: repository,
+            finalization: AudioFinalizationCoordinator(worker: RecoveryWorkerStub()), catalog: catalog)
+        await recovery.start(); await recovery.waitForCurrentPassSettlement()
+        let snapshot = await recovery.currentSnapshot()
+        let report = try XCTUnwrap(snapshot.report)
+        XCTAssertEqual(Set(report.items.filter { $0.code == .duplicateSession }.compactMap(\.rootID)),
+                       Set([historicalSummary.id, activeSummary.id]))
+        XCTAssertEqual(try Data(contentsOf: historical.appendingPathComponent(oldLocation.folderName.rawValue).appendingPathComponent("metadata.json")), duplicateBefore[0])
+        XCTAssertEqual(try Data(contentsOf: active.appendingPathComponent(duplicateLocation.folderName.rawValue).appendingPathComponent("metadata.json")), duplicateBefore[1])
+        let items = try await catalog.orderedItems()
+        XCTAssertTrue(items.contains { $0.sessionID == uniqueID }, "filesystem recovery must find a session despite an initially empty SQLite catalog")
+        try await store.close()
+    }
+
+    @MainActor
+    func testReviewHistoricalReauthorizationFailurePreservesActiveRootUI() async throws {
+        let active = StorageRootSummary(id: StorageRootID(), displayName: "active", displayPath: "/active", updatedAt: AbsoluteTime(Date()))
+        let historical = StorageRootID()
+        let controller = CallbackRootController(availability: .available(active, refreshedBookmark: false), summary: active,
+                                                reauthorizationError: .rootNotDirectory)
+        let viewModel = StorageRootViewModel(controller: controller,
+            directorySelector: CallbackDirectorySelector(selectedURL: temporaryDirectory))
+        await viewModel.restore()
+        XCTAssertEqual(viewModel.state, .available(active, refreshedBookmark: false))
+        await viewModel.reauthorize(rootID: historical)
+        XCTAssertEqual(viewModel.state, .available(active, refreshedBookmark: false),
+                       "A historical-root failure must not hide the active recording and Stop UI")
+        XCTAssertEqual(viewModel.historicalReauthorizationErrors[historical], .rootNotDirectory,
+                       "The failure belongs to the requested historical root, not the active-root state")
+    }
+
+    func testReviewDanglingCheckpointIsNotMissingCheckpoint() async throws {
+        let root = temporaryDirectory.appendingPathComponent("dangling-root", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let roots = StorageRootManager(applicationSupportDirectory: temporaryDirectory, bookmarkCodec: CatalogBookmarkCodec())
+        _ = try await roots.registerSelectedDirectory(root)
+        let repository = FileSessionRepository(roots: roots)
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 140))
+        let location = try await repository.createSession(sessionID: SessionID(), createdAt: time, timeZone: .gmt)
+        let metadata = try SessionMetadataDocument(sessionId: location.sessionID, title: "dangling", status: .securing,
+            captureOutcome: .completed, createdAt: time, activeDurationMs: try MediaMilliseconds(0), languageMode: .korean,
+            transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "review", osVersion: "test", lastUpdatedAt: time)
+        try await repository.writeMetadata(metadata, at: location)
+        let session = root.appendingPathComponent(location.folderName.rawValue)
+        let absent = temporaryDirectory.appendingPathComponent("absent-checkpoint")
+        let link = session.appendingPathComponent(SessionArtifact.finalizationCheckpoint.relativePath)
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: absent.path)
+        let beforeDestination = try FileManager.default.destinationOfSymbolicLink(atPath: link.path)
+
+        let results = try await SessionFileScanner(roots: roots).scanForRecovery()
+        XCTAssertTrue(results.flatMap(\.issues).contains { $0.sessionID == location.sessionID && $0.code == .unsafeLayout },
+                      "A05 requires a typed unsafe-layout diagnostic for dangling symlinks")
+        XCTAssertFalse(results.flatMap(\.candidates).contains { $0.location == location },
+                       "Dangling checkpoint must not be admitted as a checkpoint-free candidate")
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: link.path), beforeDestination)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: absent.path), "Scanner diagnosis must not create a dangling-link target")
+        let persistedMetadata = try await repository.readMetadata(at: location)
+        XCTAssertEqual(persistedMetadata, metadata)
+    }
+
+    func testT09DanglingProtectedArtifactsAreQuarantinedWithoutMutation() async throws {
+        let root = temporaryDirectory.appendingPathComponent("dangling-protected-root", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let roots = StorageRootManager(applicationSupportDirectory: temporaryDirectory, bookmarkCodec: CatalogBookmarkCodec())
+        _ = try await roots.registerSelectedDirectory(root)
+        let repository = FileSessionRepository(roots: roots)
+        let protected = [SessionArtifact.recoveryAudio.relativePath, "audio.finalizing.m4a",
+                         SessionArtifact.finalAudio.relativePath, SessionArtifact.events.relativePath,
+                         SessionArtifact.finalizationCheckpoint.relativePath]
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 141))
+        var locations: [(SessionLocation, URL, String)] = []
+        for (index, path) in protected.enumerated() {
+            let location = try await repository.createSession(sessionID: SessionID(), createdAt: time, timeZone: .gmt)
+            let metadata = try SessionMetadataDocument(sessionId: location.sessionID, title: "dangling \(index)", status: .error,
+                captureOutcome: .interrupted, createdAt: time, activeDurationMs: try MediaMilliseconds(0), languageMode: .korean,
+                transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "review", osVersion: "test", lastUpdatedAt: time)
+            try await repository.writeMetadata(metadata, at: location)
+            let link = root.appendingPathComponent(location.folderName.rawValue).appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: link.path) { try FileManager.default.removeItem(at: link) }
+            let missingTarget = temporaryDirectory.appendingPathComponent("missing-protected-\(index)")
+            try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: missingTarget.path)
+            locations.append((location, link, missingTarget.path))
+        }
+
+        let result = try await SessionFileScanner(roots: roots).scanForRecovery()
+        for (location, link, target) in locations {
+            XCTAssertTrue(result.flatMap(\.issues).contains { $0.sessionID == location.sessionID && $0.code == .unsafeLayout },
+                          "\(link.lastPathComponent) must never be treated as absent")
+            XCTAssertFalse(result.flatMap(\.candidates).contains { $0.location == location })
+            XCTAssertTrue(FileManager.default.fileExists(atPath: link.deletingLastPathComponent().path))
+            XCTAssertNotNil(try? FileManager.default.destinationOfSymbolicLink(atPath: link.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: target), "Scanner must not materialize a dangling target")
+        }
+    }
+
+    func testReviewDuplicateWithCorruptCheckpointDoesNotMutateHealthyTwin() async throws {
+        let root = temporaryDirectory.appendingPathComponent("duplicate-root", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let roots = StorageRootManager(applicationSupportDirectory: temporaryDirectory, bookmarkCodec: CatalogBookmarkCodec())
+        _ = try await roots.registerSelectedDirectory(root)
+        let repository = FileSessionRepository(roots: roots)
+        let id = SessionID()
+        var locations: [SessionLocation] = []
+        for offset in [0, 10] {
+            let time = AbsoluteTime(Date(timeIntervalSince1970: 150 + Double(offset)))
+            let location = try await repository.createSession(sessionID: id, createdAt: time, timeZone: .gmt)
+            let metadata = try SessionMetadataDocument(sessionId: id, title: "duplicate", status: .recording,
+                captureOutcome: .inProgress, createdAt: time, activeDurationMs: try MediaMilliseconds(0), languageMode: .korean,
+                transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "review", osVersion: "test", lastUpdatedAt: time)
+            try await repository.writeMetadata(metadata, at: location)
+            try Data("source".utf8).write(to: root.appendingPathComponent(location.folderName.rawValue).appendingPathComponent(SessionArtifact.recoveryAudio.relativePath))
+            locations.append(location)
+        }
+        let badCheckpoint = root.appendingPathComponent(locations[1].folderName.rawValue).appendingPathComponent(SessionArtifact.finalizationCheckpoint.relativePath)
+        try Data("{ damaged checkpoint".utf8).write(to: badCheckpoint)
+        let goodMetadata = root.appendingPathComponent(locations[0].folderName.rawValue).appendingPathComponent("metadata.json")
+        let before = try Data(contentsOf: goodMetadata)
+        let worker = RecoveryWorkerStub()
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: repository,
+            finalization: AudioFinalizationCoordinator(worker: worker),
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        await recovery.start()
+        await recovery.waitForCurrentPassSettlement()
+        let snapshot = await recovery.currentSnapshot()
+        let report = try XCTUnwrap(snapshot.report)
+        let calls = await worker.calls()
+        XCTAssertEqual(calls, 0, "An unusable duplicate's known session ID still makes its healthy twin ambiguous")
+        XCTAssertEqual(try Data(contentsOf: goodMetadata), before, "Neither duplicate may be automatically mutated")
+        XCTAssertEqual(report.items.filter { $0.sessionID == id && $0.code == .duplicateSession }.count, 2,
+                       "Every known duplicate location must be quarantined, including the corrupt-checkpoint folder")
+    }
+
+    func testReviewCancellationRetainsCleanupWarningInRecoveryReport() async throws {
+        let id = SessionID()
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 160))
+        let location = SessionLocation(rootID: StorageRootID(), sessionID: id,
+            folderName: SessionFolderName(sessionID: id, createdAt: time, timeZone: .gmt))
+        let metadata = try SessionMetadataDocument(sessionId: id, title: "cancel warnings", status: .securing,
+            captureOutcome: .completed, createdAt: time, activeDurationMs: try MediaMilliseconds(0), languageMode: .korean,
+            transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "review", osVersion: "test", lastUpdatedAt: time)
+        let scanner = RecoveryScannerStub(results: [.init(rootID: location.rootID, candidates: [
+            .init(location: location, metadata: metadata, checkpoint: nil, sourcePresent: true,
+                  stagingPresent: false, canonicalPresent: false, rootWritable: true)], issues: [])])
+        let worker = ReviewCancellationWarningWorker()
+        let finalization = AudioFinalizationCoordinator(worker: worker)
+        let recovery = SessionRecoveryCoordinator(scanner: scanner, persistence: RecoveryPersistenceStub(), finalization: finalization,
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        await recovery.start()
+        await worker.waitUntilEntered()
+        let stream = await finalization.snapshots()
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()
+        let cancellation = Task { await recovery.cancelOwnedRecovery() }
+        while let snapshots = await iterator.next() {
+            if snapshots.first(where: { $0.location == location })?.phase == .cancelling { break }
+        }
+        await worker.openGate()
+        await cancellation.value
+        let result = await finalization.waitForResult(at: location)
+        XCTAssertEqual(result?.failure, .cancelled)
+        XCTAssertTrue(result?.warnings.contains("cleanup.persistence") == true)
+        let snapshot = await recovery.currentSnapshot()
+        let issue = try XCTUnwrap(snapshot.report?.items.first { $0.sessionID == id })
+        XCTAssertEqual(issue.code, .cancelled)
+        XCTAssertEqual(issue.warning, AudioFinalizationCode.cancelled.rawValue)
+        XCTAssertTrue(issue.warnings.contains("cleanup.persistence"),
+                      "T09 cancellation must retain the settled worker warning, not drop its entire report")
+    }
+
+    func testT09RootAccessFailureIsolatedWhileHealthyRootRecoversAndCatalogRowsRemain() async throws {
+        let unavailable = temporaryDirectory.appendingPathComponent("t09-unavailable", isDirectory: true)
+        let healthy = temporaryDirectory.appendingPathComponent("t09-healthy", isDirectory: true)
+        try FileManager.default.createDirectory(at: unavailable, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: healthy, withIntermediateDirectories: true)
+        let codec = SelectiveCatalogBookmarkCodec(deniedPath: unavailable.path)
+        let roots = StorageRootManager(applicationSupportDirectory: temporaryDirectory, bookmarkCodec: codec)
+        let unavailableSummary = try await roots.registerSelectedDirectory(unavailable)
+        let healthySummary = try await roots.registerSelectedDirectory(healthy)
+        let repository = FileSessionRepository(roots: roots)
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 129))
+        let healthyLocation = try await repository.createSession(sessionID: SessionID(), createdAt: time, timeZone: .gmt)
+        let healthyMetadata = try SessionMetadataDocument(sessionId: healthyLocation.sessionID, title: "healthy", status: .securing,
+            captureOutcome: .completed, createdAt: time, activeDurationMs: try MediaMilliseconds(0), languageMode: .english,
+            transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "T09", osVersion: "test", lastUpdatedAt: time)
+        try await repository.writeMetadata(healthyMetadata, at: healthyLocation)
+        let healthyRecovery = healthy.appendingPathComponent(healthyLocation.folderName.rawValue)
+            .appendingPathComponent(SessionArtifact.recoveryAudio.relativePath)
+        try FileManager.default.createDirectory(at: healthyRecovery.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("healthy recovery source".utf8).write(to: healthyRecovery)
+        let unavailableProjection = try projection(id: "92000000-2222-3333-4444-555555555555", created: 1, title: "preserve", status: .completed, root: unavailableSummary.id)
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: temporaryDirectory.appendingPathComponent("t09-catalog"))
+        try await store.apply([result(rootID: unavailableSummary.id, projections: [unavailableProjection])], catalogUpdatedAt: time)
+        let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: store)
+        let worker = RecoveryWorkerStub()
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: repository,
+            finalization: AudioFinalizationCoordinator(worker: worker), catalog: catalog)
+        await recovery.start(); await recovery.waitForCurrentPassSettlement()
+        let snapshot = await recovery.currentSnapshot()
+        let report = try XCTUnwrap(snapshot.report)
+        XCTAssertTrue(report.items.contains {
+            $0.rootID == unavailableSummary.id && $0.code == .rootUnavailable && $0.warning == StorageErrorCode.reauthorizationRequired.rawValue
+        })
+        let calls = await worker.calls()
+        XCTAssertEqual(calls, 1, "an unavailable historical root must not stop healthy-root recovery")
+        let items = try await catalog.orderedItems()
+        XCTAssertNotNil(items.first { $0.sessionID == unavailableProjection.location.sessionID }, "unavailable root must not sweep its catalog row")
+        XCTAssertTrue(items.contains { $0.rootID == healthySummary.id && $0.sessionID == healthyLocation.sessionID })
+        try await store.close()
+    }
+
+    func testT09RootFailureReasonsRemainDistinctAcrossScannerRecoveryAndCatalog() async throws {
+        // An empty registry is a valid no-root state, not an unavailable root.
+        let noRootManager = StorageRootManager(applicationSupportDirectory: temporaryDirectory.appendingPathComponent("t09-no-root"), bookmarkCodec: CatalogBookmarkCodec())
+        let noRootResults = try await SessionFileScanner(roots: noRootManager).scanForRecovery()
+        XCTAssertTrue(noRootResults.isEmpty)
+
+        let readOnly = temporaryDirectory.appendingPathComponent("t09-read-only", isDirectory: true)
+        try FileManager.default.createDirectory(at: readOnly, withIntermediateDirectories: true)
+        let roots = StorageRootManager(applicationSupportDirectory: temporaryDirectory.appendingPathComponent("t09-read-support"), bookmarkCodec: CatalogBookmarkCodec())
+        _ = try await roots.registerSelectedDirectory(readOnly)
+        let repository = FileSessionRepository(roots: roots)
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 130))
+        let location = try await repository.createSession(sessionID: SessionID(), createdAt: time, timeZone: .gmt)
+        let metadata = try SessionMetadataDocument(sessionId: location.sessionID, title: "read only", status: .securing,
+            captureOutcome: .completed, createdAt: time, activeDurationMs: try MediaMilliseconds(0), languageMode: .english,
+            transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "T09", osVersion: "test", lastUpdatedAt: time)
+        try await repository.writeMetadata(metadata, at: location)
+        let metadataURL = readOnly.appendingPathComponent(location.folderName.rawValue).appendingPathComponent("metadata.json")
+        let before = try Data(contentsOf: metadataURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: readOnly.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: readOnly.path) }
+        let readCatalogStore = try SQLiteSessionCatalogStore(applicationSupportDirectory: temporaryDirectory.appendingPathComponent("t09-read-catalog"))
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: repository,
+            finalization: AudioFinalizationCoordinator(worker: RecoveryWorkerStub()),
+            catalog: SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: readCatalogStore))
+        await recovery.start(); await recovery.waitForCurrentPassSettlement()
+        let readOnlySnapshot = await recovery.currentSnapshot()
+        let readOnlyReport = try XCTUnwrap(readOnlySnapshot.report)
+        XCTAssertTrue(readOnlyReport.items.contains {
+            $0.rootID == location.rootID && $0.sessionID == location.sessionID && $0.folderName == location.folderName.rawValue && $0.code == .rootReadOnly
+        })
+        XCTAssertEqual(try Data(contentsOf: metadataURL), before, "read-only discovery must not mutate its session")
+        try await readCatalogStore.close()
+
+        let registrySupport = temporaryDirectory.appendingPathComponent("t09-future-registry")
+        let registryURL = registrySupport.appendingPathComponent("LocalLectureSTT/Storage/storage-roots.json")
+        try FileManager.default.createDirectory(at: registryURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("{\"schemaVersion\":2,\"activeRootID\":null,\"roots\":[]}".utf8).write(to: registryURL)
+        let futureRoots = StorageRootManager(applicationSupportDirectory: registrySupport, bookmarkCodec: CatalogBookmarkCodec())
+        do {
+            _ = try await SessionFileScanner(roots: futureRoots).scanForRecovery()
+            XCTFail("future registry must not become an empty healthy root list")
+        } catch let error as StorageError {
+            XCTAssertEqual(error.code, .registryUnsupported)
+        }
+        let futureStore = try SQLiteSessionCatalogStore(applicationSupportDirectory: temporaryDirectory.appendingPathComponent("t09-future-catalog"))
+        let futureCatalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: futureRoots), store: futureStore)
+        do {
+            _ = try await futureCatalog.reconcile()
+            XCTFail("catalog must surface registry failure rather than sweep rows")
+        } catch let error as CatalogError {
+            XCTAssertEqual(error.code, .storageRootRegistryFailed)
+        }
+        try await futureStore.close()
+    }
+
+    func testT09RecoveryStateMatrixPersistsOnlyRequiredDurableTransitions() async throws {
+        let root = temporaryDirectory.appendingPathComponent("t09-state-matrix", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let roots = StorageRootManager(applicationSupportDirectory: temporaryDirectory.appendingPathComponent("t09-state-support"), bookmarkCodec: CatalogBookmarkCodec())
+        _ = try await roots.registerSelectedDirectory(root)
+        let repository = FileSessionRepository(roots: roots)
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 131))
+        let inputs: [(SessionStatus, CaptureOutcome)] = [(.recording, .inProgress), (.paused, .inProgress), (.securing, .completed), (.preparing, .notStarted)]
+        var locations: [SessionStatus: SessionLocation] = [:]
+        var originals: [SessionStatus: SessionMetadataDocument] = [:]
+        for (index, input) in inputs.enumerated() {
+            let location = try await repository.createSession(sessionID: SessionID(),
+                createdAt: AbsoluteTime(Date(timeIntervalSince1970: 131 + TimeInterval(index))), timeZone: .gmt)
+            let document = try SessionMetadataDocument(sessionId: location.sessionID, title: "preserve \(input.0.rawValue)",
+                status: input.0, captureOutcome: input.1, createdAt: time, recordingStartedAt: time,
+                activeDurationMs: try MediaMilliseconds(12_345), languageMode: .automatic,
+                transcript: .init(segmentCount: try TranscriptSegmentCount(7)), appVersion: "T09", osVersion: "test", lastUpdatedAt: time)
+            try await repository.writeMetadata(document, at: location)
+            locations[input.0] = location
+            originals[input.0] = document
+        }
+        let first = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: repository,
+            finalization: AudioFinalizationCoordinator(worker: RecoveryWorkerStub()),
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        await first.start(); await first.waitForCurrentPassSettlement()
+        let firstSnapshot = await first.currentSnapshot()
+        let firstReport = try XCTUnwrap(firstSnapshot.report)
+        XCTAssertTrue(firstReport.items.contains { $0.code == .preparationAbandoned })
+        for status in [SessionStatus.recording, .paused] {
+            let location = try XCTUnwrap(locations[status])
+            let persisted = try await repository.readMetadata(at: location)
+            let original = try XCTUnwrap(originals[status])
+            XCTAssertEqual(persisted.status, .interrupted)
+            XCTAssertEqual(persisted.captureOutcome, .interrupted)
+            XCTAssertEqual(persisted.title, original.title)
+            XCTAssertEqual(persisted.recordingStartedAt, original.recordingStartedAt)
+            XCTAssertEqual(persisted.activeDurationMs, original.activeDurationMs)
+            XCTAssertEqual(persisted.transcript, original.transcript)
+        }
+        let securing = try await repository.readMetadata(at: try XCTUnwrap(locations[.securing]))
+        XCTAssertEqual(securing, originals[.securing], "normal completion outcome must not be rewritten")
+        let preparation = try await repository.readMetadata(at: try XCTUnwrap(locations[.preparing]))
+        XCTAssertEqual(preparation.status, .error)
+        XCTAssertEqual(preparation.captureOutcome, .notStarted)
+
+        let bytesAfterFirst = try locations.values.map { location in
+            (location, try Data(contentsOf: root.appendingPathComponent(location.folderName.rawValue).appendingPathComponent("metadata.json")))
+        }
+        let freshRoots = StorageRootManager(applicationSupportDirectory: temporaryDirectory.appendingPathComponent("t09-state-fresh"), bookmarkCodec: CatalogBookmarkCodec())
+        _ = try await freshRoots.registerSelectedDirectory(root)
+        let second = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: freshRoots), persistence: FileSessionRepository(roots: freshRoots),
+            finalization: AudioFinalizationCoordinator(worker: RecoveryWorkerStub()),
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        await second.start(); await second.waitForCurrentPassSettlement()
+        for (location, expected) in bytesAfterFirst {
+            XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(location.folderName.rawValue).appendingPathComponent("metadata.json")), expected,
+                           "unchanged recovery input must not rewrite metadata on a fresh pass")
+        }
+    }
+
+    func testRecoveryCoordinatorCoalescesRequestsAndNeverSubmitsBeforeInterruptedWrite() async throws {
+        let id = SessionID(UUID(uuidString: "b9000000-2222-3333-4444-555555555555")!)
+        let validLocation = SessionLocation(rootID: StorageRootID(), sessionID: id,
+            folderName: SessionFolderName(sessionID: id, createdAt: AbsoluteTime(Date(timeIntervalSince1970: 1)), timeZone: .gmt))
+        let metadata = try SessionMetadataDocument(sessionId: id, title: "old", status: .recording,
+            captureOutcome: .inProgress, createdAt: AbsoluteTime(Date(timeIntervalSince1970: 1)),
+            activeDurationMs: try MediaMilliseconds(0), languageMode: .korean,
+            transcript: TranscriptSummary(segmentCount: try TranscriptSegmentCount(0)), appVersion: "test", osVersion: "test", lastUpdatedAt: AbsoluteTime(Date(timeIntervalSince1970: 1)))
+        let scanner = RecoveryScannerStub(results: [.init(rootID: validLocation.rootID,
+            candidates: [.init(location: validLocation, metadata: metadata, checkpoint: nil, sourcePresent: false,
+                               stagingPresent: false, canonicalPresent: false, rootWritable: true)], issues: [])])
+        let persistence = RecoveryPersistenceStub()
+        let worker = RecoveryWorkerStub()
+        let coordinator = SessionRecoveryCoordinator(scanner: scanner, persistence: persistence,
+            finalization: AudioFinalizationCoordinator(worker: worker), catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        await coordinator.start(); await coordinator.refresh(); await coordinator.waitForInitialDiscovery()
+        await coordinator.waitForCurrentPassSettlement()
+        let settled = await coordinator.currentSnapshot()
+        let report = try XCTUnwrap(settled.report)
+        XCTAssertTrue(report.items.contains { $0.code == .missingRecoverySource })
+        let writes = await persistence.interruptedWrites()
+        let calls = await worker.calls()
+        XCTAssertEqual(writes, 2, "one queued root refresh runs after, not concurrently with, startup")
+        XCTAssertEqual(calls, 0, "missing source must not submit a finalizer")
+    }
+
+    func testRecoveryPublishesDiscoveringToExistingObserverBeforeGatedScanCompletes() async throws {
+        let scanner = GatedRecoveryScanner(results: [])
+        let coordinator = SessionRecoveryCoordinator(scanner: scanner, persistence: RecoveryPersistenceStub(),
+            finalization: AudioFinalizationCoordinator(worker: RecoveryWorkerStub()),
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        let stream = await coordinator.snapshots()
+        var iterator = stream.makeAsyncIterator()
+        let initial = await iterator.next()
+        XCTAssertEqual(initial?.phase, .idle)
+
+        await coordinator.start()
+        await scanner.waitUntilEntered()
+        let discovering = await iterator.next()
+        XCTAssertEqual(discovering?.phase, .discovering,
+                       "An observer that subscribed before start must receive the pass before scan completion")
+        await scanner.open()
+        await coordinator.waitForCurrentPassSettlement()
+        let ready = await iterator.next()
+        XCTAssertEqual(ready?.phase, .ready)
+    }
+
+    func testT09ObserverCancellationDoesNotCancelOwnerAndResubscriptionSeesSettlement() async throws {
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 123))
+        let sessionID = SessionID()
+        let location = SessionLocation(rootID: StorageRootID(), sessionID: sessionID,
+            folderName: SessionFolderName(sessionID: sessionID, createdAt: time, timeZone: .gmt))
+        let metadata = try SessionMetadataDocument(sessionId: sessionID, title: "observer", status: .securing,
+            captureOutcome: .completed, createdAt: time, activeDurationMs: try MediaMilliseconds(0), languageMode: .korean,
+            transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "T09", osVersion: "test", lastUpdatedAt: time)
+        let scanner = GatedRecoveryScanner(results: [.init(rootID: location.rootID, candidates: [
+            .init(location: location, metadata: metadata, checkpoint: nil, sourcePresent: true,
+                  stagingPresent: false, canonicalPresent: false, rootWritable: true)
+        ], issues: [])])
+        let worker = RecoveryWorkerStub()
+        let recovery = SessionRecoveryCoordinator(scanner: scanner, persistence: RecoveryPersistenceStub(),
+            finalization: AudioFinalizationCoordinator(worker: worker),
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        await recovery.start()
+        await scanner.waitUntilEntered()
+        let observation = RecoveryObserverGate()
+        let cancelledObserver = Task {
+            let stream = await recovery.snapshots()
+            var iterator = stream.makeAsyncIterator()
+            let first = await iterator.next()
+            await observation.arrive(first)
+            try? await Task.sleep(nanoseconds: 60_000_000_000)
+        }
+        let discovered = await observation.wait()
+        XCTAssertEqual(discovered?.phase, .discovering)
+        cancelledObserver.cancel()
+        await cancelledObserver.value
+
+        let replacementStream = await recovery.snapshots()
+        var replacement = replacementStream.makeAsyncIterator()
+        let replacementDiscovery = await replacement.next()
+        XCTAssertEqual(replacementDiscovery?.phase, .discovering,
+                       "A replacement observer receives the owner snapshot after the prior observer cancels")
+        await scanner.open()
+        await recovery.waitForCurrentPassSettlement()
+        let settled = await replacement.next()
+        XCTAssertEqual(settled?.phase, .ready)
+        let workerCalls = await worker.calls()
+        XCTAssertEqual(workerCalls, 1, "Observer lifetime must not cancel or duplicate owner work")
+    }
+
+    func testRecoveryActivityReservationAtomicallyDefersLiveSessionUntilRelease() async throws {
+        let id = SessionID(UUID(uuidString: "c9000000-2222-3333-4444-555555555555")!)
+        let rootID = StorageRootID()
+        let location = SessionLocation(rootID: rootID, sessionID: id,
+            folderName: SessionFolderName(sessionID: id, createdAt: AbsoluteTime(Date(timeIntervalSince1970: 1)), timeZone: .gmt))
+        let metadata = try SessionMetadataDocument(sessionId: id, title: "live", status: .recording,
+            captureOutcome: .inProgress, createdAt: AbsoluteTime(Date(timeIntervalSince1970: 1)),
+            activeDurationMs: try MediaMilliseconds(0), languageMode: .korean,
+            transcript: TranscriptSummary(segmentCount: try TranscriptSegmentCount(0)), appVersion: "test", osVersion: "test", lastUpdatedAt: AbsoluteTime(Date(timeIntervalSince1970: 1)))
+        let scanner = RecoveryScannerStub(results: [.init(rootID: rootID, candidates: [.init(location: location,
+            metadata: metadata, checkpoint: nil, sourcePresent: false, stagingPresent: false, canonicalPresent: false, rootWritable: true)], issues: [])])
+        let persistence = RecoveryPersistenceStub()
+        let activity = SessionActivityRegistry()
+        let reservation = await activity.reserveRecordingCreation(rootID: rootID)
+        let promoted = await activity.promoteRecording(reservation, at: location)
+        XCTAssertTrue(promoted)
+        let coordinator = SessionRecoveryCoordinator(scanner: scanner, persistence: persistence,
+            finalization: AudioFinalizationCoordinator(worker: RecoveryWorkerStub()),
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)), activity: activity)
+
+        await coordinator.start(); await coordinator.waitForCurrentPassSettlement()
+        let protectedSnapshot = await coordinator.currentSnapshot()
+        let protectedReport = try XCTUnwrap(protectedSnapshot.report)
+        XCTAssertTrue(protectedReport.items.contains { $0.code == .currentProcessActive })
+        let protectedWrites = await persistence.interruptedWrites()
+        XCTAssertEqual(protectedWrites, 0, "recovery must not mutate a live T07/T08-owned location")
+
+        await activity.release(reservation)
+        await coordinator.refresh(); await coordinator.waitForCurrentPassSettlement()
+        let recoveredWrites = await persistence.interruptedWrites()
+        XCTAssertEqual(recoveredWrites, 1, "release is the only point at which recovery may claim the location")
+    }
+
+    func testRecoveryMetadataWriteFaultNeverSubmitsFinalizer() async throws {
+        let id = SessionID(UUID(uuidString: "d9000000-2222-3333-4444-555555555555")!)
+        let location = SessionLocation(rootID: StorageRootID(), sessionID: id,
+            folderName: SessionFolderName(sessionID: id, createdAt: AbsoluteTime(Date(timeIntervalSince1970: 1)), timeZone: .gmt))
+        let metadata = try SessionMetadataDocument(sessionId: id, title: "fault", status: .recording,
+            captureOutcome: .inProgress, createdAt: AbsoluteTime(Date(timeIntervalSince1970: 1)),
+            activeDurationMs: try MediaMilliseconds(0), languageMode: .automatic,
+            transcript: TranscriptSummary(segmentCount: try TranscriptSegmentCount(0)), appVersion: "test", osVersion: "test", lastUpdatedAt: AbsoluteTime(Date(timeIntervalSince1970: 1)))
+        let scanner = RecoveryScannerStub(results: [.init(rootID: location.rootID, candidates: [.init(location: location,
+            metadata: metadata, checkpoint: nil, sourcePresent: true, stagingPresent: false, canonicalPresent: false, rootWritable: true)], issues: [])])
+        let persistence = RecoveryPersistenceStub(failInterruptedWrite: true)
+        let worker = RecoveryWorkerStub()
+        let coordinator = SessionRecoveryCoordinator(scanner: scanner, persistence: persistence,
+            finalization: AudioFinalizationCoordinator(worker: worker), catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        await coordinator.start(); await coordinator.waitForCurrentPassSettlement()
+        let snapshot = await coordinator.currentSnapshot()
+        let report = try XCTUnwrap(snapshot.report)
+        XCTAssertTrue(report.items.contains { $0.warning == "interruptedWrite" })
+        let calls = await worker.calls()
+        XCTAssertEqual(calls, 0, "a real durable metadata write fault must prevent T08 submission")
+    }
+
+    func testT09OwnedCancellationWaitsForWorkerCleanupAndDefersRefresh() async throws {
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 125))
+        let id = SessionID()
+        let location = SessionLocation(rootID: StorageRootID(), sessionID: id,
+            folderName: SessionFolderName(sessionID: id, createdAt: time, timeZone: .gmt))
+        let metadata = try SessionMetadataDocument(sessionId: id, title: "cancel gate", status: .securing,
+            captureOutcome: .completed, createdAt: time, activeDurationMs: try MediaMilliseconds(0),
+            languageMode: .korean, transcript: TranscriptSummary(segmentCount: try TranscriptSegmentCount(0)),
+            appVersion: "T09", osVersion: "test", lastUpdatedAt: time)
+        let scanner = RecoveryScannerStub(results: [.init(rootID: location.rootID, candidates: [
+            .init(location: location, metadata: metadata, checkpoint: nil, sourcePresent: true,
+                  stagingPresent: false, canonicalPresent: false, rootWritable: true)
+        ], issues: [])])
+        let worker = GatedCancellationRecoveryWorker()
+        let finalization = AudioFinalizationCoordinator(worker: worker)
+        let coordinator = SessionRecoveryCoordinator(scanner: scanner, persistence: RecoveryPersistenceStub(),
+            finalization: finalization,
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        await coordinator.start()
+        await worker.waitUntilEntered()
+
+        let stream = await finalization.snapshots()
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()
+        let cancellation = Task {
+            await coordinator.cancelOwnedRecovery()
+        }
+        var cancelling: AudioFinalizationSnapshot?
+        while cancelling == nil, let snapshots = await iterator.next() {
+            if let snapshot = snapshots.first(where: { $0.location == location }), snapshot.phase == .cancelling {
+                cancelling = snapshot
+            }
+        }
+        XCTAssertEqual(cancelling?.phase, .cancelling,
+                       "Open the cleanup gate only after T08 accepted cancellation for this exact location")
+        await coordinator.refresh()
+        let callsBeforeCleanup = await worker.calls()
+        XCTAssertEqual(callsBeforeCleanup, 1, "root refresh must stay pending while owned cleanup is blocked")
+
+        await worker.openCleanupGate()
+        await cancellation.value
+        await coordinator.waitForCurrentPassSettlement()
+        let firstFailure = await worker.firstFailure()
+        XCTAssertEqual(firstFailure, .cancelled)
+    }
+
+    func testT09CancellationAfterWorkerSettlementDoesNotRewriteCompletedResult() async throws {
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 125))
+        let sessionID = SessionID()
+        // A cancellation which loses to an already settled T08 result is a
+        // distinct case from the cleanup-gate cancellation above.
+        let validLocation = SessionLocation(rootID: StorageRootID(), sessionID: sessionID,
+            folderName: SessionFolderName(sessionID: sessionID, createdAt: time, timeZone: .gmt))
+        let metadata = try SessionMetadataDocument(sessionId: validLocation.sessionID, title: "settled first", status: .securing,
+            captureOutcome: .completed, createdAt: time, activeDurationMs: try MediaMilliseconds(0), languageMode: .korean,
+            transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "T09", osVersion: "test", lastUpdatedAt: time)
+        let scanner = RecoveryScannerStub(results: [.init(rootID: validLocation.rootID, candidates: [
+            .init(location: validLocation, metadata: metadata, checkpoint: nil, sourcePresent: true,
+                  stagingPresent: false, canonicalPresent: false, rootWritable: true)
+        ], issues: [])])
+        let worker = RecoveryWorkerStub()
+        let finalization = AudioFinalizationCoordinator(worker: worker)
+        let coordinator = SessionRecoveryCoordinator(scanner: scanner, persistence: RecoveryPersistenceStub(), finalization: finalization,
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        await coordinator.start()
+        await coordinator.waitForCurrentPassSettlement()
+        let settled = await finalization.waitForResult(at: validLocation)
+        XCTAssertEqual(settled?.failure, .sourceMissing)
+
+        await coordinator.cancelOwnedRecovery()
+        await coordinator.waitForCurrentPassSettlement()
+        let afterCancel = await finalization.waitForResult(at: validLocation)
+        XCTAssertEqual(afterCancel?.failure, .sourceMissing,
+                       "late cancellation must not turn an already settled T08 result into cancelled")
+        let calls = await worker.calls()
+        XCTAssertEqual(calls, 1)
+    }
+
+    func testReviewExplicitRecoveryRetryInvokesWorkerAgain() async throws {
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 123))
+        let id = SessionID()
+        let location = SessionLocation(rootID: StorageRootID(), sessionID: id,
+            folderName: SessionFolderName(sessionID: id, createdAt: time, timeZone: .gmt))
+        let metadata = try SessionMetadataDocument(sessionId: id, title: "retry", status: .securing,
+            captureOutcome: .completed, createdAt: time, activeDurationMs: try MediaMilliseconds(0),
+            languageMode: .korean, transcript: TranscriptSummary(segmentCount: try TranscriptSegmentCount(0)),
+            appVersion: "review", osVersion: "review", lastUpdatedAt: time)
+        let scanner = RecoveryScannerStub(results: [.init(rootID: location.rootID, candidates: [
+            .init(location: location, metadata: metadata, checkpoint: nil, sourcePresent: true,
+                  stagingPresent: false, canonicalPresent: false, rootWritable: true)
+        ], issues: [])])
+        let worker = RecoveryWorkerStub()
+        let coordinator = SessionRecoveryCoordinator(scanner: scanner, persistence: RecoveryPersistenceStub(),
+            finalization: AudioFinalizationCoordinator(worker: worker),
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        await coordinator.start()
+        await coordinator.waitForCurrentPassSettlement()
+        let firstCalls = await worker.calls()
+        XCTAssertEqual(firstCalls, 1)
+        await coordinator.retry()
+        await coordinator.waitForCurrentPassSettlement()
+        let retriedCalls = await worker.calls()
+        XCTAssertEqual(retriedCalls, 2, "Explicit retry must rerun a failed worker even when metadata correctly remains securing/completed")
+    }
+
+    @MainActor
+    func testT09RecoveryReauthorizationTargetsTheReportedHistoricalRoot() async throws {
+        let activeURL = temporaryDirectory.appendingPathComponent("active", isDirectory: true)
+        let replacementURL = temporaryDirectory.appendingPathComponent("historical", isDirectory: true)
+        try FileManager.default.createDirectory(at: activeURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: replacementURL, withIntermediateDirectories: true)
+        let active = StorageRootSummary(id: StorageRootID(), displayName: "active", displayPath: activeURL.path, updatedAt: AbsoluteTime(Date()))
+        let historical = StorageRootID()
+        let controller = CallbackRootController(availability: .available(active, refreshedBookmark: false), summary: active)
+        var refreshes = 0
+        let viewModel = StorageRootViewModel(controller: controller,
+            directorySelector: CallbackDirectorySelector(selectedURL: replacementURL), onRootChanged: { refreshes += 1 })
+
+        await viewModel.reauthorize(rootID: historical)
+        let requestedRootID = await controller.requestedReauthorizationRootID()
+        XCTAssertEqual(requestedRootID, historical)
+        XCTAssertEqual(refreshes, 1, "successful historical-root approval must request the app recovery refresh")
+    }
+
+    @MainActor
+    func testRecoveryRetryButtonPropagatesExplicitRetryToT08Worker() async throws {
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 124))
+        let id = SessionID()
+        let location = SessionLocation(rootID: StorageRootID(), sessionID: id,
+            folderName: SessionFolderName(sessionID: id, createdAt: time, timeZone: .gmt))
+        let metadata = try SessionMetadataDocument(sessionId: id, title: "button retry", status: .securing,
+            captureOutcome: .completed, createdAt: time, activeDurationMs: try MediaMilliseconds(0),
+            languageMode: .korean, transcript: TranscriptSummary(segmentCount: try TranscriptSegmentCount(0)),
+            appVersion: "review", osVersion: "review", lastUpdatedAt: time)
+        let scanner = RecoveryScannerStub(results: [.init(rootID: location.rootID, candidates: [
+            .init(location: location, metadata: metadata, checkpoint: nil, sourcePresent: true,
+                  stagingPresent: false, canonicalPresent: false, rootWritable: true)
+        ], issues: [])])
+        let worker = RecoveryWorkerStub()
+        let recovery = SessionRecoveryCoordinator(scanner: scanner, persistence: RecoveryPersistenceStub(),
+            finalization: AudioFinalizationCoordinator(worker: worker),
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        let startup = CatalogStartupCoordinator(
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)),
+            recovery: recovery
+        )
+
+        startup.start()
+        await worker.waitForCalls(1)
+        await recovery.waitForCurrentPassSettlement()
+        try await waitUntil { if case .ready = startup.state { return true }; return false }
+
+        startup.retryRecovery()
+        await worker.waitForCalls(2)
+        await recovery.waitForCurrentPassSettlement()
+        let retryCalls = await worker.calls()
+        XCTAssertEqual(retryCalls, 2,
+                       "Main-window retry must submit T08 with retry:true instead of turning metadata into error")
+    }
+
+    func testReviewRecoveryStartEventsDoNotAccumulateOnUnchangedPasses() async throws {
+        let root = temporaryDirectory.appendingPathComponent("events-root", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let roots = StorageRootManager(applicationSupportDirectory: temporaryDirectory, bookmarkCodec: CatalogBookmarkCodec())
+        _ = try await roots.registerSelectedDirectory(root)
+        let repository = FileSessionRepository(roots: roots)
+        let id = SessionID()
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 123))
+        let location = try await repository.createSession(sessionID: id, createdAt: time, timeZone: .gmt)
+        let metadata = try SessionMetadataDocument(sessionId: id, title: "unchanged", status: .interrupted,
+            captureOutcome: .interrupted, createdAt: time, activeDurationMs: try MediaMilliseconds(0),
+            languageMode: .korean, transcript: TranscriptSummary(segmentCount: try TranscriptSegmentCount(0)),
+            appVersion: "review", osVersion: "review", lastUpdatedAt: time)
+        try await repository.writeMetadata(metadata, at: location)
+        let catalog = ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false))
+        let first = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: repository,
+            finalization: AudioFinalizationCoordinator(worker: RecoveryWorkerStub()), catalog: catalog)
+        await first.start()
+        await first.waitForCurrentPassSettlement()
+        let eventURL = root.appendingPathComponent(location.folderName.rawValue).appendingPathComponent("events.jsonl")
+        let firstBytes = try Data(contentsOf: eventURL)
+        await first.refresh()
+        await first.waitForCurrentPassSettlement()
+        let secondBytes = try Data(contentsOf: eventURL)
+        XCTAssertEqual(secondBytes, firstBytes, "Unchanged disk input must not create a new recovery episode per scan generation")
+        let freshRoots = StorageRootManager(applicationSupportDirectory: temporaryDirectory, bookmarkCodec: CatalogBookmarkCodec())
+        let fresh = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: freshRoots),
+            persistence: FileSessionRepository(roots: freshRoots),
+            finalization: AudioFinalizationCoordinator(worker: RecoveryWorkerStub()), catalog: catalog)
+        await fresh.start()
+        await fresh.waitForCurrentPassSettlement()
+        XCTAssertEqual(try Data(contentsOf: eventURL), secondBytes, "A fresh process must deduplicate a durable recoveryStarted event")
+    }
+
+    func testReviewCompletedCheckpointWithMissingFinalAudioIsDiagnosed() async throws {
+        let root = temporaryDirectory.appendingPathComponent("terminal-root", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let roots = StorageRootManager(applicationSupportDirectory: temporaryDirectory, bookmarkCodec: CatalogBookmarkCodec())
+        _ = try await roots.registerSelectedDirectory(root)
+        let repository = FileSessionRepository(roots: roots)
+        let id = SessionID()
+        let time = AbsoluteTime(Date(timeIntervalSince1970: 123))
+        let location = try await repository.createSession(sessionID: id, createdAt: time, timeZone: .gmt)
+        let metadata = try SessionMetadataDocument(sessionId: id, title: "missing final", status: .completed,
+            captureOutcome: .completed, createdAt: time, activeDurationMs: try MediaMilliseconds(0),
+            languageMode: .korean, transcript: TranscriptSummary(segmentCount: try TranscriptSegmentCount(0)),
+            appVersion: "review", osVersion: "review", lastUpdatedAt: time)
+        try await repository.writeMetadata(metadata, at: location)
+        let checkpoint = try FinalizationCheckpointDocument(sessionId: id, updatedAt: time,
+            completedSteps: Array(FinalizationStep.allCases.prefix(7)))
+        try await repository.writeFinalizationCheckpoint(checkpoint, at: location)
+        let scanner = SessionFileScanner(roots: roots)
+        let scanned = try await scanner.scanForRecovery()
+        XCTAssertEqual(scanned.flatMap(\.candidates).count, 1)
+        XCTAssertEqual(scanned.flatMap(\.candidates).first?.canonicalPresent, false)
+        let coordinator = SessionRecoveryCoordinator(scanner: scanner, persistence: repository,
+            finalization: AudioFinalizationCoordinator(worker: RecoveryWorkerStub()),
+            catalog: ReportingCatalog(report: .init(rootResults: [], issues: [], recoveredFromCorruption: false)))
+        await coordinator.start()
+        await coordinator.waitForCurrentPassSettlement()
+        let snapshot = await coordinator.currentSnapshot()
+        let report = try XCTUnwrap(snapshot.report)
+        XCTAssertFalse(report.items.isEmpty, "Missing canonical audio after verified/catalogUpdated must not report clean recovery")
+        let after = try await repository.readMetadata(at: location)
+        XCTAssertEqual(after, metadata, "Diagnosis must preserve terminal metadata")
+    }
+
     private func projection(id: String, created: TimeInterval, title: String, status: SessionStatus, root: StorageRootID = StorageRootID()) throws -> CatalogProjection {
         let sessionID = SessionID(UUID(uuidString: id)!)
         let createdAt = AbsoluteTime(Date(timeIntervalSince1970: created))
@@ -924,6 +1828,173 @@ private actor StaticScanner: SessionFileScanning {
     func scan() async throws -> [RootScanResult] { results }
 }
 
+private actor RecoveryScannerStub: SessionRecoveryScanning {
+    let results: [RootRecoveryScanResult]
+    init(results: [RootRecoveryScanResult]) { self.results = results }
+    func scanForRecovery() async throws -> [RootRecoveryScanResult] { results }
+}
+
+private actor GatedRecoveryScanner: SessionRecoveryScanning {
+    private let results: [RootRecoveryScanResult]
+    private var entered = false
+    private var openState = false
+    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+    private var blocked: CheckedContinuation<Void, Never>?
+    init(results: [RootRecoveryScanResult]) { self.results = results }
+    func scanForRecovery() async throws -> [RootRecoveryScanResult] {
+        entered = true
+        let waiters = entryWaiters; entryWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        if !openState { await withCheckedContinuation { blocked = $0 } }
+        return results
+    }
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { entryWaiters.append($0) }
+    }
+    func open() { openState = true; blocked?.resume(); blocked = nil }
+}
+
+private actor RecoveryObserverGate {
+    private var arrived: SessionRecoverySnapshot?
+    private var waiters: [CheckedContinuation<SessionRecoverySnapshot?, Never>] = []
+
+    func arrive(_ value: SessionRecoverySnapshot?) {
+        arrived = value
+        let pending = waiters; waiters.removeAll()
+        for waiter in pending { waiter.resume(returning: value) }
+    }
+
+    func wait() async -> SessionRecoverySnapshot? {
+        if let arrived { return arrived }
+        return await withCheckedContinuation { waiters.append($0) }
+    }
+}
+
+private actor RecoveryPersistenceStub: SessionRecoveryPersisting {
+    private var writes = 0
+    private let failInterruptedWrite: Bool
+    init(failInterruptedWrite: Bool = false) { self.failInterruptedWrite = failInterruptedWrite }
+    func markInterruptedForRecovery(at location: SessionLocation, expected: SessionMetadataDocument, updatedAt: AbsoluteTime) async throws -> SessionMetadataDocument {
+        writes += 1
+        if failInterruptedWrite { throw CocoaError(.fileWriteUnknown) }
+        return try SessionMetadataDocument(schemaVersion: expected.schemaVersion, sessionId: expected.sessionId,
+            title: expected.title, status: .interrupted, captureOutcome: .interrupted, createdAt: expected.createdAt,
+            recordingStartedAt: expected.recordingStartedAt, recordingEndedAt: expected.recordingEndedAt,
+            activeDurationMs: expected.activeDurationMs, languageMode: expected.languageMode,
+            detectedLanguage: expected.detectedLanguage, engine: expected.engine, model: expected.model,
+            audio: expected.audio, transcript: expected.transcript, appVersion: expected.appVersion,
+            osVersion: expected.osVersion, lastUpdatedAt: updatedAt)
+    }
+    func markPreparationAbandonedForRecovery(at location: SessionLocation, expected: SessionMetadataDocument, updatedAt: AbsoluteTime) async throws -> SessionMetadataDocument { expected }
+    func appendRecoveryEventIfSafe(at location: SessionLocation, kind: SessionEventKind, code: String, message: String?, occurredAt: AbsoluteTime) async -> String? { nil }
+    func interruptedWrites() -> Int { writes }
+}
+
+private actor RecoveryWorkerStub: AudioFinalizationWorking {
+    private var count = 0
+    private var callWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    func finalize(_ request: AudioFinalizationRequest, control: AudioFinalizationControl, progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
+        count += 1
+        let ready = callWaiters.filter { count >= $0.0 }
+        callWaiters.removeAll { count >= $0.0 }
+        for (_, waiter) in ready { waiter.resume() }
+        return .init(location: request.location, phase: .failed, failure: .sourceMissing, warnings: [], media: nil,
+                     source: nil, final: nil, completedSteps: [], retainedPaths: [], presentPaths: [], recoveryWasRemoved: false)
+    }
+    func removeRecovery(_ evidence: FinalizationCompletionEvidence, control: AudioFinalizationControl, progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
+        await finalize(.init(location: evidence.location), control: control, progress: progress)
+    }
+    func calls() -> Int { count }
+    func waitForCalls(_ expected: Int) async {
+        guard count < expected else { return }
+        await withCheckedContinuation { callWaiters.append((expected, $0)) }
+    }
+}
+
+private actor GatedCancellationRecoveryWorker: AudioFinalizationWorking {
+    private var count = 0
+    private var firstResult: AudioFinalizationCode?
+    private var entered = false
+    private var open = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var blocked: CheckedContinuation<Void, Never>?
+
+    func finalize(_ request: AudioFinalizationRequest, control: AudioFinalizationControl,
+                  progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
+        count += 1
+        entered = true
+        let waiters = enteredWaiters; enteredWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        await progress(.exporting)
+        if !open { await withCheckedContinuation { blocked = $0 } }
+        let outcome = control.outcome().0
+        if count == 1 { firstResult = outcome }
+        return .init(location: request.location, phase: .failed, failure: outcome ?? .sourceMissing, warnings: [], media: nil,
+                     source: nil, final: nil, completedSteps: [], retainedPaths: [], presentPaths: [], recoveryWasRemoved: false)
+    }
+
+    func removeRecovery(_ evidence: FinalizationCompletionEvidence, control: AudioFinalizationControl,
+                        progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
+        await finalize(.init(location: evidence.location), control: control, progress: progress)
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+    func openCleanupGate() { open = true; blocked?.resume(); blocked = nil }
+    func calls() -> Int { count }
+    func firstFailure() -> AudioFinalizationCode? { firstResult }
+}
+
+private actor ReviewCancellationWarningWorker: AudioFinalizationWorking {
+    private var entered = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var gate: CheckedContinuation<Void, Never>?
+
+    func finalize(_ request: AudioFinalizationRequest, control: AudioFinalizationControl,
+                  progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
+        await progress(.exporting)
+        entered = true
+        let waiters = enteredWaiters; enteredWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        await withCheckedContinuation { gate = $0 }
+        return .init(location: request.location, phase: .failed, failure: control.outcome().0,
+            warnings: ["cleanup.persistence"], media: nil, source: nil, final: nil,
+            completedSteps: [], retainedPaths: [], presentPaths: [], recoveryWasRemoved: false)
+    }
+
+    func removeRecovery(_ evidence: FinalizationCompletionEvidence, control: AudioFinalizationControl,
+                        progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
+        await finalize(.init(location: evidence.location), control: control, progress: progress)
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+
+    func openGate() { gate?.resume(); gate = nil }
+}
+
+private actor RecoveryCancellationProbe {
+    private var startedValue = false
+    private var finishedValue = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    func started() {
+        startedValue = true
+        let waiters = startWaiters; startWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+    func finished() { finishedValue = true }
+    func waitUntilStarted() async {
+        guard !startedValue else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+    func isFinished() -> Bool { finishedValue }
+}
+
 private actor CatalogBookmarkCodec: SecurityScopedBookmarkCodec {
     func makeBookmark(for directory: URL) async throws -> Data { Data(directory.path.utf8) }
     func resolve(_ bookmark: Data) async throws -> ResolvedBookmark { ResolvedBookmark(url: URL(fileURLWithPath: String(decoding: bookmark, as: UTF8.self)), isStale: false) }
@@ -945,6 +2016,19 @@ private actor CountingCatalogBookmarkCodec: SecurityScopedBookmarkCodec {
     func stopCount() -> Int { stops }
 }
 
+private actor SelectiveCatalogBookmarkCodec: SecurityScopedBookmarkCodec {
+    private let deniedPath: String
+
+    init(deniedPath: String) { self.deniedPath = deniedPath }
+
+    func makeBookmark(for directory: URL) async throws -> Data { Data(directory.path.utf8) }
+    func resolve(_ bookmark: Data) async throws -> ResolvedBookmark {
+        ResolvedBookmark(url: URL(fileURLWithPath: String(decoding: bookmark, as: UTF8.self)), isStale: false)
+    }
+    func startAccessing(_ url: URL) async -> Bool { url.path != deniedPath }
+    func stopAccessing(_ url: URL) async {}
+}
+
 private actor ReportingCatalog: SessionCataloging {
     let report: CatalogReconciliationReport
     init(report: CatalogReconciliationReport) { self.report = report }
@@ -957,6 +2041,7 @@ private actor CallbackRootController: StorageRootControlling {
     let summary: StorageRootSummary
     let registrationError: StorageErrorCode?
     let reauthorizationError: StorageErrorCode?
+    private var requestedRootID: StorageRootID?
 
     init(availability: StorageRootAvailability, summary: StorageRootSummary, registrationError: StorageErrorCode? = nil, reauthorizationError: StorageErrorCode? = nil) {
         currentAvailability = availability
@@ -971,9 +2056,11 @@ private actor CallbackRootController: StorageRootControlling {
         return summary
     }
     func reauthorize(rootID: StorageRootID, with url: URL) async throws -> StorageRootSummary {
+        requestedRootID = rootID
         if let reauthorizationError { throw StorageError(reauthorizationError) }
         return summary
     }
+    func requestedReauthorizationRootID() -> StorageRootID? { requestedRootID }
 }
 
 @MainActor

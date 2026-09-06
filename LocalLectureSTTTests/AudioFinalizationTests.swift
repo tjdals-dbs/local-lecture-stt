@@ -198,6 +198,15 @@ struct FinalizationCatalog: RecordingCatalogRefreshing {
         .init(rootResults: [], issues: [], recoveredFromCorruption: false)
     }
 }
+
+extension FinalizationCatalog: SessionCataloging {
+    func orderedItems() async throws -> [SessionCatalogItem] { [] }
+}
+
+struct RecoveryFailureCatalog: RecordingCatalogRefreshing, SessionCataloging {
+    func reconcile() async throws -> CatalogReconciliationReport { throw CatalogError(.openFailed) }
+    func orderedItems() async throws -> [SessionCatalogItem] { [] }
+}
 struct FinalizationFixture: Sendable {
     let base: URL
     let root: URL
@@ -253,7 +262,813 @@ struct FinalizationFixture: Sendable {
     }
 }
 
+private func protectedFileBytes(at fixture: FinalizationFixture) -> [String: Data] {
+    [FinalizationFileAccess.source, FinalizationFileAccess.staging,
+     FinalizationFileAccess.canonical, FinalizationFileAccess.checkpoint].reduce(into: [String: Data]()) { files, path in
+        if let bytes = try? Data(contentsOf: fixture.url(path)) { files[path] = bytes }
+    }
+}
+
 extension AudioFinalizationTests {
+    func testT09TruncatedRecoveryAndReadFaultPreserveBytesWhileHealthyPeerRecovers() async throws {
+        let f = try await FinalizationFixture.make()
+        defer { f.clean() }
+        let originalSource = try Data(contentsOf: f.url(FinalizationFileAccess.source))
+        var truncated = originalSource
+        truncated.removeLast(min(257, truncated.count))
+        try truncated.write(to: f.url(FinalizationFileAccess.source))
+
+        // Put a valid peer in the same physical root.  The recovery scanner
+        // must report the damaged first session without skipping an unrelated
+        // valid session from that root.
+        let peerID = SessionID()
+        let peerTime = AbsoluteTime(Date(timeIntervalSince1970: 911))
+        let peer = try await f.repository.createSession(sessionID: peerID, createdAt: peerTime, timeZone: .gmt)
+        let originalMetadata = try await f.repository.readMetadata(at: f.location)
+        let peerMetadata = try SessionMetadataDocument(schemaVersion: originalMetadata.schemaVersion, sessionId: peerID,
+            title: "healthy peer", status: .securing, captureOutcome: .completed, createdAt: peerTime,
+            recordingStartedAt: peerTime, recordingEndedAt: peerTime, activeDurationMs: originalMetadata.activeDurationMs,
+            languageMode: originalMetadata.languageMode, detectedLanguage: originalMetadata.detectedLanguage,
+            engine: originalMetadata.engine, model: originalMetadata.model, audio: originalMetadata.audio,
+            transcript: originalMetadata.transcript, appVersion: originalMetadata.appVersion, osVersion: originalMetadata.osVersion,
+            lastUpdatedAt: peerTime)
+        try await f.repository.writeMetadata(peerMetadata, at: peer)
+        let peerSource = f.root.appendingPathComponent(peer.folderName.rawValue).appendingPathComponent(SessionArtifact.recoveryAudio.relativePath)
+        try originalSource.write(to: peerSource)
+
+        let freshRoots = StorageRootManager(applicationSupportDirectory: f.base.appendingPathComponent("fresh-peer"), bookmarkCodec: f.bookmarks)
+        let summary = try await freshRoots.registerSelectedDirectory(f.root)
+        let damagedLocation = SessionLocation(rootID: summary.id, sessionID: f.location.sessionID, folderName: f.location.folderName)
+        let peerLocation = SessionLocation(rootID: summary.id, sessionID: peer.sessionID, folderName: peer.folderName)
+        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: freshRoots, catalog: FinalizationCatalog()))
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: freshRoots), persistence: FileSessionRepository(roots: freshRoots),
+            finalization: finalization, catalog: FinalizationCatalog())
+        await recovery.start(); await recovery.waitForCurrentPassSettlement()
+        let damagedSettled = await finalization.waitForResult(at: damagedLocation)
+        let peerSettled = await finalization.waitForResult(at: peerLocation)
+        let damagedResult = try XCTUnwrap(damagedSettled)
+        let peerResult = try XCTUnwrap(peerSettled)
+        XCTAssertNotNil(damagedResult.failure, "truncated final fragment must not be silently accepted")
+        XCTAssertNil(peerResult.failure, "a damaged peer must not stop unrelated same-root recovery")
+        XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), truncated)
+        XCTAssertEqual(try Data(contentsOf: peerSource), originalSource)
+
+        let readFault = try await FinalizationFixture.make()
+        defer { readFault.clean() }
+        let readFaultBytes = try Data(contentsOf: readFault.url(FinalizationFileAccess.source))
+        var faultingWorker = readFault.worker()
+        faultingWorker.media = AVFoundationFinalizationMedia(fault: { point, index in
+            if point == .read, index > 0 { throw AudioFinalizationCode.sourceUnreadable }
+        })
+        let readFinalization = AudioFinalizationCoordinator(worker: faultingWorker)
+        let readRecovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: readFault.roots), persistence: readFault.repository,
+            finalization: readFinalization, catalog: FinalizationCatalog())
+        await readRecovery.start(); await readRecovery.waitForCurrentPassSettlement()
+        let readSettled = await readFinalization.waitForResult(at: readFault.location)
+        let readResult = try XCTUnwrap(readSettled)
+        XCTAssertEqual(readResult.failure, .sourceUnreadable)
+        XCTAssertEqual(try Data(contentsOf: readFault.url(FinalizationFileAccess.source)), readFaultBytes,
+                       "injected middle read failure must retain the original recovery MOV")
+    }
+
+    func testT09DamagedRecoveryAndCanonicalConflictRemainBytePreserved() async throws {
+        for damagedSource in [Data(), Data("not a QuickTime container".utf8)] {
+            let f = try await FinalizationFixture.make()
+            defer { f.clean() }
+            try damagedSource.write(to: f.url(FinalizationFileAccess.source))
+            let roots = StorageRootManager(applicationSupportDirectory: f.base.appendingPathComponent(UUID().uuidString), bookmarkCodec: f.bookmarks)
+            let summary = try await roots.registerSelectedDirectory(f.root)
+            let location = SessionLocation(rootID: summary.id, sessionID: f.location.sessionID, folderName: f.location.folderName)
+            let catalog = FinalizationCatalog()
+            let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: roots, catalog: catalog))
+            let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: FileSessionRepository(roots: roots),
+                finalization: finalization, catalog: catalog)
+            await recovery.start(); await recovery.waitForCurrentPassSettlement()
+            let settledResult = await finalization.waitForResult(at: location)
+            let result = try XCTUnwrap(settledResult)
+            XCTAssertNotNil(result.failure)
+            XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), damagedSource)
+            let snapshot = await recovery.currentSnapshot()
+            let report = try XCTUnwrap(snapshot.report)
+            XCTAssertTrue(report.items.contains { $0.code == .finalizationFailed })
+        }
+
+        let primary = try await FinalizationFixture.make(seconds: 2, frequency: 440)
+        let other = try await FinalizationFixture.make(seconds: 2, frequency: 1_320)
+        defer { primary.clean(); other.clean() }
+        let sourceBefore = try Data(contentsOf: primary.url(FinalizationFileAccess.source))
+        let otherResult = await other.worker().finalize(.init(location: other.location), control: .init(), progress: { _ in })
+        XCTAssertNil(otherResult.failure)
+        let conflictingCanonical = try Data(contentsOf: other.url(FinalizationFileAccess.canonical))
+        try conflictingCanonical.write(to: primary.url(FinalizationFileAccess.canonical))
+        let roots = StorageRootManager(applicationSupportDirectory: primary.base.appendingPathComponent("fresh"), bookmarkCodec: primary.bookmarks)
+        let summary = try await roots.registerSelectedDirectory(primary.root)
+        let location = SessionLocation(rootID: summary.id, sessionID: primary.location.sessionID, folderName: primary.location.folderName)
+        let catalog = FinalizationCatalog()
+        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: roots, catalog: catalog))
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: FileSessionRepository(roots: roots), finalization: finalization, catalog: catalog)
+        await recovery.start(); await recovery.waitForCurrentPassSettlement()
+        let settledConflict = await finalization.waitForResult(at: location)
+        let conflict = try XCTUnwrap(settledConflict)
+        XCTAssertEqual(conflict.failure, .canonicalConflict)
+        XCTAssertEqual(try Data(contentsOf: primary.url(FinalizationFileAccess.source)), sourceBefore)
+        XCTAssertEqual(try Data(contentsOf: primary.url(FinalizationFileAccess.canonical)), conflictingCanonical)
+    }
+
+    func testT09CorruptEventsRemainUntouchedWhileFinalizerReportsDiagnosticWarning() async throws {
+        let f = try await FinalizationFixture.make()
+        defer { f.clean() }
+        let events = f.url(SessionArtifact.events.relativePath)
+        let corrupt = Data("{ incomplete recovery event".utf8)
+        try corrupt.write(to: events)
+        var worker = f.worker()
+        worker.media = AVFoundationFinalizationMedia(fault: { point, _ in
+            if point == .start { throw AudioFinalizationCode.exportStart }
+        })
+        let finalization = AudioFinalizationCoordinator(worker: worker)
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+            finalization: finalization, catalog: FinalizationCatalog())
+        await recovery.start(); await recovery.waitForCurrentPassSettlement()
+        let settledResult = await finalization.waitForResult(at: f.location)
+        let result = try XCTUnwrap(settledResult)
+        XCTAssertEqual(result.failure, .exportStart)
+        XCTAssertTrue(result.warnings.contains("diagnostic.corruptDocument"))
+        XCTAssertEqual(try Data(contentsOf: events), corrupt)
+        let snapshot = await recovery.currentSnapshot()
+        let report = try XCTUnwrap(snapshot.report)
+        let issue = try XCTUnwrap(report.items.first)
+        XCTAssertEqual(issue.warning, AudioFinalizationCode.exportStart.rawValue)
+        XCTAssertTrue(issue.warnings.contains("diagnostic.corruptDocument"))
+    }
+
+    func testT09FreshRecoveryResumesAfterExportPublicationCheckpointAndProjectionFaults() async throws {
+        for point in [FinalizationPoint.beforeExport, .beforePublication, .beforeVerifiedCheckpoint, .beforeProjection] {
+            let f = try await FinalizationFixture.make()
+            defer { f.clean() }
+            var faulting = f.worker()
+            faulting.hook = { if $0 == point { throw AudioFinalizationCode.persistence } }
+            let firstFinalization = AudioFinalizationCoordinator(worker: faulting)
+            let first = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+                finalization: firstFinalization, catalog: FinalizationCatalog())
+            await first.start(); await first.waitForCurrentPassSettlement()
+            let firstResult = await firstFinalization.waitForResult(at: f.location)
+            XCTAssertNotNil(firstResult?.failure, "\(point) must model a durable crash window")
+            let sourceBytes = try Data(contentsOf: f.url(FinalizationFileAccess.source))
+
+            let roots = StorageRootManager(applicationSupportDirectory: f.base.appendingPathComponent("resume-\(point.rawValue)"), bookmarkCodec: f.bookmarks)
+            let summary = try await roots.registerSelectedDirectory(f.root)
+            let location = SessionLocation(rootID: summary.id, sessionID: f.location.sessionID, folderName: f.location.folderName)
+            let catalog = FinalizationCatalog()
+            let resumedFinalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: roots, catalog: catalog))
+            let resumed = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: FileSessionRepository(roots: roots),
+                finalization: resumedFinalization, catalog: catalog)
+            await resumed.start(); await resumed.waitForCurrentPassSettlement()
+            let secondResult = await resumedFinalization.waitForResult(at: location)
+            XCTAssertNil(secondResult?.failure, "\(point): \(String(describing: secondResult))")
+            XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), sourceBytes)
+            let checkpoint = try await FileSessionRepository(roots: roots).readFinalizationCheckpoint(at: location)
+            XCTAssertEqual(checkpoint.completedSteps, Array(FinalizationStep.allCases.prefix(3)))
+        }
+    }
+
+    func testT09KeepsFirstFailureAndDiagnosticCatalogCleanupWarningsSeparately() async throws {
+        let f = try await FinalizationFixture.make()
+        defer { f.clean() }
+        var worker = f.worker()
+        worker.media = AVFoundationFinalizationMedia(fault: { point, _ in
+            if point == .start { throw AudioFinalizationCode.exportStart }
+        })
+        worker.hook = { point in
+            if point == .beforeDiagnostic || point == .beforeRelease { throw AudioFinalizationCode.persistence }
+        }
+        let catalog = RecoveryFailureCatalog()
+        let finalization = AudioFinalizationCoordinator(worker: worker)
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+            finalization: finalization, catalog: catalog)
+        await recovery.start()
+        await recovery.waitForCurrentPassSettlement()
+        let snapshot = await recovery.currentSnapshot()
+        let report = try XCTUnwrap(snapshot.report)
+        let issue = try XCTUnwrap(report.items.first { $0.sessionID == f.location.sessionID })
+        XCTAssertEqual(issue.code, .finalizationFailed)
+        XCTAssertEqual(issue.warning, AudioFinalizationCode.exportStart.rawValue, "first failure must remain stable")
+        XCTAssertTrue(issue.warnings.contains(AudioFinalizationCode.exportStart.rawValue))
+        XCTAssertTrue(issue.warnings.contains("diagnostic.persistence"))
+        XCTAssertTrue(issue.warnings.contains("cleanup.persistence"))
+        XCTAssertEqual(report.catalogWarning, .openFailed)
+        let final = await finalization.waitForResult(at: f.location)
+        XCTAssertEqual(final?.failure, .exportStart)
+        XCTAssertTrue(final?.warnings.contains("diagnostic.persistence") == true)
+        XCTAssertTrue(final?.warnings.contains("cleanup.persistence") == true)
+    }
+
+    func testReviewTerminalAudioRequiresMediaAndSourceMatchNotAtomNames() async throws {
+        for useOtherAudio in [false, true] {
+            let f = try await FinalizationFixture.make(frequency: 440)
+            defer { f.clean() }
+            let calls = FinalizationMediaCallCounter()
+            let trace = FinalizationTrace()
+            var worker = f.worker()
+            worker.media = CountingFinalizationMedia(base: AVFoundationFinalizationMedia(), calls: calls)
+            worker.hook = { await trace.append($0) }
+            let finalization = AudioFinalizationCoordinator(worker: worker)
+            let cachedResume = await finalization.finalize(.init(location: f.location))
+            XCTAssertNil(cachedResume.failure, "fixture must create a settled resumable result to prove request-kind cache separation")
+            try await f.checkpoint(7)
+            try f.editJSON("metadata.json") { $0["status"] = "completed"; $0["captureOutcome"] = "completed" }
+            if useOtherAudio {
+                let other = try await FinalizationFixture.make(frequency: 1320)
+                defer { other.clean() }
+                try FileManager.default.removeItem(at: f.url(FinalizationFileAccess.canonical))
+                try await AVFoundationFinalizationMedia().remux(other.mediaFiles(destination: f, destinationPath: FinalizationFileAccess.canonical), control: .init())
+            } else {
+                let atoms = ["ftyp", "moov", "mdat"].reduce(into: Data()) { result, name in
+                    result.append(contentsOf: [0, 0, 0, 8]); result.append(Data(name.utf8))
+                }
+                try atoms.write(to: f.url(FinalizationFileAccess.canonical))
+            }
+            let protected = ["metadata.json", FinalizationFileAccess.checkpoint, FinalizationFileAccess.canonical,
+                             FinalizationFileAccess.source, "events.jsonl"].reduce(into: [String: Data]()) { values, path in
+                values[path] = try? Data(contentsOf: f.url(path))
+            }
+            await calls.reset()
+            await trace.reset()
+            let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+                finalization: finalization, catalog: FinalizationCatalog())
+            await recovery.start(); await recovery.waitForCurrentPassSettlement()
+
+            let recoverySnapshot = await recovery.currentSnapshot()
+            let report = try XCTUnwrap(recoverySnapshot.report)
+            let issue = try XCTUnwrap(report.items.first { $0.sessionID == f.location.sessionID })
+            XCTAssertEqual(issue.code, .terminalInconsistent,
+                           useOtherAudio ? "Different playable audio must not pass terminal recovery" : "Header-only atoms must not pass terminal recovery")
+            let verification = await finalization.currentSnapshot(at: f.location, operation: .verifyExistingCanonical)
+            XCTAssertEqual(verification?.phase, .failed, "terminal verification must be submitted, not hidden by a cached resume result")
+            let count = await calls.snapshot()
+            XCTAssertEqual(count.remuxes, 0)
+            XCTAssertGreaterThan(count.inspections, 0)
+            let points = await trace.values
+            XCTAssertFalse(points.contains(.beforeExport))
+            XCTAssertFalse(points.contains(.beforePublication))
+            XCTAssertFalse(points.contains(.beforeSecuredCheckpoint))
+            XCTAssertFalse(points.contains(.beforeCreatedCheckpoint))
+            XCTAssertFalse(points.contains(.beforeVerifiedCheckpoint))
+            XCTAssertFalse(points.contains(.beforeProjection))
+            XCTAssertFalse(points.contains(.beforeCatalog))
+            for (path, expected) in protected {
+                XCTAssertEqual(try Data(contentsOf: f.url(path)), expected, "terminal verification must preserve \(path)")
+            }
+        }
+    }
+
+    func testReviewLateCancellationDoesNotInventFailureForCompletedAudio() async throws {
+        let f = try await FinalizationFixture.make()
+        defer { f.clean() }
+        let worker = ReviewCompletedAudioCallbackGate(base: f.worker())
+        let finalization = AudioFinalizationCoordinator(worker: worker)
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+            finalization: finalization, catalog: FinalizationCatalog())
+        await recovery.start()
+        await worker.waitUntilDeliveryReady()
+        let stream = await finalization.snapshots()
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()
+        let cancellation = Task { await recovery.cancelOwnedRecovery() }
+        while let values = await iterator.next() {
+            if values.first(where: { $0.location == f.location })?.phase == .cancelling { break }
+        }
+        await worker.deliverCompletedResult()
+        await cancellation.value
+        let audio = await finalization.waitForResult(at: f.location)
+        XCTAssertNil(audio?.failure)
+        XCTAssertEqual(audio?.phase, .audioReadyAwaitingRemainingFinalization)
+        let snapshot = await recovery.currentSnapshot()
+        XCTAssertEqual(snapshot.phase, .cancelled)
+        let report = try XCTUnwrap(snapshot.report)
+        let issue = try XCTUnwrap(report.items.first { $0.sessionID == f.location.sessionID })
+        XCTAssertEqual(issue.code, .audioReadyAwaitingRemainingFinalization)
+        XCTAssertNil(issue.warning)
+        XCTAssertEqual(issue.captureOutcome, .completed)
+    }
+
+    func testReviewTerminalRefreshRevalidatesSettledCanonicalAndPreservesReplacement() async throws {
+        let f = try await FinalizationFixture.make()
+        defer { f.clean() }
+        let prepared = await f.worker().finalize(.init(location: f.location), control: .init(), progress: { _ in })
+        XCTAssertNil(prepared.failure)
+        try await f.checkpoint(7)
+        try f.editJSON("metadata.json") { $0["status"] = "completed"; $0["captureOutcome"] = "completed" }
+        let finalization = AudioFinalizationCoordinator(worker: f.worker())
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+            finalization: finalization, catalog: FinalizationCatalog())
+
+        await recovery.start(); await recovery.waitForCurrentPassSettlement()
+        let first = await finalization.currentSnapshot(at: f.location, operation: .verifyExistingCanonical)
+        XCTAssertEqual(first?.phase, .audioRevalidated)
+
+        let damaged = Data("replacement canonical is not media".utf8)
+        try damaged.write(to: f.url(FinalizationFileAccess.canonical))
+        let metadataBefore = try Data(contentsOf: f.url("metadata.json"))
+        let checkpointBefore = try Data(contentsOf: f.url(FinalizationFileAccess.checkpoint))
+        let sourceBefore = try Data(contentsOf: f.url(FinalizationFileAccess.source))
+        await recovery.refresh(); await recovery.waitForCurrentPassSettlement()
+
+        let refreshedSnapshot = await recovery.currentSnapshot()
+        let report = try XCTUnwrap(refreshedSnapshot.report)
+        let issue = try XCTUnwrap(report.items.first { $0.sessionID == f.location.sessionID })
+        XCTAssertEqual(issue.code, .terminalInconsistent)
+        XCTAssertEqual(issue.warning, AudioFinalizationCode.invalidContainer.rawValue)
+        let second = await finalization.currentSnapshot(at: f.location, operation: .verifyExistingCanonical)
+        XCTAssertGreaterThan(second?.generation ?? 0, first?.generation ?? 0,
+                             "a new discovery pass must not reuse settled terminal verification")
+        XCTAssertEqual(second?.phase, .failed)
+        XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.canonical)), damaged)
+        XCTAssertEqual(try Data(contentsOf: f.url("metadata.json")), metadataBefore)
+        XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.checkpoint)), checkpointBefore)
+        XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), sourceBefore)
+    }
+
+    func testReviewConcurrentTerminalVerificationJoinsSingleFlight() async throws {
+        let f = try await FinalizationFixture.make()
+        defer { f.clean() }
+        let prepared = await f.worker().finalize(.init(location: f.location), control: .init(), progress: { _ in })
+        XCTAssertNil(prepared.failure)
+        try await f.checkpoint(7)
+        try f.editJSON("metadata.json") { $0["status"] = "completed"; $0["captureOutcome"] = "completed" }
+        let gate = FinalizationGate()
+        var worker = f.worker()
+        worker.hook = { if $0 == .beforeRelease { await gate.blockOnce() } }
+        let finalization = AudioFinalizationCoordinator(worker: worker)
+        let request = AudioFinalizationRequest(location: f.location, operation: .verifyExistingCanonical)
+        let first = await finalization.enqueue(request, retry: true)
+        await gate.waitEntered()
+        let joined = await finalization.enqueue(request, retry: true)
+        XCTAssertEqual(joined.generation, first.generation,
+                       "a concurrent verification joins rather than queues a second media inspection")
+        await gate.open()
+        let result = await finalization.waitForResult(at: f.location, operation: .verifyExistingCanonical)
+        XCTAssertNil(result?.failure)
+        XCTAssertEqual(result?.phase, .audioRevalidated)
+    }
+
+    func testReviewTerminalSourceAbsenceRequiresDurableCleanupCheckpoint() async throws {
+        for prefix in [6, 7, 8] {
+            let f = try await FinalizationFixture.make()
+            defer { f.clean() }
+            let prepared = await f.worker().finalize(.init(location: f.location), control: .init(), progress: { _ in })
+            XCTAssertNil(prepared.failure, "prefix \(prefix) fixture")
+            try await f.checkpoint(prefix)
+            try f.editJSON("metadata.json") { $0["status"] = "completed"; $0["captureOutcome"] = "completed" }
+            try FileManager.default.removeItem(at: f.url(FinalizationFileAccess.source))
+            let canonicalBefore = try Data(contentsOf: f.url(FinalizationFileAccess.canonical))
+            let metadataBefore = try Data(contentsOf: f.url("metadata.json"))
+            let checkpointBefore = try Data(contentsOf: f.url(FinalizationFileAccess.checkpoint))
+
+            let freshRoots = StorageRootManager(applicationSupportDirectory: f.base.appendingPathComponent("source-absent-\(prefix)"), bookmarkCodec: f.bookmarks)
+            let summary = try await freshRoots.registerSelectedDirectory(f.root)
+            let location = SessionLocation(rootID: summary.id, sessionID: f.location.sessionID, folderName: f.location.folderName)
+            let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: freshRoots, catalog: FinalizationCatalog()))
+            let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: freshRoots),
+                persistence: FileSessionRepository(roots: freshRoots), finalization: finalization, catalog: FinalizationCatalog())
+            await recovery.start(); await recovery.waitForCurrentPassSettlement()
+
+            let snapshot = await recovery.currentSnapshot()
+            let report = try XCTUnwrap(snapshot.report)
+            let issue = try XCTUnwrap(report.items.first { $0.sessionID == location.sessionID })
+            if prefix < 8 {
+                XCTAssertEqual(issue.code, .missingRecoverySource, "prefix \(prefix) has no durable cleanup authority")
+                XCTAssertFalse(issue.retryable)
+                let verification = await finalization.currentSnapshot(at: location, operation: .verifyExistingCanonical)
+                XCTAssertNil(verification)
+            } else {
+                XCTAssertEqual(issue.code, .audioRevalidated)
+                let verification = await finalization.currentSnapshot(at: location, operation: .verifyExistingCanonical)
+                XCTAssertEqual(verification?.phase, .audioRevalidated)
+            }
+            XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.canonical)), canonicalBefore)
+            XCTAssertEqual(try Data(contentsOf: f.url("metadata.json")), metadataBefore)
+            XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.checkpoint)), checkpointBefore)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: f.url(FinalizationFileAccess.source).path))
+        }
+    }
+
+    func testReviewTerminalVerificationBindsCurrentCheckpointAndSourceIdentityAcrossCanonicalAwait() async throws {
+        // Discovery observes a source in every case.  The source changes only
+        // after FinalizationRun is open and canonical inspection is suspended.
+        // Prefix 8 may continue only when that currently observed source is
+        // genuinely absent; a replacement must not become canonical-only.
+        for (prefix, replaceSource, expectsCanonicalOnlySuccess) in [(7, false, false), (8, false, true), (8, true, false)] {
+            let f = try await FinalizationFixture.make()
+            defer { f.clean() }
+            let prepared = await f.worker().finalize(.init(location: f.location), control: .init(), progress: { _ in })
+            XCTAssertNil(prepared.failure, "prefix \(prefix) fixture")
+            try await f.checkpoint(prefix)
+            try f.editJSON("metadata.json") { $0["status"] = "completed"; $0["captureOutcome"] = "completed" }
+            let canonicalBefore = try Data(contentsOf: f.url(FinalizationFileAccess.canonical))
+            let metadataBefore = try Data(contentsOf: f.url("metadata.json"))
+            let checkpointBefore = try Data(contentsOf: f.url(FinalizationFileAccess.checkpoint))
+            let sourceBefore = try Data(contentsOf: f.url(FinalizationFileAccess.source))
+            let retainedSource = f.base.appendingPathComponent("retained-source-\(prefix)-\(replaceSource).mov")
+            let gate = FinalizationGate()
+            let calls = FinalizationMediaCallCounter()
+            let finalizerCatalog = TerminalVerificationCatalogProbe()
+            let trace = FinalizationTrace()
+            var worker = FileAudioFinalizer(roots: f.roots, catalog: finalizerCatalog)
+            worker.media = GatedCanonicalInspectionMedia(base: AVFoundationFinalizationMedia(), gate: gate, calls: calls)
+            worker.hook = { point in await trace.append(point) }
+            let finalization = AudioFinalizationCoordinator(worker: worker)
+            let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+                finalization: finalization, catalog: FinalizationCatalog())
+
+            await recovery.start()
+            await gate.waitEntered()
+            try FileManager.default.moveItem(at: f.url(FinalizationFileAccess.source), to: retainedSource)
+            if replaceSource { try sourceBefore.write(to: f.url(FinalizationFileAccess.source)) }
+            await gate.open()
+            await recovery.waitForCurrentPassSettlement()
+
+            let snapshot = await recovery.currentSnapshot()
+            let report = try XCTUnwrap(snapshot.report)
+            let issue = try XCTUnwrap(report.items.first { $0.sessionID == f.location.sessionID })
+            if expectsCanonicalOnlySuccess {
+                XCTAssertEqual(issue.code, .audioRevalidated, "durable prefix 8 may verify canonical after source removal")
+            } else {
+                XCTAssertEqual(issue.code, .terminalInconsistent, "prefix \(prefix), replacement \(replaceSource) must not revalidate")
+                XCTAssertTrue(issue.warning == AudioFinalizationCode.identityChanged.rawValue ||
+                              issue.warning == AudioFinalizationCode.sourceMissing.rawValue)
+            }
+            let result = await finalization.waitForResult(at: f.location, operation: .verifyExistingCanonical)
+            XCTAssertEqual(result?.phase, expectsCanonicalOnlySuccess ? .audioRevalidated : .failed)
+            XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.canonical)), canonicalBefore)
+            XCTAssertEqual(try Data(contentsOf: f.url("metadata.json")), metadataBefore)
+            XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.checkpoint)), checkpointBefore)
+            XCTAssertEqual(try Data(contentsOf: retainedSource), sourceBefore)
+            if replaceSource { XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), sourceBefore) }
+            else { XCTAssertFalse(FileManager.default.fileExists(atPath: f.url(FinalizationFileAccess.source).path)) }
+            let callCounts = await calls.snapshot()
+            XCTAssertEqual(callCounts.remuxes, 0)
+            XCTAssertEqual(callCounts.inspections, 1,
+                           "terminal race must not perform a provenance inspection after its source identity changed")
+            let catalogCalls = await finalizerCatalog.calls()
+            let traceValues = await trace.values
+            XCTAssertEqual(catalogCalls, 0)
+            XCTAssertEqual(traceValues, [.beforeRelease])
+        }
+    }
+
+    func testReviewTerminalAbsentSourceObservationPersistsThroughCanonicalAndRelease() async throws {
+        // Prefix 7 has no durable authority for an initially absent source.
+        do {
+            let f = try await FinalizationFixture.make()
+            defer { f.clean() }
+            let prepared = await f.worker().finalize(.init(location: f.location), control: .init(), progress: { _ in })
+            XCTAssertNil(prepared.failure)
+            try await f.checkpoint(7)
+            try f.editJSON("metadata.json") { $0["status"] = "completed"; $0["captureOutcome"] = "completed" }
+            let canonicalBefore = try Data(contentsOf: f.url(FinalizationFileAccess.canonical))
+            let metadataBefore = try Data(contentsOf: f.url("metadata.json"))
+            let checkpointBefore = try Data(contentsOf: f.url(FinalizationFileAccess.checkpoint))
+            let retainedSource = f.base.appendingPathComponent("retained-prefix-7-source.mov")
+            try FileManager.default.moveItem(at: f.url(FinalizationFileAccess.source), to: retainedSource)
+            let finalization = AudioFinalizationCoordinator(worker: f.worker())
+            let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+                finalization: finalization, catalog: FinalizationCatalog())
+            await recovery.start(); await recovery.waitForCurrentPassSettlement()
+            let recoverySnapshot = await recovery.currentSnapshot()
+            let report = try XCTUnwrap(recoverySnapshot.report)
+            let issue = try XCTUnwrap(report.items.first { $0.sessionID == f.location.sessionID })
+            XCTAssertEqual(issue.code, .missingRecoverySource)
+            let verification = await finalization.currentSnapshot(at: f.location, operation: .verifyExistingCanonical)
+            XCTAssertNil(verification)
+            XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.canonical)), canonicalBefore)
+            XCTAssertEqual(try Data(contentsOf: f.url("metadata.json")), metadataBefore)
+            XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.checkpoint)), checkpointBefore)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: retainedSource.path))
+        }
+
+        // A prefix-8 absence is a terminal contract, not a one-time optional
+        // check: a new source during canonical I/O or before read-lease release
+        // invalidates the revalidation, while stable absence succeeds.
+        for mutation in ["none", "canonical", "beforeRelease"] {
+            let f = try await FinalizationFixture.make()
+            defer { f.clean() }
+            let prepared = await f.worker().finalize(.init(location: f.location), control: .init(), progress: { _ in })
+            XCTAssertNil(prepared.failure, mutation)
+            try await f.checkpoint(8)
+            try f.editJSON("metadata.json") { $0["status"] = "completed"; $0["captureOutcome"] = "completed" }
+            let canonicalBefore = try Data(contentsOf: f.url(FinalizationFileAccess.canonical))
+            let metadataBefore = try Data(contentsOf: f.url("metadata.json"))
+            let checkpointBefore = try Data(contentsOf: f.url(FinalizationFileAccess.checkpoint))
+            let sourceBefore = try Data(contentsOf: f.url(FinalizationFileAccess.source))
+            let retainedSource = f.base.appendingPathComponent("retained-prefix-8-\(mutation).mov")
+            try FileManager.default.moveItem(at: f.url(FinalizationFileAccess.source), to: retainedSource)
+            let canonicalGate = FinalizationGate(), releaseGate = FinalizationGate()
+            let calls = FinalizationMediaCallCounter()
+            let finalizerCatalog = TerminalVerificationCatalogProbe()
+            let trace = FinalizationTrace()
+            var worker = FileAudioFinalizer(roots: f.roots, catalog: finalizerCatalog)
+            worker.media = GatedCanonicalInspectionMedia(base: AVFoundationFinalizationMedia(), gate: canonicalGate, calls: calls)
+            worker.hook = { point in
+                await trace.append(point)
+                if point == .beforeRelease { await releaseGate.blockOnce() }
+            }
+            let finalization = AudioFinalizationCoordinator(worker: worker)
+            let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+                finalization: finalization, catalog: FinalizationCatalog())
+
+            await recovery.start()
+            await canonicalGate.waitEntered()
+            if mutation == "canonical" { try sourceBefore.write(to: f.url(FinalizationFileAccess.source)) }
+            await canonicalGate.open()
+            await releaseGate.waitEntered()
+            if mutation == "beforeRelease" { try sourceBefore.write(to: f.url(FinalizationFileAccess.source)) }
+            await releaseGate.open()
+            await recovery.waitForCurrentPassSettlement()
+
+            let expectsSuccess = mutation == "none"
+            let recoverySnapshot = await recovery.currentSnapshot()
+            let report = try XCTUnwrap(recoverySnapshot.report)
+            let issue = try XCTUnwrap(report.items.first { $0.sessionID == f.location.sessionID })
+            XCTAssertEqual(issue.code, expectsSuccess ? .audioRevalidated : .terminalInconsistent, mutation)
+            if !expectsSuccess { XCTAssertEqual(issue.warning, AudioFinalizationCode.identityChanged.rawValue, mutation) }
+            let result = await finalization.waitForResult(at: f.location, operation: .verifyExistingCanonical)
+            XCTAssertEqual(result?.phase, expectsSuccess ? .audioRevalidated : .failed, mutation)
+            XCTAssertEqual(result?.completedSteps, Array(FinalizationStep.allCases.prefix(8)))
+            XCTAssertFalse(result?.recoveryWasRemoved ?? true)
+            XCTAssertTrue(result?.retainedPaths.isEmpty ?? false)
+            XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.canonical)), canonicalBefore)
+            XCTAssertEqual(try Data(contentsOf: f.url("metadata.json")), metadataBefore)
+            XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.checkpoint)), checkpointBefore)
+            XCTAssertEqual(try Data(contentsOf: retainedSource), sourceBefore)
+            if expectsSuccess { XCTAssertFalse(FileManager.default.fileExists(atPath: f.url(FinalizationFileAccess.source).path)) }
+            else { XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), sourceBefore) }
+            let callCounts = await calls.snapshot()
+            let catalogCalls = await finalizerCatalog.calls()
+            let traceValues = await trace.values
+            XCTAssertEqual(callCounts.inspections, 1, mutation)
+            XCTAssertEqual(callCounts.remuxes, 0, mutation)
+            XCTAssertEqual(catalogCalls, 0, mutation)
+            XCTAssertEqual(traceValues, [.beforeRelease], mutation)
+        }
+    }
+
+    func testReviewNonemptyCorruptTerminalAudioIsDiagnosed() async throws {
+        for prefix in [6, 7, 8] {
+            let f = try await FinalizationFixture.make()
+            defer { f.clean() }
+            try await f.checkpoint(prefix)
+            try f.editJSON("metadata.json") { $0["status"] = "completed"; $0["captureOutcome"] = "completed" }
+            let invalidAudio = Data("not an MPEG4 audio file".utf8)
+            try invalidAudio.write(to: f.url(FinalizationFileAccess.canonical))
+            if prefix == 8 { try FileManager.default.removeItem(at: f.url(FinalizationFileAccess.source)) }
+            let finalization = AudioFinalizationCoordinator(worker: f.worker())
+            let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+                finalization: finalization, catalog: FinalizationCatalog())
+            await recovery.start()
+            await recovery.waitForCurrentPassSettlement()
+            let snapshot = await recovery.currentSnapshot()
+            let report = try XCTUnwrap(snapshot.report)
+            let issue = try XCTUnwrap(report.items.first { $0.sessionID == f.location.sessionID })
+            XCTAssertEqual(issue.code, .terminalInconsistent, "prefix \(prefix): nonempty corrupt final audio must not yield a clean recovery report")
+            XCTAssertEqual(issue.warning, AudioFinalizationCode.invalidContainer.rawValue,
+                           "prefix \(prefix): actual canonical media validation failure must be retained")
+            let verificationSnapshot = await finalization.currentSnapshot(at: f.location, operation: .verifyExistingCanonical)
+            XCTAssertEqual(verificationSnapshot?.phase, .failed)
+            XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.canonical)), invalidAudio)
+        }
+    }
+
+    func testReviewTerminalCheckpointWithEmptyCanonicalIsDiagnosed() async throws {
+        let f = try await FinalizationFixture.make()
+        defer { f.clean() }
+        try await f.checkpoint(6)
+        try f.editJSON("metadata.json") { $0["status"] = "completed"; $0["captureOutcome"] = "completed" }
+        let sourceBefore = try Data(contentsOf: f.url(FinalizationFileAccess.source))
+        let checkpointBefore = try Data(contentsOf: f.url(FinalizationFileAccess.checkpoint))
+        let metadataBefore = try Data(contentsOf: f.url("metadata.json"))
+        try Data().write(to: f.url(FinalizationFileAccess.canonical))
+        let catalog = FinalizationCatalog()
+        let finalization = AudioFinalizationCoordinator(worker: f.worker())
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+            finalization: finalization, catalog: catalog)
+        await recovery.start()
+        await recovery.waitForCurrentPassSettlement()
+        let recoverySnapshot = await recovery.currentSnapshot()
+        let report = try XCTUnwrap(recoverySnapshot.report)
+        let issue = try XCTUnwrap(report.items.first { $0.sessionID == f.location.sessionID })
+        XCTAssertEqual(issue.code, .terminalInconsistent,
+                       "Terminal metadata/checkpoint plus zero-byte final audio is an inconsistency, not success")
+        XCTAssertEqual(issue.warning, AudioFinalizationCode.invalidContainer.rawValue,
+                       "terminal diagnosis must retain the real media verifier failure")
+        let finalizationSnapshot = await finalization.currentSnapshot(at: f.location)
+        XCTAssertNil(finalizationSnapshot,
+                     "terminal validation must not enqueue a resumable re-export")
+        let verificationSnapshot = await finalization.currentSnapshot(at: f.location, operation: .verifyExistingCanonical)
+        XCTAssertEqual(verificationSnapshot?.phase, .failed)
+        XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.canonical)), Data())
+        XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), sourceBefore)
+        XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.checkpoint)), checkpointBefore)
+        XCTAssertEqual(try Data(contentsOf: f.url("metadata.json")), metadataBefore)
+    }
+
+    func testT09FreshRecoveryWithoutCheckpointResumesFromEmptyDurablePrefix() async throws {
+        let f = try await FinalizationFixture.make()
+        defer { f.clean() }
+        let sourceBefore = try Data(contentsOf: f.url(FinalizationFileAccess.source))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.url(FinalizationFileAccess.checkpoint).path),
+                       "No checkpoint is distinct from an existing checkpoint with an empty step prefix")
+        let freshRoots = StorageRootManager(applicationSupportDirectory: f.base.appendingPathComponent("no-checkpoint"), bookmarkCodec: f.bookmarks)
+        let summary = try await freshRoots.registerSelectedDirectory(f.root)
+        let freshLocation = SessionLocation(rootID: summary.id, sessionID: f.location.sessionID, folderName: f.location.folderName)
+        let repository = FileSessionRepository(roots: freshRoots)
+        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: freshRoots, catalog: FinalizationCatalog()))
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: freshRoots), persistence: repository,
+            finalization: finalization, catalog: FinalizationCatalog())
+        await recovery.start(); await recovery.waitForCurrentPassSettlement()
+        let finalizationResult = await finalization.waitForResult(at: freshLocation)
+        let result = try XCTUnwrap(finalizationResult)
+        XCTAssertNil(result.failure)
+        let checkpoint = try await repository.readFinalizationCheckpoint(at: freshLocation)
+        XCTAssertEqual(checkpoint.completedSteps,
+                       Array(FinalizationStep.allCases.prefix(3)))
+        XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), sourceBefore)
+    }
+
+    func testT09FreshRecoveryResumesEveryDurableWriteFlushAndCheckpointWindow() async throws {
+        let points: [FinalizationPoint] = [.opened, .sourceValidated, .beforeSecuredCheckpoint, .afterSecuredCheckpoint,
+            .beforeFinalizingMetadata, .afterFinalizingMetadata, .beforeExport, .afterExport, .beforeFlush, .afterFlush,
+            .beforeCreatedCheckpoint, .afterCreatedCheckpoint, .beforeValidation, .afterValidation,
+            .beforePublication, .afterPublication, .beforeVerifiedCheckpoint, .afterVerifiedCheckpoint,
+            .beforeProjection, .afterProjection]
+        for point in points {
+            let f = try await FinalizationFixture.make()
+            defer { f.clean() }
+            let sourceBefore = try Data(contentsOf: f.url(FinalizationFileAccess.source))
+            var firstWorker = f.worker()
+            firstWorker.hook = { if $0 == point { throw AudioFinalizationCode.persistence } }
+            let firstFinalization = AudioFinalizationCoordinator(worker: firstWorker)
+            let firstRecovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+                finalization: firstFinalization, catalog: FinalizationCatalog())
+            await firstRecovery.start(); await firstRecovery.waitForCurrentPassSettlement()
+            let firstResult = await firstFinalization.waitForResult(at: f.location)
+            XCTAssertNotNil(firstResult?.failure, "\(point) must create a recoverable durable boundary")
+            XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), sourceBefore)
+
+            let freshRoots = StorageRootManager(applicationSupportDirectory: f.base.appendingPathComponent("resume-\(point.rawValue)"), bookmarkCodec: f.bookmarks)
+            let summary = try await freshRoots.registerSelectedDirectory(f.root)
+            let freshLocation = SessionLocation(rootID: summary.id, sessionID: f.location.sessionID, folderName: f.location.folderName)
+            let freshRepository = FileSessionRepository(roots: freshRoots)
+            let resumedFinalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: freshRoots, catalog: FinalizationCatalog()))
+            let resumedRecovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: freshRoots), persistence: freshRepository,
+                finalization: resumedFinalization, catalog: FinalizationCatalog())
+            await resumedRecovery.start(); await resumedRecovery.waitForCurrentPassSettlement()
+            let resumedResult = await resumedFinalization.waitForResult(at: freshLocation)
+            let resumed = try XCTUnwrap(resumedResult, "\(point) must resubmit under a fresh owner")
+            XCTAssertNil(resumed.failure, "\(point): \(resumed)")
+            XCTAssertEqual(resumed.completedSteps, Array(FinalizationStep.allCases.prefix(3)))
+            XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), sourceBefore)
+            let checkpoint = try await freshRepository.readFinalizationCheckpoint(at: freshLocation)
+            XCTAssertEqual(checkpoint.completedSteps,
+                           Array(FinalizationStep.allCases.prefix(3)))
+        }
+    }
+
+    func testT09FreshRecoveryHonorsStagingAndCanonicalCheckpointCombinations() async throws {
+        enum DiskCase: CaseIterable, Equatable { case incompleteStaging, completedStaging, canonicalAndStaging, canonicalConflict }
+        for diskCase in DiskCase.allCases {
+            let f = try await FinalizationFixture.make()
+            defer { f.clean() }
+            let sourceBefore = try Data(contentsOf: f.url(FinalizationFileAccess.source))
+            let media = AVFoundationFinalizationMedia()
+            switch diskCase {
+            case .incompleteStaging:
+                try await f.checkpoint(1)
+                try Data("incomplete staging".utf8).write(to: f.url(FinalizationFileAccess.staging))
+            case .completedStaging:
+                try await f.checkpoint(2)
+                try await media.remux(f.mediaFiles(destinationPath: FinalizationFileAccess.staging), control: .init())
+            case .canonicalAndStaging:
+                try await f.checkpoint(2)
+                try await media.remux(f.mediaFiles(destinationPath: FinalizationFileAccess.canonical), control: .init())
+                try await media.remux(f.mediaFiles(destinationPath: FinalizationFileAccess.staging), control: .init())
+            case .canonicalConflict:
+                let other = try await FinalizationFixture.make(frequency: 733)
+                defer { other.clean() }
+                try await f.checkpoint(2)
+                try await media.remux(other.mediaFiles(destination: f, destinationPath: FinalizationFileAccess.canonical), control: .init())
+                try await media.remux(f.mediaFiles(destinationPath: FinalizationFileAccess.staging), control: .init())
+            }
+            let canonicalBefore = try? Data(contentsOf: f.url(FinalizationFileAccess.canonical))
+            let stagingBefore = try? Data(contentsOf: f.url(FinalizationFileAccess.staging))
+            let freshRoots = StorageRootManager(applicationSupportDirectory: f.base.appendingPathComponent("matrix-\(String(describing: diskCase))"), bookmarkCodec: f.bookmarks)
+            let summary = try await freshRoots.registerSelectedDirectory(f.root)
+            let location = SessionLocation(rootID: summary.id, sessionID: f.location.sessionID, folderName: f.location.folderName)
+            var worker = FileAudioFinalizer(roots: freshRoots, catalog: FinalizationCatalog())
+            if diskCase == .completedStaging || diskCase == .canonicalAndStaging {
+                worker.hook = { if $0 == .beforeExport { throw AudioFinalizationCode.exportCreate } }
+            }
+            let finalization = AudioFinalizationCoordinator(worker: worker)
+            let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: freshRoots), persistence: FileSessionRepository(roots: freshRoots),
+                finalization: finalization, catalog: FinalizationCatalog())
+            await recovery.start(); await recovery.waitForCurrentPassSettlement()
+            let finalizationResult = await finalization.waitForResult(at: location)
+            let result = try XCTUnwrap(finalizationResult)
+            if diskCase == .canonicalConflict {
+                XCTAssertEqual(result.failure, .canonicalConflict)
+                XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.canonical)), canonicalBefore)
+                XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.staging)), stagingBefore)
+            } else {
+                XCTAssertNil(result.failure, "\(diskCase): \(result)")
+                XCTAssertEqual(result.completedSteps, Array(FinalizationStep.allCases.prefix(3)))
+                XCTAssertTrue(FileManager.default.fileExists(atPath: f.url(FinalizationFileAccess.canonical).path))
+            }
+            XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), sourceBefore)
+        }
+    }
+
+    func testT09FreshRecoveryServicesRespectCheckpointZeroThroughEight() async throws {
+        for prefix in 0...8 {
+            let f = try await FinalizationFixture.make()
+            defer { f.clean() }
+            if prefix >= 3 {
+                let prepared = await f.worker().finalize(.init(location: f.location), control: .init(), progress: { _ in })
+                XCTAssertNil(prepared.failure, "fixture prefix \(prefix): \(prepared)")
+            }
+            try await f.checkpoint(prefix)
+            // Prefixes four and five are pre-existing downstream work.  Their
+            // staging bytes are authoritative retained evidence, not input for
+            // a new export or a reason to regress the checkpoint.
+            let retainedStaging = prefix == 4 || prefix == 5 ? Data("retained staging \(prefix)".utf8) : nil
+            if let retainedStaging { try retainedStaging.write(to: f.url(FinalizationFileAccess.staging)) }
+            if prefix >= 6 {
+                try f.editJSON("metadata.json") {
+                    $0["status"] = "completed"
+                    $0["captureOutcome"] = "completed"
+                }
+            }
+            if prefix == 8 {
+                try FileManager.default.removeItem(at: f.url(FinalizationFileAccess.source))
+            }
+            let protected = ["metadata.json", FinalizationFileAccess.checkpoint, FinalizationFileAccess.canonical,
+                             FinalizationFileAccess.source].reduce(into: [String: Data]()) { files, path in
+                if let value = try? Data(contentsOf: f.url(path)) { files[path] = value }
+            }
+
+            // No in-memory cache from fixture setup is used by recovery.
+            let freshRoots = StorageRootManager(applicationSupportDirectory: f.base.appendingPathComponent("fresh-\(prefix)"), bookmarkCodec: f.bookmarks)
+            let summary = try await freshRoots.registerSelectedDirectory(f.root)
+            let freshRepository = FileSessionRepository(roots: freshRoots)
+            let freshLocation = SessionLocation(rootID: summary.id, sessionID: f.location.sessionID, folderName: f.location.folderName)
+            let catalog = FinalizationCatalog()
+            let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: freshRoots, catalog: catalog))
+            let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: freshRoots), persistence: freshRepository,
+                finalization: finalization, catalog: catalog)
+            await recovery.start()
+            await recovery.waitForCurrentPassSettlement()
+
+            if prefix < 6 {
+                let result = await finalization.waitForResult(at: freshLocation)
+                let recovered = try XCTUnwrap(result, "prefix \(prefix) must submit the shared T08 owner")
+                XCTAssertNil(recovered.failure, "prefix \(prefix): \(recovered)")
+                let checkpoint = try await freshRepository.readFinalizationCheckpoint(at: freshLocation)
+                let expectedSteps: [FinalizationStep] = prefix <= 3
+                    ? Array(FinalizationStep.allCases.prefix(3))
+                    : Array(FinalizationStep.allCases.prefix(prefix))
+                XCTAssertEqual(checkpoint.completedSteps, expectedSteps, "prefix \(prefix) must not regress or fabricate steps")
+                XCTAssertTrue(FileManager.default.fileExists(atPath: f.url(FinalizationFileAccess.source).path))
+                if let retainedStaging {
+                    XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.staging)), retainedStaging,
+                                   "prefix \(prefix) staging must survive recovery unchanged")
+                }
+
+                let bytesAfterFirstPass = protectedFileBytes(at: f)
+                let secondRoots = StorageRootManager(applicationSupportDirectory: f.base.appendingPathComponent("rerun-\(prefix)"), bookmarkCodec: f.bookmarks)
+                let secondSummary = try await secondRoots.registerSelectedDirectory(f.root)
+                let secondLocation = SessionLocation(rootID: secondSummary.id, sessionID: f.location.sessionID, folderName: f.location.folderName)
+                let secondCatalog = FinalizationCatalog()
+                let secondFinalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: secondRoots, catalog: secondCatalog))
+                let secondRecovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: secondRoots),
+                    persistence: FileSessionRepository(roots: secondRoots), finalization: secondFinalization, catalog: secondCatalog)
+                await secondRecovery.start(); await secondRecovery.waitForCurrentPassSettlement()
+                let secondResult = await secondFinalization.waitForResult(at: secondLocation)
+                XCTAssertNil(secondResult?.failure, "rerun prefix \(prefix): \(String(describing: secondResult))")
+                XCTAssertEqual(protectedFileBytes(at: f), bytesAfterFirstPass,
+                               "unchanged prefix \(prefix) rerun must preserve source/staging/canonical/checkpoint bytes")
+            } else {
+                let resumeSnapshot = await finalization.currentSnapshot(at: freshLocation)
+                XCTAssertNil(resumeSnapshot,
+                             "terminal-compatible prefix \(prefix) must not enqueue resumable export work")
+                let terminalSnapshot = await finalization.currentSnapshot(at: freshLocation, operation: .verifyExistingCanonical)
+                XCTAssertEqual(terminalSnapshot?.phase, .audioRevalidated,
+                               "terminal-compatible prefix \(prefix) must perform read-only canonical media validation")
+                XCTAssertNil(terminalSnapshot?.result?.failure)
+                for (path, bytes) in protected {
+                    XCTAssertEqual(try Data(contentsOf: f.url(path)), bytes, "prefix \(prefix) must preserve \(path)")
+                }
+            }
+        }
+    }
+
     func testContractsRoundTripAndConstructionHasNoSideEffects() async throws {
         let f = try await FinalizationFixture.make()
         defer { f.clean() }
@@ -271,7 +1086,14 @@ extension AudioFinalizationTests {
         try roundTrip(AudioFinalizationCode.identityChanged)
         let result = await worker.finalize(request, control: .init(), progress: { _ in })
         try roundTrip(result)
-        try roundTrip(AudioFinalizationSnapshot(location: f.location, generation: 1, phase: result.phase, result: result))
+        try roundTrip(AudioFinalizationSnapshot(location: f.location, generation: 1, operation: .resume, phase: result.phase, result: result))
+        let legacySnapshotData = try JSONSerialization.data(withJSONObject: [
+            "location": try JSONSerialization.jsonObject(with: JSONEncoder().encode(f.location)),
+            "generation": 2,
+            "phase": AudioFinalizationPhase.queued.rawValue
+        ])
+        let legacySnapshot = try JSONDecoder().decode(AudioFinalizationSnapshot.self, from: legacySnapshotData)
+        XCTAssertEqual(legacySnapshot.operation, .resume)
         let snapshot = await coordinator.currentSnapshot(at: f.location)
         XCTAssertNil(snapshot)
         let after = await f.bookmarks.counts()
@@ -476,6 +1298,91 @@ extension AudioFinalizationTests {
 actor FinalizationTrace {
     var values: [FinalizationPoint] = []
     func append(_ point: FinalizationPoint) { values.append(point) }
+    func reset() { values.removeAll() }
+}
+
+actor FinalizationMediaCallCounter {
+    private var inspections = 0
+    private var remuxes = 0
+    func inspected() { inspections += 1 }
+    func remuxed() { remuxes += 1 }
+    func reset() { inspections = 0; remuxes = 0 }
+    func snapshot() -> (inspections: Int, remuxes: Int) { (inspections, remuxes) }
+}
+
+struct CountingFinalizationMedia: FinalizationMediaProcessing {
+    let base: any FinalizationMediaProcessing
+    let calls: FinalizationMediaCallCounter
+    func inspect(_ url: URL, requiresM4A: Bool, control: AudioFinalizationControl) async throws -> AudioMediaReport {
+        await calls.inspected()
+        return try await base.inspect(url, requiresM4A: requiresM4A, control: control)
+    }
+    func remux(_ files: FinalizationMediaFiles, control: AudioFinalizationControl) async throws {
+        await calls.remuxed()
+        try await base.remux(files, control: control)
+    }
+}
+
+/// Suspends only the canonical inspection after the real FinalizationRun has
+/// opened.  It preserves the production media implementation for the actual
+/// media proof rather than fabricating a successful inspection.
+struct GatedCanonicalInspectionMedia: FinalizationMediaProcessing {
+    let base: any FinalizationMediaProcessing
+    let gate: FinalizationGate
+    let calls: FinalizationMediaCallCounter
+
+    func inspect(_ url: URL, requiresM4A: Bool, control: AudioFinalizationControl) async throws -> AudioMediaReport {
+        if requiresM4A { await gate.blockOnce() }
+        await calls.inspected()
+        return try await base.inspect(url, requiresM4A: requiresM4A, control: control)
+    }
+
+    func remux(_ files: FinalizationMediaFiles, control: AudioFinalizationControl) async throws {
+        await calls.remuxed()
+        try await base.remux(files, control: control)
+    }
+}
+
+actor TerminalVerificationCatalogProbe: RecordingCatalogRefreshing {
+    private var reconciliationCalls = 0
+    func reconcile() async throws -> CatalogReconciliationReport {
+        reconciliationCalls += 1
+        return .init(rootResults: [], issues: [], recoveredFromCorruption: false)
+    }
+    func calls() -> Int { reconciliationCalls }
+}
+
+private actor ReviewCompletedAudioCallbackGate: AudioFinalizationWorking {
+    let base: FileAudioFinalizer
+    private var delivery: CheckedContinuation<Void, Never>?
+    private var deliveryReady = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(base: FileAudioFinalizer) { self.base = base }
+
+    func finalize(_ request: AudioFinalizationRequest, control: AudioFinalizationControl,
+                  progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
+        let result = await base.finalize(request, control: control, progress: progress)
+        await withCheckedContinuation {
+            delivery = $0
+            deliveryReady = true
+            let pending = waiters; waiters.removeAll()
+            for waiter in pending { waiter.resume() }
+        }
+        return result
+    }
+
+    func removeRecovery(_ evidence: FinalizationCompletionEvidence, control: AudioFinalizationControl,
+                        progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
+        await base.removeRecovery(evidence, control: control, progress: progress)
+    }
+
+    func waitUntilDeliveryReady() async {
+        guard !deliveryReady else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func deliverCompletedResult() { delivery?.resume(); delivery = nil }
 }
 extension FinalizationFixture {
     func checkpoint(_ count: Int) async throws {

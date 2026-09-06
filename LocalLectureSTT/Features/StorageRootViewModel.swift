@@ -29,6 +29,11 @@ enum StorageRootViewState: Equatable {
 @MainActor
 final class StorageRootViewModel: ObservableObject {
     @Published private(set) var state: StorageRootViewState = .loading
+    /// A recovery action may target a historical root while `state` continues
+    /// to describe the active root that is powering a live recording.  Keep
+    /// that per-root failure available to the recovery UI instead of turning
+    /// the entire root selector into `.failed`.
+    @Published private(set) var historicalReauthorizationErrors: [StorageRootID: StorageErrorCode] = [:]
     @Published private(set) var isPresentingPicker = false
     @Published private(set) var isSavingSelection = false
 
@@ -83,6 +88,35 @@ final class StorageRootViewModel: ObservableObject {
             state = .failed(error.code)
         } catch {
             state = .failed(.bookmarkCreateFailed)
+        }
+    }
+
+    /// Recovery can identify an unavailable historical root while another root
+    /// remains active.  Reauthorize that exact root rather than silently using
+    /// the active-root bookmark.
+    func reauthorize(rootID: StorageRootID) async {
+        guard !isPresentingPicker, !isSavingSelection else { return }
+        // This action can target a historical root reported by recovery while
+        // the active root is driving a live recording.  A failed picker or
+        // bookmark update must not replace that active-root UI with a global
+        // failure state.
+        let stateBeforeHistoricalAttempt = state
+        isPresentingPicker = true
+        defer { isPresentingPicker = false }
+        guard let url = directorySelector.chooseDirectory() else { return }
+        isSavingSelection = true
+        defer { isSavingSelection = false }
+        do {
+            _ = try await controller.reauthorize(rootID: rootID, with: url)
+            historicalReauthorizationErrors[rootID] = nil
+            state = Self.viewState(from: await controller.availability())
+            onRootChanged()
+        } catch let error as StorageError {
+            historicalReauthorizationErrors[rootID] = error.code
+            state = stateBeforeHistoricalAttempt
+        } catch {
+            historicalReauthorizationErrors[rootID] = .bookmarkCreateFailed
+            state = stateBeforeHistoricalAttempt
         }
     }
 

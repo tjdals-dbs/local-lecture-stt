@@ -1,7 +1,7 @@
 # Local Lecture STT Project Status
 
 - Status document version: 1.0
-- Last updated: 2026-09-03
+- Last updated: 2026-09-06
 - Specification baseline: `MVP_SPEC.md` 1.0, confirmed
 - Implementation plan: `IMPLEMENTATION_PLAN.md` 1.3
 
@@ -9,18 +9,18 @@
 
 - Current milestone: M1 safe recorder
 - Current Task: none in progress
-- Next action: T09 app-start session recovery; await a separate implementation prompt
-- Latest completed Task: T08 final audio finalization pipeline
+- Next action: T10 app lifecycle; await a separate implementation prompt
+- Latest completed Task: T09 app-start session recovery
 - Latest passed gate: T01 initial runnable baseline
-- Application implementation: recording plus app-owned final M4A generation, verification and resumable audio checkpoints; STT/transcript finalization remains unimplemented
+- Application implementation: recording, app-owned final M4A generation, verification and resumable audio checkpoints, plus filesystem-authoritative startup/root-change session recovery; STT/transcript finalization remains unimplemented
 
 ## Repository state at this handoff
 
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
 - Local branch: `dev`
-- Approved T08 source: `de7cf16b193942c836aa64f230f5d1a911740fad`, independently reviewed and explicitly authorized for Phase 2 integration
-- `dev` branch: T08 squash integration from `178471ce00de7b7ca7ecc7dfc77c7e9b45bd9697`, tracked at `origin/dev`; exact integration validation is reported separately from candidate evidence below
+- Approved T09 source: `2f2cc0aad72ff883f4c1c2c1cde3d73ecc77872f`, independently reviewed and explicitly authorized for Phase 2 integration
+- `dev` branch: T09 is squash-integrated from the approved source; exact integration SHA, local results, and exact-head CI are recorded in the Phase 2 handoff
 - `main` and `origin/main`: preserved at the verified T01 baseline `38e126f92ac823d29306ea8c1f7703f7060a5818`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -46,11 +46,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T06 recoverable fragmented audio writer | Complete and audit-hardened on `dev`; `main` remains on the verified T01 baseline | Shared production/fault seams, operation ownership and exact-once terminal cleanup, stateful multi-format/downmix conversion, 22-second AAC mono 48 kHz fragmented recovery MOV with active-prefix and completed-file sample decode, 114 unit tests, 1 integration test, unsigned arm64 Debug build, and task/dev CI |
 | T07 recording session coordinator and minimal recording UI | Complete on `dev`; `main` remains on the verified T01 baseline | One-session coordinator ownership, metadata/event journal lifecycle, bounded primary PCM drain, minimal recording UI, and production synthetic recovery-MOV integration. Unsigned arm64 Debug build and 135 unit/integration tests passed; the approved task CI passed. |
 | T08 final audio finalization pipeline | Complete on `dev` through separately authorized squash integration | Approved candidate: unsigned arm64 Debug build, 162 tests including 2-hour AAC, 11 related tests × 20 iterations (220 executions), and exact-task CI passed; independently confirmed by the coordinator. Integration-SHA validation is separate. |
+| T09 app-start session recovery | Complete on `dev` through separately authorized squash integration | Filesystem-authoritative startup/root-change discovery, interrupted recovery transitions, shared T08 finalization ownership, terminal canonical/source revalidation across await boundaries, catalog/UI refresh, and recoverable-file preservation. Exact integration validation is recorded in the Phase 2 handoff. |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-T08 is integrated into `dev`. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T09 app-start session recovery is next and has not started. G1 remains pending.
+T09 is integrated into `dev`. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`; T10 app lifecycle is next and remains unstarted. G1 remains pending.
 
 ## Gate status
 
@@ -87,7 +88,15 @@ T08 is integrated into `dev`. The canonical checklist is in section 9 of `IMPLEM
 - Media processing checks pinned directory/file ownership inside framework await and writer I/O boundaries. Independent review regression tests verify no output in a replaced session directory, original/replacement file preservation, exactly-once cleanup/scope release, and completed-session result/snapshot/UI mapping.
 - Approved candidate `de7cf16b193942c836aa64f230f5d1a911740fad`: full build/test **162 passed**, related tests **11 × 20 = 220 passed**, and [exact-task CI passed](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/33730646383). These are candidate results, independently confirmed by the coordinator; they do not stand in for validation of the new squash commit. For targeted/full validation of the squash commit, consult its exact-SHA integration report and GitHub Actions result.
 - [T08 acceptance](docs/T08_ACCEPTANCE.md) is the historical Phase 1 requirement/assertion record; its Phase 1 restrictions are superseded only by the explicit T08 integration authorization. [Architecture](docs/ARCHITECTURE.md#t08-final-audio-and-application-lifetime) records the implemented boundaries, and [Development](docs/DEVELOPMENT.md#manual-t08-check-pending) records the pending manual procedure.
-- Physical microphone/TCC, signed Sandbox/bookmark and hardware-route verification remain manual and unperformed. Startup recovery, forced termination, window/quit/sleep and power-loss validation remain later work. No G1 pass is claimed. T09 requires a separate prompt.
+- Physical microphone/TCC, signed Sandbox/bookmark and hardware-route verification remain manual and unperformed. Forced termination, window/quit/sleep and power-loss validation remain manual or later T10/T26 work. No G1 pass is claimed.
+
+## T09 handoff
+
+- T09 discovers active and historical roots from filesystem artifacts rather than catalog rows, conservatively interrupts durable `recording/paused` sessions, resumes eligible T08 work through the shared queue, and reports unsafe/missing artifacts without deleting them.
+- Completed terminal sessions receive read-only canonical media and source-provenance verification. Source observation is held as absent or fingerprinted-present through canonical awaits and read-lease release; prefix-8 canonical-only success requires durable recovery removal plus stable source absence.
+- Recovery refreshes the rebuildable catalog and UI report after file work. Historical-root reauthorization stays a root notice/action and cannot overwrite same-root session results, first error, warnings, or live recording controls.
+- The approved candidate `2f2cc0aad72ff883f4c1c2c1cde3d73ecc77872f` passed 210 unsigned arm64 Debug tests, 10 representative tests × 20 runs, and [exact-task CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/33988096036). The actual `dev` squash SHA, post-squash tests, and exact-head CI are recorded in this integration handoff.
+- T09 does not delete recovery data, generate transcripts or derived files, or implement T10 lifecycle. Physical microphone/TCC, actual process kill, sleep/wake, power loss, window close, and app quit remain manual or T10/T26 scope. No G1 pass is claimed.
 
 ## Status update rules
 

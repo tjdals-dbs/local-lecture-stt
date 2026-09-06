@@ -4,6 +4,85 @@ import XCTest
 @testable import LocalLectureSTT
 
 final class RecordingSessionFileIntegrationTests: XCTestCase {
+    func testT09RecoversPreFinishMultiMoofSnapshotWithFreshServices() async throws {
+        let fixture = try RecordingFileIntegrationFixture()
+        defer { fixture.cleanup() }
+        let initialRoots = StorageRootManager(applicationSupportDirectory: fixture.applicationSupport, bookmarkCodec: fixture.bookmarks)
+        _ = try await initialRoots.registerSelectedDirectory(fixture.root)
+        let initialRepository = FileSessionRepository(roots: initialRoots)
+        let time = AbsoluteTime(Date())
+        let originalLocation = try await initialRepository.createSession(sessionID: SessionID(), createdAt: time, timeZone: .gmt)
+        let recorder = AVFoundationAudioRecorder(roots: initialRoots)
+        try await recorder.start(at: originalLocation, expectedCaptureGeneration: 91)
+        try await appendSyntheticRecoveryPCM(to: recorder, generation: 91, seconds: 22)
+        try await recorder.flush()
+
+        let sourceURL = fixture.root.appendingPathComponent(originalLocation.folderName.rawValue)
+            .appendingPathComponent(SessionArtifact.recoveryAudio.relativePath)
+        let snapshot = try await readableActiveSnapshot(at: sourceURL, recorder: recorder)
+        let stateAtCopy = await recorder.currentState()
+        XCTAssertEqual(stateAtCopy, .recording, "the snapshot must precede finish()")
+        XCTAssertGreaterThanOrEqual(topLevelBoxCount(snapshot, named: "moof"), 2)
+        let snapshotMedia = try await AVFoundationFinalizationMedia().inspect(sourceURL, requiresM4A: false, control: .init())
+        XCTAssertGreaterThan(snapshotMedia.durationSeconds, 10)
+
+        // Release the real writer only after taking its active snapshot, then
+        // restore that exact pre-finish byte sequence as the crash fixture.
+        _ = try await recorder.stop()
+        try snapshot.write(to: sourceURL, options: .atomic)
+        let recordingMetadata = try SessionMetadataDocument(
+            sessionId: originalLocation.sessionID, title: "pre-finish snapshot", status: .recording,
+            captureOutcome: .inProgress, createdAt: time, recordingStartedAt: time,
+            activeDurationMs: try MediaMilliseconds(22_000), languageMode: .english,
+            transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "T09", osVersion: "test",
+            lastUpdatedAt: time
+        )
+        try await initialRepository.writeMetadata(recordingMetadata, at: originalLocation)
+
+        // A new root manager/repository/catalog/finalizer/recovery owner has
+        // no in-memory state from the writer or initial repository.
+        let freshRoots = StorageRootManager(applicationSupportDirectory: fixture.applicationSupport.appendingPathComponent("fresh"), bookmarkCodec: fixture.bookmarks)
+        let freshSummary = try await freshRoots.registerSelectedDirectory(fixture.root)
+        let freshRepository = FileSessionRepository(roots: freshRoots)
+        let freshLocation = SessionLocation(rootID: freshSummary.id, sessionID: originalLocation.sessionID,
+            folderName: originalLocation.folderName)
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: fixture.applicationSupport.appendingPathComponent("fresh-catalog"))
+        let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: freshRoots), store: store)
+        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: freshRoots, catalog: catalog))
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: freshRoots), persistence: freshRepository,
+            finalization: finalization, catalog: catalog)
+        await recovery.start()
+        await recovery.waitForCurrentPassSettlement()
+        let recovered = await finalization.waitForResult(at: freshLocation)
+        let result = try XCTUnwrap(recovered)
+        XCTAssertNil(result.failure, "\(result)")
+        let finalMedia = try XCTUnwrap(result.media)
+        XCTAssertEqual(finalMedia.codec, "AAC-LC")
+        XCTAssertEqual(finalMedia.sampleRate, 48_000)
+        XCTAssertEqual(finalMedia.channels, 1)
+        XCTAssertGreaterThan(finalMedia.first.byteCount, 0)
+        XCTAssertGreaterThan(finalMedia.last.byteCount, 0)
+        XCTAssertLessThan(finalMedia.maximumGapSeconds, 0.0001)
+
+        let finalURL = fixture.root.appendingPathComponent(originalLocation.folderName.rawValue)
+            .appendingPathComponent(SessionArtifact.finalAudio.relativePath)
+        let sourceAfter = try Data(contentsOf: sourceURL)
+        XCTAssertEqual(sourceAfter, snapshot, "T09 must retain the exact recoverable MOV bytes")
+        let independentlyDecodedFinal = try await AVFoundationFinalizationMedia().inspect(finalURL, requiresM4A: true, control: .init())
+        XCTAssertEqual(independentlyDecodedFinal.durationSeconds, snapshotMedia.durationSeconds, accuracy: 0.15)
+        XCTAssertGreaterThan(independentlyDecodedFinal.first.byteCount, 0)
+        XCTAssertGreaterThan(independentlyDecodedFinal.last.byteCount, 0)
+        XCTAssertEqual(independentlyDecodedFinal.payloadSHA256, finalMedia.payloadSHA256)
+        let metadata = try await freshRepository.readMetadata(at: freshLocation)
+        XCTAssertEqual(metadata.status, .finalizing)
+        XCTAssertEqual(metadata.captureOutcome, .interrupted)
+        let checkpoint = try await freshRepository.readFinalizationCheckpoint(at: freshLocation)
+        XCTAssertEqual(checkpoint.completedSteps, Array(FinalizationStep.allCases.prefix(3)))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent(originalLocation.folderName.rawValue)
+            .appendingPathComponent(SessionArtifact.transcript.relativePath).path))
+        try await store.close()
+    }
+
     func testAppOwnedFinalizationDoesNotBlockEssentialSaveOrNextRecording() async throws {
         let fixture = try RecordingFileIntegrationFixture()
         defer { fixture.cleanup() }
@@ -17,14 +96,15 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
         let repository = FileSessionRepository(roots: roots)
         let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: fixture.applicationSupport)
         let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: store)
+        let activity = SessionActivityRegistry()
         let recording = RecordingSessionCoordinator(roots: roots, permission: permission, capture: capture,
             recorders: ClosureAudioRecorderFactory { AVFoundationAudioRecorder(roots: roots) }, repository: repository,
-            catalog: catalog, environment: RecordingSessionEnvironment(appVersion: "T08-integration", osVersion: "synthetic"))
+            catalog: catalog, environment: RecordingSessionEnvironment(appVersion: "T08-integration", osVersion: "synthetic"), activity: activity)
         let gate = AppFinalizationGate()
         var worker = FileAudioFinalizer(roots: roots, catalog: catalog)
         worker.hook = { if $0 == .beforeExport { await gate.blockOnce() } }
         let finalization = AudioFinalizationCoordinator(worker: worker)
-        let app = RecordingFinalizationCoordinator(recording: recording, finalization: finalization)
+        let app = RecordingFinalizationCoordinator(recording: recording, finalization: finalization, activity: activity)
         _ = try await app.start(.init(title: "First synthetic", timeZone: .gmt))
         let essentialStart = ProcessInfo.processInfo.systemUptime
         let stopped = await app.stop()
@@ -33,6 +113,15 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
         await gate.waitEntered()
         let pending = await finalization.currentSnapshot(at: first.location)
         XCTAssertNil(pending?.result)
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: repository,
+            finalization: finalization, catalog: catalog, activity: activity)
+        await recovery.start()
+        await recovery.waitForCurrentPassSettlement()
+        let recoverySnapshot = await recovery.currentSnapshot()
+        let protectedReport = try XCTUnwrap(recoverySnapshot.report)
+        XCTAssertTrue(protectedReport.items.contains { $0.sessionID == first.location.sessionID &&
+            $0.folderName == first.location.folderName.rawValue && $0.code == .currentProcessActive },
+                      "A root refresh must not mutate a T08-owned live session while its media gate is blocked")
         let second = try await app.start(.init(title: "Second synthetic", timeZone: .gmt))
         XCTAssertEqual(second.phase, .recording)
         XCTAssertNotEqual(second.sessionID, first.location.sessionID)
@@ -69,6 +158,81 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
         let scopes = await fixture.bookmarks.counts()
         XCTAssertEqual(scopes.start, scopes.stop)
         print("T08 A02/C02 essentialSave=\(essentialSeconds)s audioFinalizationAfterGate=\(finalizationSeconds)s")
+        try await store.close()
+    }
+
+    func testT09BlockedRecoveryMediaDoesNotBlockNewT07RecordingOrOverwriteIt() async throws {
+        let fixture = try RecordingFileIntegrationFixture()
+        defer { fixture.cleanup() }
+        let roots = StorageRootManager(applicationSupportDirectory: fixture.applicationSupport, bookmarkCodec: fixture.bookmarks)
+        _ = try await roots.registerSelectedDirectory(fixture.root)
+        let repository = FileSessionRepository(roots: roots)
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: fixture.applicationSupport)
+        let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: store)
+        let permission = AuthorizedIntegrationPermission()
+
+        // This is a real T07-secured file from a prior process: it has no
+        // current activity reservation and is therefore eligible for T09.
+        let oldCapture = MicrophoneCaptureController(permission: permission,
+            driver: SyntheticIntegrationCaptureDriver(chunkCount: 16, framesPerChunk: 2_048),
+            buffers: CaptureBufferConfiguration(recordingCapacity: 32, speechCapacity: 4),
+            monitor: InputSignalMonitor(clock: FixedIntegrationMonotonicClock(), scheduler: NoopIntegrationSignalScheduler()))
+        let oldRecording = RecordingSessionCoordinator(roots: roots, permission: permission, capture: oldCapture,
+            recorders: ClosureAudioRecorderFactory { AVFoundationAudioRecorder(roots: roots) }, repository: repository,
+            catalog: catalog, environment: RecordingSessionEnvironment(appVersion: "T09", osVersion: "synthetic"))
+        _ = try await oldRecording.start(.init(title: "Interrupted predecessor", timeZone: .gmt))
+        let oldStop = await oldRecording.stop()
+        guard case let .secured(old) = oldStop else { return XCTFail("prior T07 session was not secured") }
+
+        let activity = SessionActivityRegistry()
+        let gate = AppFinalizationGate()
+        var worker = FileAudioFinalizer(roots: roots, catalog: catalog)
+        worker.hook = { if $0 == .beforeExport { await gate.blockOnce() } }
+        let finalization = AudioFinalizationCoordinator(worker: worker)
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: repository,
+            finalization: finalization, catalog: catalog, activity: activity)
+        let newCapture = MicrophoneCaptureController(permission: permission,
+            driver: SyntheticIntegrationCaptureDriver(chunkCount: 16, framesPerChunk: 2_048, endFrequency: 1_320),
+            buffers: CaptureBufferConfiguration(recordingCapacity: 32, speechCapacity: 4),
+            monitor: InputSignalMonitor(clock: FixedIntegrationMonotonicClock(), scheduler: NoopIntegrationSignalScheduler()))
+        let newRecording = RecordingSessionCoordinator(roots: roots, permission: permission, capture: newCapture,
+            recorders: ClosureAudioRecorderFactory { AVFoundationAudioRecorder(roots: roots) }, repository: repository,
+            catalog: catalog, environment: RecordingSessionEnvironment(appVersion: "T09", osVersion: "synthetic"), activity: activity)
+        let app = RecordingFinalizationCoordinator(recording: newRecording, finalization: finalization,
+            startupRecovery: recovery, activity: activity)
+
+        let started = try await app.start(.init(title: "New recording during recovery", timeZone: .gmt))
+        XCTAssertEqual(started.phase, .recording)
+        XCTAssertNotEqual(started.sessionID, old.location.sessionID)
+        await gate.waitEntered()
+        let oldPending = await finalization.currentSnapshot(at: old.location)
+        XCTAssertNil(oldPending?.result, "the predecessor must be genuinely blocked in recovery media work")
+
+        let newStop = await app.stop()
+        guard case let .secured(new) = newStop else { return XCTFail("new T07 essential save was blocked") }
+        let newBeforeRecoveryCompletes = try await repository.readMetadata(at: new.location)
+        XCTAssertEqual(newBeforeRecoveryCompletes.status, .securing)
+        XCTAssertEqual(newBeforeRecoveryCompletes.captureOutcome, .completed)
+        let oldBeforeRecoveryCompletes = try await repository.readMetadata(at: old.location)
+        XCTAssertTrue([.securing, .finalizing].contains(oldBeforeRecoveryCompletes.status),
+                      "only the prior recovery location may advance while its media gate is blocked")
+        XCTAssertEqual(oldBeforeRecoveryCompletes.captureOutcome, .completed)
+
+        await gate.open()
+        let oldResult = await finalization.waitForResult(at: old.location)
+        XCTAssertNil(oldResult?.failure)
+        let newResult = await finalization.waitForResult(at: new.location)
+        XCTAssertNil(newResult?.failure)
+        let newAfter = try await repository.readMetadata(at: new.location)
+        XCTAssertEqual(newAfter.sessionId, new.location.sessionID)
+        XCTAssertEqual(newAfter.captureOutcome, .completed,
+                       "a late predecessor callback must never relabel the current recording")
+        XCTAssertEqual(newAfter.status, .finalizing)
+        let oldAfter = try await repository.readMetadata(at: old.location)
+        XCTAssertEqual(oldAfter.sessionId, old.location.sessionID)
+        let scopes = await fixture.bookmarks.counts()
+        XCTAssertEqual(scopes.start, scopes.stop)
+        try await store.close()
     }
 
     func testProductionCaptureRepositoryRootRecorderAndCatalogPersistDecodableRecoveryAudio() async throws {
@@ -207,6 +371,66 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
             "bookmarkScopes=\(bookmarkCounts.start)/\(bookmarkCounts.stop)"
         )
     }
+
+    @MainActor
+    func testT09HistoricalRootReauthorizationDoesNotHideLiveRecordingOrStop() async throws {
+        let fixture = try RecordingFileIntegrationFixture()
+        defer { fixture.cleanup() }
+        let historicalURL = fixture.base.appendingPathComponent("historical-root", isDirectory: true)
+        let nonDirectoryURL = fixture.base.appendingPathComponent("not-a-root")
+        try FileManager.default.createDirectory(at: historicalURL, withIntermediateDirectories: true)
+        try Data("not a directory".utf8).write(to: nonDirectoryURL)
+        let roots = StorageRootManager(applicationSupportDirectory: fixture.applicationSupport, bookmarkCodec: fixture.bookmarks)
+        let historical = try await roots.registerSelectedDirectory(historicalURL)
+        let active = try await roots.registerSelectedDirectory(fixture.root)
+        let permission = AuthorizedIntegrationPermission()
+        let capture = MicrophoneCaptureController(permission: permission,
+            driver: SyntheticIntegrationCaptureDriver(chunkCount: 16, framesPerChunk: 2_048),
+            buffers: CaptureBufferConfiguration(recordingCapacity: 32, speechCapacity: 4),
+            monitor: InputSignalMonitor(clock: FixedIntegrationMonotonicClock(), scheduler: NoopIntegrationSignalScheduler()))
+        let repository = FileSessionRepository(roots: roots)
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: fixture.applicationSupport)
+        let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: store)
+        let recording = RecordingSessionCoordinator(roots: roots, permission: permission, capture: capture,
+            recorders: ClosureAudioRecorderFactory { AVFoundationAudioRecorder(roots: roots) }, repository: repository,
+            catalog: catalog, environment: RecordingSessionEnvironment(appVersion: "T09", osVersion: "synthetic"))
+        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: roots, catalog: catalog))
+        let app = RecordingFinalizationCoordinator(recording: recording, finalization: finalization)
+        _ = try await app.start(.init(title: "Active while historical root changes", timeZone: .gmt))
+        let afterStart = await app.currentSnapshot()
+        XCTAssertEqual(afterStart.phase, .recording)
+
+        let failed = StorageRootViewModel(controller: roots,
+            directorySelector: IntegrationDirectorySelector(selectedURL: nonDirectoryURL))
+        await failed.restore(); await failed.reauthorize(rootID: historical.id)
+        XCTAssertEqual(failed.state, .available(active, refreshedBookmark: false))
+        XCTAssertEqual(failed.historicalReauthorizationErrors[historical.id], .rootNotDirectory)
+        let afterFailure = await app.currentSnapshot()
+        XCTAssertEqual(afterFailure.phase, .recording,
+                       "A historical reauthorization failure must not hide active Recording/Stop state")
+
+        let cancelled = StorageRootViewModel(controller: roots,
+            directorySelector: IntegrationDirectorySelector(selectedURL: nil))
+        await cancelled.restore(); await cancelled.reauthorize(rootID: historical.id)
+        XCTAssertEqual(cancelled.state, .available(active, refreshedBookmark: false))
+        XCTAssertNil(cancelled.historicalReauthorizationErrors[historical.id])
+        let afterCancellation = await app.currentSnapshot()
+        XCTAssertEqual(afterCancellation.phase, .recording)
+
+        let succeeded = StorageRootViewModel(controller: roots,
+            directorySelector: IntegrationDirectorySelector(selectedURL: historicalURL))
+        await succeeded.restore(); await succeeded.reauthorize(rootID: historical.id)
+        XCTAssertEqual(succeeded.state, .available(active, refreshedBookmark: false))
+        XCTAssertNil(succeeded.historicalReauthorizationErrors[historical.id])
+        let afterSuccess = await app.currentSnapshot()
+        XCTAssertEqual(afterSuccess.phase, .recording)
+
+        let stopped = await app.stop()
+        guard case let .secured(saved) = stopped else { return XCTFail("Stop must remain usable: \(stopped)") }
+        let finalized = await finalization.waitForResult(at: saved.location)
+        XCTAssertNil(finalized?.failure)
+        try await store.close()
+    }
 }
 
 private struct IntegrationPermissionCounts: Sendable, Equatable {
@@ -329,6 +553,13 @@ private final class NoopIntegrationSignalScheduler: InputSignalScheduling, @unch
     func stop() {}
 }
 
+@MainActor
+private final class IntegrationDirectorySelector: DirectorySelecting {
+    private let selectedURL: URL?
+    init(selectedURL: URL?) { self.selectedURL = selectedURL }
+    func chooseDirectory() -> URL? { selectedURL }
+}
+
 private final class RecordingFileIntegrationFixture: @unchecked Sendable {
     let base: URL
     let root: URL
@@ -395,6 +626,66 @@ private func decodeIntegrationEvents(at url: URL) throws -> [SessionEventRecord]
     return try data.split(separator: 0x0A).map { line in
         try JSONDecoder().decode(SessionEventRecord.self, from: Data(line))
     }
+}
+
+private func appendSyntheticRecoveryPCM(to recorder: AVFoundationAudioRecorder, generation: UInt64, seconds: Int) async throws {
+    let totalFrames = seconds * 48_000
+    var offset = 0
+    var sequence: UInt64 = 0
+    while offset < totalFrames {
+        let frames = min(2_048, totalFrames - offset)
+        var samples = [Float]()
+        samples.reserveCapacity(frames)
+        for frame in 0..<frames {
+            let frequency = offset + frame < totalFrames / 2 ? 440.0 : 1_320.0
+            let phase = Double(offset + frame) * 2 * Double.pi * frequency / 48_000
+            samples.append(Float(sin(phase) * 0.2))
+        }
+        try await recorder.append(PCMChunk(generation: generation, sequence: sequence,
+            format: try PCMFormatDescription(sampleRate: 48_000, channelCount: 1), frameCount: frames,
+            sourceSampleTime: Int64(offset), samples: samples))
+        offset += frames
+        sequence += 1
+    }
+}
+
+private func readableActiveSnapshot(at url: URL, recorder: AVFoundationAudioRecorder) async throws -> Data {
+    // AVFoundation's writer flush is asynchronous.  This bounded polling is
+    // intentionally media readiness polling (not a race-test sleep); the
+    // assertion below proves the copy was made while the writer was recording.
+    for _ in 0..<100 {
+        if FileManager.default.fileExists(atPath: url.path) {
+            let bytes = try Data(contentsOf: url)
+            if topLevelBoxCount(bytes, named: "moof") >= 2,
+               let report = try? await AVFoundationFinalizationMedia().inspect(url, requiresM4A: false, control: .init()),
+               report.durationSeconds > 10 {
+                return bytes
+            }
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+    }
+    XCTFail("active fragmented MOV never reached a readable multi-moof prefix")
+    throw AudioRecorderError(.flushFailed)
+}
+
+private func topLevelBoxCount(_ data: Data, named name: String) -> Int {
+    guard name.utf8.count == 4 else { return 0 }
+    let target = Array(name.utf8)
+    var cursor = 0
+    var count = 0
+    while cursor + 8 <= data.count {
+        let size = data[cursor..<(cursor + 4)].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        if Array(data[(cursor + 4)..<(cursor + 8)]) == target { count += 1 }
+        let length: UInt64
+        if size == 1, cursor + 16 <= data.count {
+            length = data[(cursor + 8)..<(cursor + 16)].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        } else if size == 0 {
+            break
+        } else { length = size }
+        guard length >= 8, length <= UInt64(data.count - cursor) else { break }
+        cursor += Int(length)
+    }
+    return count
 }
 
 private actor AppFinalizationGate {

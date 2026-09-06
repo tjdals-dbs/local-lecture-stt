@@ -245,6 +245,40 @@ actor StorageRootManager: StorageRootControlling, RecordingStorageRootChecking {
         }
     }
 
+    /// Holds a security scope across asynchronous inspection without requiring
+    /// directory write permission.  The returned token is intentionally the
+    /// same scope-lifetime primitive as a writer lease; callers must still
+    /// perform no mutating filesystem operation while using this API.
+    func acquireReadLease(to rootID: StorageRootID) async throws -> StorageRootWriteLease {
+        var registry = try loadRegistry()
+        guard let index = registry.roots.firstIndex(where: { $0.id == rootID }) else {
+            throw StorageError(.reauthorizationRequired)
+        }
+        let resolved: ResolvedBookmark
+        do { resolved = try await bookmarkCodec.resolve(registry.roots[index].bookmark) }
+        catch { throw StorageError(.reauthorizationRequired) }
+        if resolved.isStale {
+            do {
+                registry.roots[index].bookmark = try await bookmarkCodec.makeBookmark(for: resolved.url)
+                registry.roots[index].displayName = displayName(for: resolved.url)
+                registry.roots[index].displayPath = normalizedPath(for: resolved.url)
+                registry.roots[index].updatedAt = now()
+                try saveRegistry(registry)
+            } catch let error as StorageError { throw error }
+            catch { throw StorageError(.bookmarkRefreshFailed) }
+        }
+        guard await bookmarkCodec.startAccessing(resolved.url) else { throw StorageError(.reauthorizationRequired) }
+        do {
+            guard FileManager.default.fileExists(atPath: resolved.url.path) else { throw StorageError(.rootMissing) }
+            let values = try resolved.url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else { throw StorageError(.rootNotDirectory) }
+            return StorageRootWriteLease(rootURL: resolved.url, bookmarkCodec: bookmarkCodec)
+        } catch {
+            await bookmarkCodec.stopAccessing(resolved.url)
+            throw error
+        }
+    }
+
     private func performWithAccess<Value: Sendable>(to rootID: StorageRootID? = nil, requireWritable: Bool = true, operation: @Sendable (URL) throws -> Value) async throws -> (value: Value, refreshedBookmark: Bool) {
         var registry = try loadRegistry()
         let resolvedID: StorageRootID

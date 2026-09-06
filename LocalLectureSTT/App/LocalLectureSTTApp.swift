@@ -18,14 +18,23 @@ struct LocalLectureSTTApp: App {
         } catch {
             catalog = UnavailableSessionCatalog(error: .openFailed)
         }
-        let coordinator = CatalogStartupCoordinator(catalog: catalog)
+        let repository = FileSessionRepository(roots: roots)
+        let activity = SessionActivityRegistry()
         let permission = AVFoundationMicrophonePermissionAuthorizer()
         let capture = MicrophoneCaptureController(
             permission: permission,
             driver: AVAudioEngineMicrophoneDriver(),
             monitor: InputSignalMonitor()
         )
-        let repository = FileSessionRepository(roots: roots)
+        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: roots, catalog: catalog))
+        let recovery = SessionRecoveryCoordinator(
+            scanner: SessionFileScanner(roots: roots),
+            persistence: repository,
+            finalization: finalization,
+            catalog: catalog,
+            activity: activity
+        )
+        let coordinator = CatalogStartupCoordinator(catalog: catalog, recovery: recovery)
         let recordingCoordinator = RecordingSessionCoordinator(
             roots: roots,
             permission: permission,
@@ -36,10 +45,11 @@ struct LocalLectureSTTApp: App {
             environment: RecordingSessionEnvironment(
                 appVersion: Self.appVersion,
                 osVersion: ProcessInfo.processInfo.operatingSystemVersionString
-            )
+            ),
+            activity: activity
         )
-        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: roots, catalog: catalog))
-        let lifetime = RecordingFinalizationCoordinator(recording: recordingCoordinator, finalization: finalization)
+        let lifetime = RecordingFinalizationCoordinator(recording: recordingCoordinator, finalization: finalization,
+                                                        startupRecovery: recovery, activity: activity)
         _catalogStartup = StateObject(wrappedValue: coordinator)
         _recording = StateObject(wrappedValue: RecordingSessionViewModel(coordinator: lifetime, finalization: finalization))
         _storageRoots = StateObject(wrappedValue: StorageRootViewModel(

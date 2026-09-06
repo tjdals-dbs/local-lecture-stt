@@ -205,6 +205,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     private struct ActiveSession {
         let token: UInt64
         let location: SessionLocation
+        let activityReservation: SessionActivityReservation?
         let title: String
         let languageMode: LanguageMode
         let createdAt: AbsoluteTime
@@ -261,6 +262,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     private let ticker: any RecordingTicking
     private let environment: RecordingSessionEnvironment
     private let identifiers: RecordingSessionIdentifiers
+    private let activity: SessionActivityRegistry?
 
     private var nextToken: UInt64 = 0
     private var active: ActiveSession?
@@ -281,7 +283,8 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         clock: RecordingSessionClock = .live,
         ticker: any RecordingTicking = SystemRecordingTicker(),
         environment: RecordingSessionEnvironment,
-        identifiers: RecordingSessionIdentifiers = .live
+        identifiers: RecordingSessionIdentifiers = .live,
+        activity: SessionActivityRegistry? = nil
     ) {
         self.roots = roots
         self.permission = permission
@@ -293,6 +296,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         self.ticker = ticker
         self.environment = environment
         self.identifiers = identifiers
+        self.activity = activity
     }
 
     func snapshots() -> AsyncStream<RecordingSessionSnapshot> {
@@ -389,6 +393,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         _ configuration: RecordingStartConfiguration,
         token: UInt64
     ) async -> Result<RecordingSessionSnapshot, RecordingSessionFailure> {
+        var reservation: SessionActivityReservation?
         do {
             let availableRoot: StorageRootSummary
             switch await roots.availability() {
@@ -398,6 +403,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
             case let .failed(code): throw RecordingSessionFailure.storageRoot(code)
             }
             try ensureStartMayContinue(token)
+            reservation = await activity?.reserveRecordingCreation(rootID: availableRoot.id)
 
             var permissionStatus = await permission.authorizationStatus()
             try ensureStartMayContinue(token)
@@ -423,6 +429,9 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
                 )
             } catch {
                 throw Self.persistenceFailure(error)
+            }
+            if let reservation, await activity?.promoteRecording(reservation, at: location) != true {
+                throw RecordingSessionFailure.cancelled
             }
             let targetAudio = try Self.audioDescription(for: .recoveryAAC)
             let preparing = try makeMetadata(
@@ -458,12 +467,15 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
             active = ActiveSession(
                 token: token,
                 location: location,
+                activityReservation: reservation,
                 title: title,
                 languageMode: configuration.languageMode,
                 createdAt: createdAt,
                 recorder: recorders.makeRecorder(),
                 metadata: preparing
             )
+            // From this point settlement owns release (or T08 hand-off).
+            reservation = nil
             snapshot = RecordingSessionSnapshot(
                 phase: .preparing,
                 permissionStatus: permissionStatus,
@@ -572,10 +584,12 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
             publishSnapshot()
             return .success(snapshot)
         } catch let failure as RecordingSessionFailure {
+            if let reservation { await activity?.release(reservation) }
             let returnedFailure = resolvedStartFailure(failure, token: token)
             await failStart(token: token, failure: returnedFailure)
             return .failure(returnedFailure)
         } catch {
+            if let reservation { await activity?.release(reservation) }
             let failure = RecordingSessionFailure.unknown
             let returnedFailure = resolvedStartFailure(failure, token: token)
             await failStart(token: token, failure: returnedFailure)
@@ -738,7 +752,15 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         } else {
             result = await finishAbnormally(token: token, summary: summary)
         }
+        if case .secured = result, let reservation = active?.activityReservation {
+            _ = await activity?.promoteToFinalization(reservation)
+        }
         await stopOwnedTasks(token: token)
+        if case .secured = result {
+            // RecordingFinalizationCoordinator now owns release after T08.
+        } else if let reservation = active?.activityReservation {
+            await activity?.release(reservation)
+        }
         if active?.token == token { active = nil }
         lastResult = result
         if settlementOperation?.token == token { settlementOperation = nil }

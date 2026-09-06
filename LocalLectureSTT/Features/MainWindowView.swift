@@ -38,6 +38,12 @@ struct MainWindowView: View {
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
                     Divider()
+                    if let recovery = catalogStartup.recoverySnapshot {
+                        RecoveryStatusView(snapshot: recovery, retry: { catalogStartup.retryRecovery() },
+                                           historicalReauthorizationErrors: storageRoots.historicalReauthorizationErrors,
+                                           reauthorize: { rootID in await storageRoots.reauthorize(rootID: rootID) })
+                        Divider()
+                    }
                     RecordingSessionView(viewModel: recording)
                 }
             case .reauthorizationRequired:
@@ -65,5 +71,58 @@ struct MainWindowView: View {
             await recording.refreshPermissionStatus()
             catalogStartup.start()
         }
+    }
+}
+
+private struct RecoveryStatusView: View {
+    let snapshot: SessionRecoverySnapshot
+    let retry: () -> Void
+    let historicalReauthorizationErrors: [StorageRootID: StorageErrorCode]
+    let reauthorize: @Sendable (StorageRootID) async -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            switch snapshot.phase {
+            case .idle: EmptyView()
+            case .discovering: Label("이전 세션을 확인하는 중…", systemImage: "magnifyingglass")
+            case .recovering: Label("이전 녹음의 오디오를 복구하는 중…", systemImage: "waveform")
+            case .cancelled: Label("세션 복구가 취소되었습니다", systemImage: "xmark.circle")
+            case .ready: EmptyView()
+            }
+            if let report = snapshot.report {
+                let presentation = RecoveryStatusPresentation.make(
+                    report: report, historicalReauthorizationErrors: historicalReauthorizationErrors
+                )
+                Label(presentation.title, systemImage: presentation.items.isEmpty && presentation.rootNotices.isEmpty ? "checkmark.circle" : "exclamationmark.triangle")
+                Text(presentation.detail).font(.caption).foregroundStyle(.secondary)
+                ForEach(presentation.items) { item in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(item.issue.folderName ?? item.issue.rootID.rawValue.uuidString): \(item.title)")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if let firstError = item.firstError { Text("최초 오류: \(firstError)").font(.caption2) }
+                        if !item.warnings.isEmpty { Text("후속 경고: \(item.warnings.joined(separator: ", "))").font(.caption2) }
+                        if let action = item.action {
+                            switch action {
+                            case .retry: Button("복구 다시 시도", action: retry)
+                            case let .reauthorize(rootID): Button("이 폴더 재승인") { Task { await reauthorize(rootID) } }
+                            }
+                        }
+                    }
+                }
+                ForEach(presentation.rootNotices) { notice in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(notice.rootID.rawValue.uuidString): 저장 폴더 재승인 실패")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text("저장 폴더 오류: \(notice.error.rawValue)").font(.caption2)
+                        Button("이 폴더 재승인") { Task { await reauthorize(notice.rootID) } }
+                    }
+                }
+                if let catalogWarning = presentation.catalogWarning { Text("카탈로그 경고: \(catalogWarning.rawValue)").font(.caption) }
+                if let discoveryWarning = presentation.discoveryWarning { Text("검색 경고: \(discoveryWarning)").font(.caption) }
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .accessibilityIdentifier("startup-recovery-status")
     }
 }
