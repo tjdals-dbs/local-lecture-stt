@@ -7,6 +7,7 @@ enum SessionEventKind: String, Codable, Sendable, CaseIterable {
     case recordingResumed
     case systemSleep
     case systemWake
+    case applicationTermination
     case microphoneDisconnected
     case noInputWarning
     case sttError

@@ -130,6 +130,16 @@ final class RecordingSessionViewModel: ObservableObject {
         }
     }
 
+    var lifecycleMessage: String? {
+        if snapshot.phase == .securing { return "필수 저장 중…" }
+        if snapshot.persistenceWarningCode != nil { return "필수 저장에 실패했습니다. 복구 자료를 보존했으며 확인이 필요합니다." }
+        if snapshot.failure == .interrupted(.systemSleep) { return "시스템 잠자기로 녹음이 중단되었습니다. 녹음은 자동 재개되지 않습니다." }
+        if snapshot.phase == .interrupted, let failure = snapshot.failure,
+           case .interrupted = failure { return "복구 가능한 오디오를 저장하고 녹음을 중단했습니다." }
+        if snapshot.phase == .interrupted || snapshot.phase == .error { return "저장 상태를 확인하세요. 기존 자료는 보존됩니다." }
+        return nil
+    }
+
     var elapsedText: String { Self.formatElapsed(snapshot.elapsedMilliseconds) }
 
     var displayState: RecordingSessionViewDisplayState {
@@ -176,5 +186,7 @@ private actor PreviewRecordingSessionCoordinator: RecordingSessionCoordinating {
     func refreshPermissionStatus() async {}
     func start(_ configuration: RecordingStartConfiguration) async throws -> RecordingSessionSnapshot { snapshot }
     func stop() async -> RecordingSessionResult { .error(.busy) }
+    func interrupt(_ reason: RecordingInterruptionReason) async -> RecordingSessionResult { .error(.busy) }
+    func recordSystemWakeIfApplicable() async {}
     func reset() async { snapshot = .idle(permissionStatus: snapshot.permissionStatus) }
 }

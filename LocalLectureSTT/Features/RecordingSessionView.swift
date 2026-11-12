@@ -37,6 +37,9 @@ struct RecordingSessionView: View {
                     detail: "생성된 세션 자료가 있다면 그대로 보존했습니다."
                 )
             }
+            if let message = viewModel.lifecycleMessage {
+                Text(message).accessibilityIdentifier("lifecycle-save-state")
+            }
             if let value = viewModel.finalizations.last {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("세션 \(value.location.folderName.rawValue)").font(.caption)

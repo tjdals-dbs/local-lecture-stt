@@ -194,3 +194,68 @@ Use a disposable storage root. Create or retain a session with `recording` or `p
 For deterministic T09 regressions, run C01 coalesced startup/root refresh, C02 live T07/T08 protection, C03 blocked historical recovery alongside a new T07 recording, C04 owned cancellation through its cleanup gate, B06 first-failure plus diagnostic/catalog/cleanup warnings, plus the R1 terminal-media/cache-separation, R2 late-success cancellation, and R3 same-root reauthorization presentation tests with `-test-iterations 20`. They do not replace the disposable-root relaunch check above or signed TCC/process-kill testing.
 
 This manual procedure does not validate physical microphone/TCC, actual process kill/power loss, sleep/wake, window close, or app quit behavior. Those are pending T10/T26 validation.
+
+## T10 lifecycle verification
+
+Use generated PCM, disposable session roots, fresh result bundles and an injected AppKit presenter/reply/termination gateway. No automated test should terminate XCTest or open a real confirmation modal. `T10_ACCEPTANCE.md` records the current requirement/assertion mapping and actual result paths. Hardware tests below are separate.
+
+The unchanged-candidate reproduction used the four exact `testReview...` identifiers in `prompts/T10_ASTRA_REVIEW_REPAIR.md`, after `git apply --check` and `git apply prompts/fixtures/T10_REVIEW_REGRESSIONS.patch`. They executed and failed 4/4 at `/private/tmp/stt-t10-astra-repro-native.GSLb2Q/Regressions.xcresult`. The R4 test was subsequently adapted to join wake asynchronously and acknowledge the real normal-Stop barrier before releasing its metadata gate.
+
+Focused command used during repair (with new result names `focused-1` through `focused-6`, and additional individual F/I selectors as recorded in each log):
+
+```sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/stt-t10-astra-final.N4Sysd/DerivedData \
+  -resultBundlePath /private/tmp/stt-t10-focused-6.xcresult \
+  -only-testing:LocalLectureSTTTests/AppLifecycleTests \
+  -only-testing:LocalLectureSTTTests/RecordingSessionCoordinatorTests \
+  -only-testing:LocalLectureSTTTests/AudioFinalizationTests/testLifecycleQuitWaitsForProductionCleanupThenRepliesOnceWithoutExport \
+  -only-testing:LocalLectureSTTTests/AudioFinalizationTests/testPowerOffQuiesceRetainsCheckpointAndFreshRecoveryResumesSameFiles \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
+  CODE_SIGNING_ALLOWED=NO test
+```
+
+That focused command executed 61 passes, zero failures/skips. It is development evidence, not a substitute for the final full run after all edits. The follow-up two-test reproduction on `0fd6552` failed both tests with four expected assertions (`/private/tmp/stt-t10-followup.wT9Nm8/Repro.xcresult`). It used the usual project/scheme/Debug/arm64/unsigned flags with `-only-testing:LocalLectureSTTTests/RecordingSessionCoordinatorTests/testAuditSleepCancelsStartWaitingForInitialDiscovery` and `-only-testing:LocalLectureSTTTests/AppLifecycleTests/testAuditDuplicateEmptyWindowObservationCannotLoseAutomaticExit`, before production changes. Follow-up focused checks used both entire `AppLifecycleTests` and `RecordingSessionCoordinatorTests` classes and passed 67 tests (`FocusedFinal.xcresult` in that directory). The final full run includes the subsequent admission-generation hardening.
+
+The final commands actually run were:
+
+```sh
+# The directory was originally allocated with mktemp -d /private/tmp/stt-t10-followup.XXXXXX.
+# For a new run, use a new directory/result name rather than overwriting a bundle.
+t10_run=/private/tmp/stt-t10-followup.wT9Nm8
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath "$t10_run/DerivedData" -resultBundlePath "$t10_run/Full.xcresult" \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
+  CODE_SIGNING_ALLOWED=NO build test > "$t10_run/full.log" 2>&1
+
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath "$t10_run/DerivedData" -resultBundlePath "$t10_run/Repeated.xcresult" \
+  -test-iterations 20 -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
+  -only-testing:LocalLectureSTTTests/AppLifecycleTests/testProductionActivityLeasesOverlapAndRejectCapturedOldIdleGeneration \
+  -only-testing:LocalLectureSTTTests/RecordingSessionCoordinatorTests/testSystemSleepUsesInterruptedSettlementAndRetainsRecoveryPath \
+  -only-testing:LocalLectureSTTTests/RecordingSessionCoordinatorTests/testAuditSleepCancelsStartWaitingForInitialDiscovery \
+  -only-testing:LocalLectureSTTTests/AppLifecycleTests/testLastWindowWaitsForFiniteFinalizationThenRequestsAutomaticTerminationOnce \
+  -only-testing:LocalLectureSTTTests/AppLifecycleTests/testAuditDuplicateEmptyWindowObservationCannotLoseAutomaticExit \
+  -only-testing:LocalLectureSTTTests/RecordingSessionCoordinatorTests/testRepeatedAdapterQuitPerformsOneProductionSaveAndTrueReply \
+  -only-testing:LocalLectureSTTTests/AudioFinalizationTests/testLifecycleQuitWaitsForProductionCleanupThenRepliesOnceWithoutExport \
+  -only-testing:LocalLectureSTTTests/RecordingSessionCoordinatorTests/testProductionEssentialFailurePreservesFirstErrorAndLaterWarnings \
+  CODE_SIGNING_ALLOWED=NO test > "$t10_run/repeated.log" 2>&1
+
+xcrun xcresulttool get test-results summary --path "$t10_run/Full.xcresult" --compact
+xcrun xcresulttool get test-results summary --path "$t10_run/Repeated.xcresult" --compact
+xcrun xcresulttool get test-results tests --path "$t10_run/Repeated.xcresult" --compact
+```
+
+Full evidence is **264 passed (254 unit + 10 integration), zero failed/skipped**. Repeated evidence must have eight unique Test Case nodes, 20 Passed Repetition nodes per case and 160 passed device/configuration executions. The summary's top-level `passedTests` is eight for repetitions; that alone is not 160 executions. Confirm it against repetition nodes and individual log pass lines. Sandbox `testmanagerd` or xcresult cache permission failures require rerunning in the permitted normal Xcode environment; they are not a feature pass. Timeouts are watchdogs; continuation/expectation handshakes establish tested ordering.
+
+Manual checks remain pending. Use a locally signed app and a new empty disposable root:
+
+1. Confirm active recording/finalization prevents idle system sleep while display sleep remains possible.
+2. Close Main during recording, leave Settings open, then close Settings; confirm capture/file progress continues. Reopen through Dock and check no unexpected automatic exit.
+3. Close all user windows during finalization. Confirm exit once after successful completion; provoke a safe recoverable failure in a disposable root and confirm attention prevents auto-exit.
+4. During recording use Cmd-Q → 계속 사용; confirm continued capture and unchanged metadata/events. Use Cmd-Q → 필수 저장 후 종료; relaunch and inspect retained recovery, interrupted outcome and T09 resume.
+5. Close the lid during recording: interrupted outcome, readable MOV, no capture restart after wake. Repeat during securing/finalization and check checkpoint resume after cleanup.
+6. Exercise real logout/power-off/process kill and power loss only under a separately safe hardware procedure. Keep recoverable artifacts for inspection. Do not infer physical TCC/microphone, signed sandbox/bookmark behavior or power-loss durability from unsigned synthetic tests.

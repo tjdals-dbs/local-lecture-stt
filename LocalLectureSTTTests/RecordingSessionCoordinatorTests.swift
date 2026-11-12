@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import XCTest
+import AppKit
 @testable import LocalLectureSTT
 
 final class RecordingSessionCoordinatorTests: XCTestCase {
@@ -251,6 +252,72 @@ final class RecordingSessionCoordinatorTests: XCTestCase {
         _ = try await coordinator.start(.init(title: "Next", timeZone: .init(secondsFromGMT: 0)!))
         XCTAssertEqual(fixture.recorders.makeCount(), 2)
         _ = await coordinator.stop()
+    }
+
+    func testSystemSleepUsesInterruptedSettlementAndRetainsRecoveryPath() async throws {
+        let gate = ControlledTestGate(), trace = TestTrace()
+        let stopped = expectation(description: "PCM intake stopped")
+        let fixture = CoordinatorFixture(prebufferedFrameCounts: [8, 8], recorderAppendGate: (0, gate),
+            recorderDurationMilliseconds: 1_200, trace: trace, onCaptureStop: { stopped.fulfill() })
+        let coordinator = fixture.makeCoordinator()
+        _ = try await coordinator.start(.init(title: "sleep", timeZone: .gmt))
+        await gate.waitForArrival()
+        let recovery = LifecycleRecoveryStub()
+        let lifecycle = AppLifecycleCoordinator(recording: coordinator, finalization: LifecycleFinalizationStub(), recovery: recovery,
+            activity: LifecycleActivitySpy(), termination: LifecycleTerminationSpy())
+        await lifecycle.handlePowerEvent(.willSleep)
+        await lifecycle.handlePowerEvent(.willSleep)
+        await fulfillment(of: [stopped], timeout: 3)
+        let recorder = try XCTUnwrap(fixture.recorders.recorders().first)
+        let held = await recorder.counts()
+        XCTAssertEqual(held.flush, 0); XCTAssertEqual(held.stop, 0)
+        await gate.release()
+        await lifecycle.handlePowerEvent(.didWake)
+        await lifecycle.handlePowerEvent(.didWake)
+        let metadata = await fixture.repository.metadataDocuments(), events = await fixture.repository.events()
+        let chunks = await recorder.appendedChunks(), counts = await recorder.counts()
+        XCTAssertEqual(chunks.map(\.frameCount), [8, 8]); XCTAssertEqual(counts.flush, 1); XCTAssertEqual(counts.stop, 1)
+        XCTAssertEqual(metadata.last?.status, .interrupted); XCTAssertEqual(metadata.last?.captureOutcome, .interrupted)
+        XCTAssertEqual(events.filter { $0.kind == .systemSleep }.count, 1)
+        XCTAssertEqual(events.filter { $0.kind == .recordingEnded }.count, 1)
+        XCTAssertEqual(events.filter { $0.kind == .systemWake }.count, 1)
+        let captures = await fixture.capture.counts(), refreshes = await recovery.refreshCount()
+        XCTAssertEqual(captures.start, 1); XCTAssertEqual(captures.stop, 1); XCTAssertEqual(refreshes, 1)
+        let operations = await trace.values()
+        assertOrdered(["capture.stop", "recorder.append.0.end", "recorder.append.1.end", "recorder.flush", "recorder.stop",
+                       "event.systemSleep", "event.recordingEnded", "metadata.interrupted"], in: operations)
+    }
+
+    func testSleepDuringPreparationBeforeDurableStartPreservesFirstReasonAndSettlesNotStarted() async throws {
+        let writerStartGate = ControlledTestGate()
+        let stopped = expectation(description: "sleep closed intake during preparation")
+        let fixture = CoordinatorFixture(
+            prebufferedFrameCounts: [4],
+            recorderStartGate: writerStartGate, onCaptureStop: { stopped.fulfill() }
+        )
+        let coordinator = fixture.makeCoordinator()
+        let startTask = Task {
+            await startFailure(coordinator, configuration: .init(title: "sleep preparing", timeZone: TimeZone(secondsFromGMT: 0)!))
+        }
+
+        await writerStartGate.waitForArrival()
+        let sleepTask = Task { await coordinator.interrupt(.systemSleep) }
+        await fulfillment(of: [stopped], timeout: 3)
+        await writerStartGate.release()
+
+        let startOutcome = await startTask.value
+        let interruption = await sleepTask.value
+        let metadata = await fixture.repository.metadataDocuments()
+        let events = await fixture.repository.events(kind: .systemSleep)
+        let recorder = try XCTUnwrap(fixture.recorders.recorders().first)
+        let terminal = await recorder.counts()
+        XCTAssertEqual(startOutcome, .interrupted(.systemSleep))
+        XCTAssertEqual(interruption, .error(.interrupted(.systemSleep)))
+        XCTAssertEqual(metadata.last?.status, .error)
+        XCTAssertEqual(metadata.last?.captureOutcome, .notStarted)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(terminal.flush, 1)
+        XCTAssertEqual(terminal.stop, 1)
     }
 
     func testStopDuringWriterStartCancelsAttemptAndCleansStartedResourcesExactlyOnce() async throws {
@@ -1051,6 +1118,68 @@ final class RecordingSessionCoordinatorTests: XCTestCase {
     }
 }
 
+extension RecordingSessionCoordinatorTests {
+    func testReviewQuitMustDenyFailedTerminalMetadataPersistence() async throws {
+        let fixture = CoordinatorFixture(prebufferedFrameCounts: [8], repositoryFault: .metadataWrite(3))
+        let recording = fixture.makeCoordinator()
+        _ = try await recording.start(.init(title: "diagnostic", timeZone: .gmt))
+        let lifecycle = AppLifecycleCoordinator(recording: recording, finalization: ReviewNoopFinalization(),
+            recovery: ReviewCountingRecovery(), activity: ReviewNoopActivity(), termination: ReviewNoopTermination())
+        let allowed = await lifecycle.resolveTermination(.essentialSaveAndQuit)
+        let snapshot = await recording.currentSnapshot()
+        let metadata = await fixture.repository.metadataDocuments()
+        XCTAssertNotNil(snapshot.persistenceWarningCode)
+        XCTAssertEqual(metadata.last?.status, .recording, "terminal metadata write was rejected")
+        XCTAssertFalse(allowed, "Failed required terminal metadata must deny termination")
+    }
+
+    func testReviewWakeMustWaitForNormalStopEssentialSettlement() async throws {
+        let gate = ControlledTestGate()
+        let fixture = CoordinatorFixture(prebufferedFrameCounts: [8], repositoryGate: .metadataWrite(3, gate))
+        let joined = expectation(description: "actual normal Stop join")
+        let recording = fixture.makeCoordinator(onSettlementJoin: { joined.fulfill() })
+        _ = try await recording.start(.init(title: "diagnostic", timeZone: .gmt))
+        let stop = Task { await recording.stop() }
+        await gate.waitForArrival()
+        let recovery = ReviewCountingRecovery()
+        let lifecycle = AppLifecycleCoordinator(recording: recording, finalization: ReviewNoopFinalization(),
+            recovery: recovery, activity: ReviewNoopActivity(), termination: ReviewNoopTermination())
+        await lifecycle.handlePowerEvent(.willSleep)
+        let wake = Task { await lifecycle.handlePowerEvent(.didWake) }
+        await fulfillment(of: [joined], timeout: 3)
+        let refreshesBeforeSave = await recovery.refreshCount()
+        let snapshot = await recording.currentSnapshot()
+        await gate.release()
+        let stopped = await stop.value
+        await wake.value
+        let refreshed = await recovery.refreshCount()
+        XCTAssertEqual(refreshed, 1)
+        guard case .secured = stopped else { return XCTFail("normal Stop outcome must survive sleep") }
+        XCTAssertEqual(snapshot.phase, .securing)
+        XCTAssertEqual(refreshesBeforeSave, 0, "Wake recovery must not run while normal Stop still owns essential save")
+    }
+}
+
+private actor ReviewNoopFinalization: LifecycleFinalizationCoordinating {
+    func snapshots() -> AsyncStream<[AudioFinalizationSnapshot]> { AsyncStream { $0.finish() } }
+    func allSnapshots() -> [AudioFinalizationSnapshot] { [] }
+    func quiesceOwnedWork() {}
+}
+private actor ReviewCountingRecovery: LifecycleRecoveryCoordinating {
+    var refreshes = 0
+    func snapshots() -> AsyncStream<SessionRecoverySnapshot> { AsyncStream { $0.finish() } }
+    func currentSnapshot() -> SessionRecoverySnapshot { .init(generation: 0, phase: .idle, report: nil) }
+    func refresh() { refreshes += 1 }
+    func cancelOwnedRecovery() {}
+    func refreshCount() -> Int { refreshes }
+}
+private actor ReviewNoopActivity: LifecycleActivityControlling {
+    func setRelevantWorkActive(_ active: Bool) {}
+}
+private actor ReviewNoopTermination: LifecycleTerminationRequesting {
+    func requestAutomaticTermination(isStillValid: @escaping @Sendable () async -> Bool) -> Bool { false }
+}
+
 private final class CoordinatorFixture: @unchecked Sendable {
     let rootID = StorageRootID(UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!)
     let roots: TestRootChecker
@@ -1072,6 +1201,7 @@ private final class CoordinatorFixture: @unchecked Sendable {
         recorderStartFailure: AudioRecorderErrorCode? = nil,
         recorderAppendFailureSequence: UInt64? = nil,
         recorderStopFailure: AudioRecorderErrorCode? = nil,
+        recorderFlushFailure: AudioRecorderErrorCode? = nil,
         recorderStartGate: ControlledTestGate? = nil,
         recorderAppendGate: (sequence: UInt64, gate: ControlledTestGate)? = nil,
         recorderDurationMilliseconds: UInt64 = 1_000,
@@ -1080,7 +1210,8 @@ private final class CoordinatorFixture: @unchecked Sendable {
         repositoryGate: TestRepositoryGate? = nil,
         trace: TestTrace = TestTrace(),
         clock: RecordingSessionClock? = nil,
-        ticker: (any RecordingTicking)? = nil
+        ticker: (any RecordingTicking)? = nil,
+        onCaptureStop: @escaping @Sendable () -> Void = {}
     ) {
         let summary = StorageRootSummary(
             id: rootID,
@@ -1093,7 +1224,7 @@ private final class CoordinatorFixture: @unchecked Sendable {
         capture = TestCapture(
             prebufferedFrameCounts: prebufferedFrameCounts,
             startFailure: captureStartFailure,
-            trace: trace
+            trace: trace, onStop: onCaptureStop
         )
         repository = TestSessionRepository(
             rootID: createdLocationRootID ?? rootID,
@@ -1106,7 +1237,7 @@ private final class CoordinatorFixture: @unchecked Sendable {
             TestAudioRecorder(
                 startFailure: recorderStartFailure,
                 appendFailureSequence: recorderAppendFailureSequence,
-                stopFailure: recorderStopFailure,
+                stopFailure: recorderStopFailure, flushFailure: recorderFlushFailure,
                 startGate: recorderStartGate,
                 appendGate: recorderAppendGate,
                 durationMilliseconds: recorderDurationMilliseconds,
@@ -1120,7 +1251,7 @@ private final class CoordinatorFixture: @unchecked Sendable {
         self.ticker = ticker ?? SilentRecordingTicker()
     }
 
-    func makeCoordinator() -> RecordingSessionCoordinator {
+    func makeCoordinator(authority: LifecycleWorkAuthority? = nil, onSettlementJoin: @escaping @Sendable () -> Void = {}) -> RecordingSessionCoordinator {
         RecordingSessionCoordinator(
             roots: roots,
             permission: permission,
@@ -1134,7 +1265,7 @@ private final class CoordinatorFixture: @unchecked Sendable {
             identifiers: RecordingSessionIdentifiers(
                 sessionID: { SessionID(UUID()) },
                 eventID: { SessionEventID(UUID()) }
-            )
+            ), authority: authority, onSettlementJoin: onSettlementJoin
         )
     }
 }
@@ -1175,6 +1306,7 @@ private actor TestPermission: MicrophonePermissionAuthorizing {
 }
 
 private actor TestCapture: MicrophoneCapturing {
+    private let onStop: @Sendable () -> Void
     private let prebufferedFrameCounts: [Int]
     private let startFailure: CaptureErrorCode?
     private let trace: TestTrace
@@ -1188,7 +1320,8 @@ private actor TestCapture: MicrophoneCapturing {
     private var levelContinuation: AsyncStream<InputSignalSample>.Continuation?
     private var observerTerminations = CaptureObserverTerminationCounts()
 
-    init(prebufferedFrameCounts: [Int], startFailure: CaptureErrorCode?, trace: TestTrace) {
+    init(prebufferedFrameCounts: [Int], startFailure: CaptureErrorCode?, trace: TestTrace, onStop: @escaping @Sendable () -> Void = {}) {
+        self.onStop = onStop
         self.prebufferedFrameCounts = prebufferedFrameCounts
         self.startFailure = startFailure
         self.trace = trace
@@ -1240,6 +1373,7 @@ private actor TestCapture: MicrophoneCapturing {
         speechContinuation?.finish()
         eventContinuation?.finish()
         levelContinuation?.finish()
+        onStop()
     }
 
     func emit(frameCount: Int) throws { try emitChunk(frameCount: frameCount) }
@@ -1306,6 +1440,7 @@ private actor TestAudioRecorder: AudioRecorder {
     private let startFailure: AudioRecorderErrorCode?
     private let appendFailureSequence: UInt64?
     private let stopFailure: AudioRecorderErrorCode?
+    private let flushFailure: AudioRecorderErrorCode?
     private let startGate: ControlledTestGate?
     private let appendGate: (sequence: UInt64, gate: ControlledTestGate)?
     private let durationMilliseconds: UInt64
@@ -1322,6 +1457,7 @@ private actor TestAudioRecorder: AudioRecorder {
         startFailure: AudioRecorderErrorCode?,
         appendFailureSequence: UInt64?,
         stopFailure: AudioRecorderErrorCode?,
+        flushFailure: AudioRecorderErrorCode? = nil,
         startGate: ControlledTestGate?,
         appendGate: (sequence: UInt64, gate: ControlledTestGate)?,
         durationMilliseconds: UInt64,
@@ -1330,6 +1466,7 @@ private actor TestAudioRecorder: AudioRecorder {
         self.startFailure = startFailure
         self.appendFailureSequence = appendFailureSequence
         self.stopFailure = stopFailure
+        self.flushFailure = flushFailure
         self.startGate = startGate
         self.appendGate = appendGate
         self.durationMilliseconds = durationMilliseconds
@@ -1374,6 +1511,7 @@ private actor TestAudioRecorder: AudioRecorder {
     func flush() async throws {
         value.flush += 1
         await trace.append("recorder.flush")
+        if let flushFailure { throw AudioRecorderError(flushFailure) }
         if case let .failed(code) = state { throw AudioRecorderError(code) }
     }
 
@@ -1623,6 +1761,8 @@ private final class ViewModelRecordingCoordinator: RecordingSessionCoordinating,
         return snapshot
     }
     func stop() async -> RecordingSessionResult { value.stop += 1; return .error(.busy) }
+    func interrupt(_ reason: RecordingInterruptionReason) async -> RecordingSessionResult { .interrupted(.interrupted(reason)) }
+    func recordSystemWakeIfApplicable() async {}
     func reset() async { value.reset += 1 }
     func counts() -> DependencyCounts { value }
     func lastConfiguration() -> RecordingStartConfiguration? { configuration }
@@ -1694,4 +1834,471 @@ private func assertOrdered(_ expected: [String], in actual: [String], file: Stat
         }
         lowerBound = actual.index(after: index)
     }
+}
+
+extension RecordingSessionCoordinatorTests {
+    @MainActor
+    func testProductionAdmissionInvalidatesIdleBeforeObservationAndKeepsNewRecording() async throws {
+        let authority = LifecycleWorkAuthority()
+        let startGate = ControlledTestGate()
+        let fixture = CoordinatorFixture(recorderStartGate: startGate)
+        let recording = fixture.makeCoordinator(authority: authority)
+        let finalization = AudioFinalizationCoordinator(worker: AdmissionNoopWorker(), authority: authority)
+        let app = RecordingFinalizationCoordinator(recording: recording, finalization: finalization, authority: authority)
+        let readiness = SynchronousTerminationReadiness()
+        let presenter = LifecycleQuitPresenterSpy()
+        let replies = LifecycleTerminationReplySpy()
+        let reply = expectation(description: "conservative reply")
+        replies.onReply = { _ in reply.fulfill() }
+        let delegate = MacLifecycleDelegate(activity: LifecycleActivitySpy(), automaticTermination: LifecycleTerminationSpy(),
+            presenter: presenter, terminationReply: replies, windowClassifier: LifecycleWindowClassifierSpy(), terminationReadiness: readiness)
+        delegate.configure(recording: app, finalization: finalization, recovery: LifecycleRecoveryStub(), authority: authority)
+        let policy = AppLifecycleCoordinator(recording: app, finalization: finalization, recovery: LifecycleRecoveryStub(),
+            activity: LifecycleActivitySpy(), termination: LifecycleTerminationSpy(), terminationReadiness: readiness, authority: authority)
+        let idle = await policy.terminationDecision()
+        XCTAssertEqual(idle, .terminateNow)
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateNow)
+        let start = Task { try await app.start(.init(title: "new owner", timeZone: .gmt)) }
+        await startGate.waitForArrival()
+        XCTAssertTrue(authority.state().active)
+        XCTAssertEqual(readiness.currentDecision(), .terminateLater)
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        await fulfillment(of: [reply], timeout: 3)
+        XCTAssertEqual(replies.values, [false])
+        XCTAssertEqual(presenter.calls, 1)
+        await startGate.release()
+        let started = try await start.value
+        let current = await app.currentSnapshot()
+        XCTAssertEqual(current.sessionID, started.sessionID)
+        XCTAssertEqual(current.phase, .recording)
+        _ = await app.interrupt(.systemSleep)
+        XCTAssertFalse(authority.state().active)
+    }
+
+    @MainActor
+    func testRepeatedAdapterQuitRejectsNewRecordingAtDelayedReplyGateway() async throws {
+        let authority = LifecycleWorkAuthority()
+        let fixture = CoordinatorFixture(prebufferedFrameCounts: [8])
+        let recording = fixture.makeCoordinator(authority: authority)
+        let old = try await recording.start(.init(title: "old", timeZone: .gmt))
+        let gate = LifecycleGate()
+        let presenter = LifecycleQuitPresenterSpy(); presenter.choice = .essentialSaveAndQuit
+        let replies = LifecycleTerminationReplySpy()
+        let replied = expectation(description: "one denied old quit")
+        replies.onReply = { _ in replied.fulfill() }
+        let finalization = LifecycleFinalizationStub(), recovery = LifecycleRecoveryStub()
+        let delegate = MacLifecycleDelegate(activity: LifecycleActivitySpy(), automaticTermination: LifecycleTerminationSpy(),
+            presenter: presenter, terminationReply: replies, windowClassifier: LifecycleWindowClassifierSpy(),
+            beforeReply: { await gate.enterAndWait() })
+        delegate.configure(recording: recording, finalization: finalization, recovery: recovery, authority: authority)
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        await gate.waitEntered()
+        let evidence = await recording.essentialSaveEvidence()
+        XCTAssertEqual(evidence?.mayTerminate, true)
+        let newer = try await recording.start(.init(title: "new", timeZone: .gmt))
+        XCTAssertNotEqual(old.sessionID, newer.sessionID)
+        XCTAssertEqual(replies.values, [])
+        await gate.release()
+        await fulfillment(of: [replied], timeout: 3)
+        XCTAssertEqual(replies.values, [false])
+        XCTAssertEqual(presenter.calls, 1)
+        let quiesces = await finalization.quiesceCount(), cancellations = await recovery.cancelCount()
+        XCTAssertEqual(quiesces, 1); XCTAssertEqual(cancellations, 1)
+        let current = await recording.currentSnapshot()
+        XCTAssertEqual(current.sessionID, newer.sessionID); XCTAssertEqual(current.phase, .recording)
+        let events = await fixture.repository.events(kind: .recordingEnded)
+        XCTAssertEqual(events.count, 1)
+        _ = await recording.interrupt(.systemSleep)
+    }
+
+    @MainActor
+    func testProductionContinueAndLastWindowClosePreservePCMMetadataAndActivity() async throws {
+        let tokens = ActivityTokenProbe()
+        let adapter = ProcessInfoLifecycleActivityAdapter(begin: { tokens.begin() }, end: { tokens.end($0) })
+        let authority = LifecycleWorkAuthority(activity: { adapter.update($0) })
+        let fixture = CoordinatorFixture(prebufferedFrameCounts: [8])
+        let recording = fixture.makeCoordinator(authority: authority)
+        let started = try await recording.start(.init(title: "ongoing", timeZone: .gmt))
+        let recorder = try XCTUnwrap(fixture.recorders.recorders().first)
+        let presenter = LifecycleQuitPresenterSpy(), replies = LifecycleTerminationReplySpy()
+        let replied = expectation(description: "continue")
+        replies.onReply = { _ in replied.fulfill() }
+        let delegate = MacLifecycleDelegate(activity: adapter, automaticTermination: LifecycleTerminationSpy(),
+            presenter: presenter, terminationReply: replies, windowClassifier: LifecycleWindowClassifierSpy())
+        delegate.configure(recording: recording, finalization: LifecycleFinalizationStub(), recovery: LifecycleRecoveryStub(), authority: authority)
+        let beforeMetadata = await fixture.repository.metadataDocuments(), beforeEvents = await fixture.repository.events()
+        XCTAssertFalse(delegate.applicationShouldTerminateAfterLastWindowClosed(NSApplication.shared))
+        XCTAssertEqual(presenter.calls, 0)
+        try await fixture.capture.emit(frameCount: 9)
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        await fulfillment(of: [replied], timeout: 3)
+        let metadata = await fixture.repository.metadataDocuments(), events = await fixture.repository.events()
+        let current = await recording.currentSnapshot()
+        XCTAssertEqual(metadata, beforeMetadata); XCTAssertEqual(events, beforeEvents)
+        XCTAssertEqual(current.phase, .recording); XCTAssertEqual(current.sessionID, started.sessionID)
+        XCTAssertEqual(replies.values, [false]); XCTAssertEqual(tokens.counts(), [1, 0])
+        let result = await recording.interrupt(.systemSleep) // drain accepted frames, proves progress after close
+        guard case .interrupted = result else { return XCTFail("expected interruption") }
+        let chunks = await recorder.appendedChunks()
+        XCTAssertEqual(chunks.map(\.frameCount), [8, 9])
+        XCTAssertEqual(tokens.counts(), [1, 1])
+    }
+
+    func testProductionEssentialFailurePreservesFirstErrorAndLaterWarnings() async throws {
+        let fixture = CoordinatorFixture(prebufferedFrameCounts: [8], repositoryFault: .metadataWrite(3),
+            recorderStopFailure: .writerFinishFailed, catalogFailure: .stepFailed)
+        let recording = fixture.makeCoordinator()
+        _ = try await recording.start(.init(title: "faults", timeZone: .gmt))
+        let lifecycle = AppLifecycleCoordinator(recording: recording, finalization: LifecycleFinalizationStub(),
+            recovery: LifecycleRecoveryStub(), activity: LifecycleActivitySpy(), termination: LifecycleTerminationSpy())
+        let allowed = await lifecycle.resolveTermination(.essentialSaveAndQuit)
+        let savedEvidence = await recording.essentialSaveEvidence()
+        let evidence = try XCTUnwrap(savedEvidence)
+        XCTAssertFalse(allowed); XCTAssertFalse(evidence.durableRecoveryState)
+        XCTAssertTrue(evidence.cleanupSettled); XCTAssertTrue(evidence.requiresUserAttention)
+        XCTAssertEqual(evidence.firstFailure, .recorder(.writerFinishFailed))
+        XCTAssertTrue(evidence.warnings.contains("persistence.temporaryWriteFailed"))
+        XCTAssertTrue(evidence.warnings.contains("catalog.stepFailed"))
+        let metadata = await fixture.repository.metadataDocuments(), deletes = await fixture.repository.deleteCount()
+        XCTAssertEqual(metadata.last?.status, .recording); XCTAssertEqual(deletes, 0)
+        let recorder = try XCTUnwrap(fixture.recorders.recorders().first)
+        let retained = await recorder.hasRecoveryArtifact(), chunks = await recorder.appendedChunks()
+        XCTAssertTrue(retained); XCTAssertEqual(chunks.map(\.frameCount), [8])
+    }
+
+    func testRequiredInterruptionEventFailureDeniesQuitButCatalogWarningDoesNot() async throws {
+        for fault in [TestRepositoryFault.eventWrite(2), .eventWrite(3)] {
+            let fixture = CoordinatorFixture(repositoryFault: fault)
+            let recording = fixture.makeCoordinator()
+            _ = try await recording.start(.init(title: "event fault", timeZone: .gmt))
+            _ = await recording.interrupt(.applicationQuit)
+            let evidence = await recording.essentialSaveEvidence()
+            XCTAssertEqual(evidence?.firstFailure, .persistence(.jsonlAppendFailed))
+            XCTAssertEqual(evidence?.mayTerminate, false)
+            let metadata = await fixture.repository.metadataDocuments()
+            XCTAssertEqual(metadata.last?.status, .interrupted)
+        }
+        let fixture = CoordinatorFixture(catalogFailure: .stepFailed)
+        let recording = fixture.makeCoordinator()
+        _ = try await recording.start(.init(title: "catalog warning", timeZone: .gmt))
+        _ = await recording.interrupt(.applicationQuit)
+        let evidence = await recording.essentialSaveEvidence()
+        XCTAssertEqual(evidence?.mayTerminate, true)
+        XCTAssertEqual(evidence?.warnings, ["catalog.stepFailed"])
+    }
+}
+
+final class ActivityTokenProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var began = 0, ended = 0
+    func begin() -> NSObjectProtocol { lock.withLock { began += 1 }; return NSObject() }
+    func end(_ value: NSObjectProtocol) { lock.withLock { ended += 1 } }
+    func counts() -> [Int] { lock.withLock { [began, ended] } }
+}
+private struct AdmissionNoopWorker: AudioFinalizationWorking {
+    func finalize(_ request: AudioFinalizationRequest, control: AudioFinalizationControl,
+        progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
+        .init(location: request.location, phase: .failed, failure: .cancelled, warnings: [], media: nil, source: nil,
+              final: nil, completedSteps: [], retainedPaths: [], presentPaths: [], recoveryWasRemoved: false)
+    }
+    func removeRecovery(_ evidence: FinalizationCompletionEvidence, control: AudioFinalizationControl,
+        progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
+        await finalize(.init(location: evidence.location), control: control, progress: progress)
+    }
+}
+
+extension RecordingSessionCoordinatorTests {
+    func testSleepJoinsNormalStopThroughGatedFinalizationHandoffWithoutActivityGap() async throws {
+        let probe = ActivityTokenProbe()
+        let activity = ProcessInfoLifecycleActivityAdapter(begin: { probe.begin() }, end: { probe.end($0) })
+        let authority = LifecycleWorkAuthority(activity: { activity.update($0) })
+        let save = ControlledTestGate(), handoff = ControlledTestGate()
+        let fixture = CoordinatorFixture(repositoryGate: .metadataWrite(3, save))
+        let recording = fixture.makeCoordinator(authority: authority)
+        let finalization = AudioFinalizationCoordinator(worker: AdmissionNoopWorker(), authority: authority)
+        let app = RecordingFinalizationCoordinator(recording: recording, finalization: finalization, authority: authority,
+            beforeHandoff: { await handoff.arriveAndWait() })
+        let started = try await app.start(.init(title: "normal", timeZone: .gmt))
+        let stop = Task { await app.stop() }
+        await save.waitForArrival()
+        let joined = expectation(description: "wake joined owned sleep cleanup")
+        let recovery = LifecycleRecoveryStub()
+        let lifecycle = AppLifecycleCoordinator(recording: app, finalization: finalization, recovery: recovery,
+            activity: activity, termination: LifecycleTerminationSpy(), authority: authority, onWakeJoining: { _ in joined.fulfill() })
+        await lifecycle.handlePowerEvent(.willSleep)
+        let wake = Task { await lifecycle.handlePowerEvent(.didWake) }
+        await fulfillment(of: [joined], timeout: 3)
+        let before = await recovery.refreshCount()
+        XCTAssertEqual(before, 0)
+        await save.release()
+        await handoff.waitForArrival()
+        let during = await recovery.refreshCount(), queued = await finalization.allSnapshots()
+        XCTAssertEqual(during, 0); XCTAssertTrue(queued.isEmpty)
+        XCTAssertEqual(probe.counts(), [1, 0])
+        await handoff.release()
+        let result = await stop.value
+        await wake.value
+        guard case let .secured(secured) = result else { return XCTFail("normal outcome lost") }
+        XCTAssertEqual(secured.location.sessionID, started.sessionID)
+        let metadata = await fixture.repository.metadataDocuments(), events = await fixture.repository.events()
+        XCTAssertEqual(metadata.last?.captureOutcome, .completed)
+        XCTAssertEqual(events.filter { $0.kind == .systemSleep }.count, 0)
+        XCTAssertEqual(events.filter { $0.kind == .recordingEnded }.count, 1)
+        let refreshed = await recovery.refreshCount(), jobs = await finalization.allSnapshots()
+        XCTAssertEqual(refreshed, 1); XCTAssertEqual(jobs.count, 1); XCTAssertNotNil(jobs.first?.result)
+        XCTAssertEqual(probe.counts(), [1, 1]); XCTAssertFalse(authority.state().active)
+    }
+
+    @MainActor
+    func testAdapterEssentialMetadataFailureRepliesOnceAndPublishesAttention() async throws {
+        let gate = ControlledTestGate()
+        let fixture = CoordinatorFixture(repositoryGate: .metadataWriteThenFail(3, gate, .temporaryWriteFailed))
+        let recording = fixture.makeCoordinator()
+        _ = try await recording.start(.init(title: "save failure", timeZone: .gmt))
+        let vm = RecordingSessionViewModel(coordinator: recording)
+        vm.startObserving()
+        defer { vm.stopObserving() }
+        let presenter = LifecycleQuitPresenterSpy(); presenter.choice = .essentialSaveAndQuit
+        let replies = LifecycleTerminationReplySpy()
+        let replied = expectation(description: "false reply")
+        replies.onReply = { _ in replied.fulfill() }
+        let delegate = MacLifecycleDelegate(activity: LifecycleActivitySpy(), automaticTermination: LifecycleTerminationSpy(),
+            presenter: presenter, terminationReply: replies, windowClassifier: LifecycleWindowClassifierSpy())
+        delegate.configure(recording: recording, finalization: LifecycleFinalizationStub(), recovery: LifecycleRecoveryStub())
+        let progress = expectation(description: "bound securing UI")
+        let failure = expectation(description: "bound attention UI")
+        var sawProgress = false, sawFailure = false
+        let observation = vm.$snapshot.sink { value in
+            if value.phase == .securing && !sawProgress { sawProgress = true; progress.fulfill() }
+            if value.persistenceWarningCode != nil && !sawFailure { sawFailure = true; failure.fulfill() }
+        }
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        await gate.waitForArrival()
+        await fulfillment(of: [progress], timeout: 3)
+        XCTAssertEqual(vm.lifecycleMessage, "필수 저장 중…")
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        XCTAssertEqual(replies.values, [])
+        await gate.release()
+        await fulfillment(of: [failure, replied], timeout: 3)
+        XCTAssertEqual(replies.values, [false]); XCTAssertEqual(presenter.calls, 1)
+        XCTAssertTrue(vm.lifecycleMessage?.contains("확인이 필요") == true)
+        XCTAssertEqual(vm.snapshot.failure, .persistence(.temporaryWriteFailed))
+        observation.cancel()
+    }
+}
+
+extension RecordingSessionCoordinatorTests {
+    @MainActor
+    func testRepeatedAdapterQuitPerformsOneProductionSaveAndTrueReply() async throws {
+        let gate = ControlledTestGate()
+        let authority = LifecycleWorkAuthority()
+        let fixture = CoordinatorFixture(prebufferedFrameCounts: [8, 9], repositoryGate: .metadataWrite(3, gate))
+        let recording = fixture.makeCoordinator(authority: authority)
+        _ = try await recording.start(.init(title: "quit", timeZone: .gmt))
+        let presenter = LifecycleQuitPresenterSpy(); presenter.choice = .essentialSaveAndQuit
+        let replies = LifecycleTerminationReplySpy(), recovery = LifecycleRecoveryStub(), finalization = LifecycleFinalizationStub()
+        let replied = expectation(description: "one true reply")
+        replies.onReply = { _ in replied.fulfill() }
+        let delegate = MacLifecycleDelegate(activity: LifecycleActivitySpy(), automaticTermination: LifecycleTerminationSpy(),
+            presenter: presenter, terminationReply: replies, windowClassifier: LifecycleWindowClassifierSpy())
+        delegate.configure(recording: recording, finalization: finalization, recovery: recovery, authority: authority)
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        await gate.waitForArrival()
+        for _ in 0..<3 { XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater) }
+        XCTAssertEqual(replies.values, [])
+        await gate.release()
+        await fulfillment(of: [replied], timeout: 3)
+        await delegate.waitForPendingTermination()
+        XCTAssertEqual(replies.values, [true]); XCTAssertEqual(presenter.calls, 1)
+        let events = await fixture.repository.events(kind: .recordingEnded), metadata = await fixture.repository.metadataDocuments()
+        let quiesces = await finalization.quiesceCount(), cancels = await recovery.cancelCount()
+        XCTAssertEqual(quiesces, 1); XCTAssertEqual(cancels, 1); XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(metadata.last?.status, .interrupted); XCTAssertEqual(metadata.last?.captureOutcome, .interrupted)
+        let recorder = try XCTUnwrap(fixture.recorders.recorders().first)
+        let counts = await recorder.counts(), chunks = await recorder.appendedChunks()
+        XCTAssertEqual(counts.flush, 1); XCTAssertEqual(counts.stop, 1); XCTAssertEqual(chunks.map(\.frameCount), [8, 9])
+        XCTAssertFalse(authority.state().active)
+    }
+}
+
+extension RecordingSessionCoordinatorTests {
+    func testSleepAtDurableStartedEventBoundaryPreservesInterruptedOutcome() async throws {
+        let gate = ControlledTestGate()
+        let stopped = expectation(description: "intake closed while start event is held")
+        let fixture = CoordinatorFixture(prebufferedFrameCounts: [8], repositoryGate: .eventWrite(1, gate),
+            onCaptureStop: { stopped.fulfill() })
+        let recording = fixture.makeCoordinator()
+        let start = Task { await startFailure(recording, configuration: .init(title: "start boundary", timeZone: .gmt)) }
+        await gate.waitForArrival()
+        let sleep = Task { await recording.interrupt(.systemSleep) }
+        await fulfillment(of: [stopped], timeout: 3)
+        await gate.release()
+        let startResult = await start.value, result = await sleep.value
+        XCTAssertEqual(startResult, .interrupted(.systemSleep))
+        XCTAssertEqual(result, .interrupted(.interrupted(.systemSleep)))
+        let metadata = await fixture.repository.metadataDocuments(), events = await fixture.repository.events()
+        XCTAssertEqual(metadata.last?.status, .interrupted); XCTAssertEqual(metadata.last?.captureOutcome, .interrupted)
+        XCTAssertEqual(events.filter { $0.kind == .recordingStarted }.count, 1)
+        XCTAssertEqual(events.filter { $0.kind == .systemSleep }.count, 1)
+        XCTAssertEqual(events.filter { $0.kind == .recordingEnded }.count, 1)
+        let evidence = await recording.essentialSaveEvidence()
+        XCTAssertEqual(evidence?.mayTerminate, true)
+    }
+}
+
+extension RecordingSessionCoordinatorTests {
+    func testActivityReleasesAfterProductionPreparationFailureAndCancellation() async throws {
+        let probe = ActivityTokenProbe()
+        let adapter = ProcessInfoLifecycleActivityAdapter(begin: { probe.begin() }, end: { probe.end($0) })
+        let authority = LifecycleWorkAuthority(activity: { adapter.update($0) })
+        let noRoot = CoordinatorFixture(rootAvailability: .noRootSelected)
+        _ = await startFailure(noRoot.makeCoordinator(authority: authority))
+        XCTAssertEqual(probe.counts(), [1, 1])
+        let gate = ControlledTestGate()
+        let stopped = expectation(description: "cancel closes intake")
+        let fixture = CoordinatorFixture(recorderStartGate: gate, onCaptureStop: { stopped.fulfill() })
+        let recording = fixture.makeCoordinator(authority: authority)
+        let start = Task { await startFailure(recording) }
+        await gate.waitForArrival()
+        start.cancel()
+        await fulfillment(of: [stopped], timeout: 3)
+        XCTAssertEqual(probe.counts(), [2, 1])
+        await gate.release(); _ = await start.value
+        XCTAssertEqual(probe.counts(), [2, 2]); XCTAssertFalse(authority.state().active)
+    }
+
+    @MainActor
+    func testSleepInterruptionMessageIsBoundToProductionSnapshot() async throws {
+        let fixture = CoordinatorFixture()
+        let recording = fixture.makeCoordinator()
+        _ = try await recording.start(.init(title: "sleep UI", timeZone: .gmt))
+        let vm = RecordingSessionViewModel(coordinator: recording)
+        let interrupted = expectation(description: "sleep message")
+        var fulfilled = false
+        let observation = vm.$snapshot.sink { value in
+            if value.phase == .interrupted && !fulfilled { fulfilled = true; interrupted.fulfill() }
+        }
+        vm.startObserving()
+        _ = await recording.interrupt(.systemSleep)
+        await fulfillment(of: [interrupted], timeout: 3)
+        XCTAssertEqual(vm.displayState, .interrupted)
+        XCTAssertTrue(vm.lifecycleMessage?.contains("자동 재개되지 않습니다") == true)
+        observation.cancel(); vm.stopObserving()
+    }
+}
+
+extension RecordingSessionCoordinatorTests {
+    func testWriterFlushFailureDeniesEssentialSuccessAfterDurableMetadata() async throws {
+        let fixture = CoordinatorFixture(recorderFlushFailure: .flushFailed)
+        let recording = fixture.makeCoordinator()
+        _ = try await recording.start(.init(title: "flush", timeZone: .gmt))
+        _ = await recording.interrupt(.applicationQuit)
+        let evidence = await recording.essentialSaveEvidence(), metadata = await fixture.repository.metadataDocuments()
+        XCTAssertEqual(metadata.last?.status, .interrupted)
+        XCTAssertEqual(evidence?.firstFailure, .recorder(.flushFailed)); XCTAssertEqual(evidence?.mayTerminate, false)
+        XCTAssertEqual(evidence?.cleanupSettled, true)
+        let recorder = try XCTUnwrap(fixture.recorders.recorders().first)
+        let counts = await recorder.counts()
+        XCTAssertEqual(counts.flush, 1); XCTAssertEqual(counts.stop, 1)
+    }
+
+    @MainActor
+    func testDelayedQuitChoiceCannotInterruptNewRecording() async throws {
+        let authority = LifecycleWorkAuthority()
+        let fixture = CoordinatorFixture()
+        let recording = fixture.makeCoordinator(authority: authority)
+        _ = try await recording.start(.init(title: "old", timeZone: .gmt))
+        let gate = LifecycleGate()
+        let presenter = LifecycleQuitPresenterSpy(); presenter.choice = .essentialSaveAndQuit; presenter.gate = gate
+        let replies = LifecycleTerminationReplySpy()
+        let delegate = MacLifecycleDelegate(activity: LifecycleActivitySpy(), automaticTermination: LifecycleTerminationSpy(),
+            presenter: presenter, terminationReply: replies, windowClassifier: LifecycleWindowClassifierSpy())
+        delegate.configure(recording: recording, finalization: LifecycleFinalizationStub(), recovery: LifecycleRecoveryStub(), authority: authority)
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        await gate.waitEntered()
+        _ = await recording.interrupt(.systemSleep)
+        let newer = try await recording.start(.init(title: "newer", timeZone: .gmt))
+        await gate.release(); await delegate.waitForPendingTermination()
+        XCTAssertEqual(replies.values, [false]); XCTAssertEqual(presenter.calls, 1)
+        let current = await recording.currentSnapshot(), events = await fixture.repository.events(kind: .recordingEnded)
+        XCTAssertEqual(current.phase, .recording); XCTAssertEqual(current.sessionID, newer.sessionID)
+        XCTAssertEqual(events.count, 1)
+        _ = await recording.interrupt(.systemSleep)
+    }
+}
+
+extension RecordingSessionCoordinatorTests {
+    func testAuditSleepCancelsStartWaitingForInitialDiscovery() async throws {
+        try await auditPendingStartInterruption(event: .willSleep)
+    }
+    func testPowerOffCancelsStartWaitingForInitialDiscovery() async throws {
+        try await auditPendingStartInterruption(event: .willPowerOff)
+    }
+    func testQuitCancelsStartWaitingForInitialDiscoveryBeforeReply() async throws {
+        try await auditPendingStartInterruption(event: nil)
+    }
+    private func auditPendingStartInterruption(event: AppLifecyclePowerEvent?) async throws {
+        let media = try await FinalizationFixture.make()
+        defer { media.clean() }
+        let scan = ControlledTestGate()
+        let cancelled = expectation(description: "actual discovery task cancelled")
+        let scanner = AuditDiscoveryScanner(gate: scan, onCancel: { cancelled.fulfill() })
+        let authority = LifecycleWorkAuthority()
+        let finalization = AudioFinalizationCoordinator(worker: AdmissionNoopWorker(), authority: authority)
+        let recovery = SessionRecoveryCoordinator(scanner: scanner, persistence: media.repository,
+            finalization: finalization, catalog: AuditEmptyCatalog(), authority: authority)
+        let fixture = CoordinatorFixture()
+        let recording = fixture.makeCoordinator(authority: authority)
+        let app = RecordingFinalizationCoordinator(recording: recording, finalization: finalization,
+            startupRecovery: recovery, authority: authority)
+        let start = Task { () -> Result<RecordingSessionSnapshot, RecordingSessionFailure> in
+            do { return .success(try await app.start(.init(title: "pending before sleep", timeZone: .gmt))) }
+            catch let error as RecordingSessionFailure { return .failure(error) }
+            catch { return .failure(.unknown) }
+        }
+        await scan.waitForArrival()
+        let before = await recording.currentSnapshot()
+        XCTAssertEqual(before.phase, .idle)
+        let lifecycle = AppLifecycleCoordinator(recording: app, finalization: finalization, recovery: recovery,
+            activity: LifecycleActivitySpy(), termination: LifecycleTerminationSpy(), authority: authority)
+        let settlement = Task { () -> Bool in
+            if let event {
+                await lifecycle.handlePowerEvent(event)
+                await lifecycle.handlePowerEvent(.didWake)
+                return true
+            }
+            return await lifecycle.resolveTermination(.essentialSaveAndQuit)
+        }
+        await fulfillment(of: [cancelled], timeout: 3)
+        await scan.release()
+        let started = await start.value
+        let allowed = await settlement.value
+        XCTAssertTrue(allowed)
+        await recovery.waitForCurrentPassSettlement()
+        let after = await recording.currentSnapshot(), captures = await fixture.capture.counts()
+        // Release all production owners before asserting the violated contract.
+        if after.phase == .recording { _ = await app.interrupt(.systemSleep) }
+        let reason: RecordingInterruptionReason = event == .willSleep ? .systemSleep : (event == .willPowerOff ? .systemPowerOff : .applicationQuit)
+        guard case let .failure(failure) = started else { return XCTFail("Pending start resumed capture after interruption") }
+        XCTAssertEqual(failure, .interrupted(reason))
+        XCTAssertNotEqual(after.phase, .recording)
+        XCTAssertEqual(captures.start, 0)
+        let fresh = try await app.start(.init(title: "explicit new request", timeZone: .gmt))
+        XCTAssertEqual(fresh.phase, .recording)
+        _ = await app.interrupt(.systemSleep)
+        XCTAssertFalse(authority.state().active)
+    }
+}
+private actor AuditDiscoveryScanner: SessionRecoveryScanning {
+    let gate: ControlledTestGate
+    let onCancel: @Sendable () -> Void
+    init(gate: ControlledTestGate, onCancel: @escaping @Sendable () -> Void) { self.gate=gate; self.onCancel=onCancel }
+    func scanForRecovery() async throws -> [RootRecoveryScanResult] {
+        await withTaskCancellationHandler(operation: { await gate.arriveAndWait(); return [] }, onCancel: onCancel)
+    }
+}
+private struct AuditEmptyCatalog: SessionCataloging {
+    func reconcile() async throws -> CatalogReconciliationReport { .init(rootResults: [], issues: [], recoveredFromCorruption: false) }
+    func orderedItems() async throws -> [SessionCatalogItem] { [] }
 }

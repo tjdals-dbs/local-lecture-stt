@@ -88,6 +88,7 @@ actor UnavailableSessionCatalog: SessionCataloging {
 /// short-lived and file-only; slow media work is submitted to the one existing
 /// T08 coordinator.  Cancelling a view observation never cancels this owner.
 actor SessionRecoveryCoordinator {
+    private let authority: LifecycleWorkAuthority?
     private let scanner: any SessionRecoveryScanning
     private let persistence: any SessionRecoveryPersisting
     private let finalization: AudioFinalizationCoordinator
@@ -103,6 +104,7 @@ actor SessionRecoveryCoordinator {
     private var discoveryWaiters: [CheckedContinuation<Void, Never>] = []
     private var settlementWaiters: [CheckedContinuation<Void, Never>] = []
     private var cancelling = false
+    private var lifecycleQuiescing = false
     private var ownedFinalizations: [SessionLocation] = []
     private var cancellationIssues: [SessionRecoveryIssue] = []
 
@@ -112,6 +114,7 @@ actor SessionRecoveryCoordinator {
         finalization: AudioFinalizationCoordinator,
         catalog: any SessionCataloging,
         activity: SessionActivityRegistry? = nil,
+        authority: LifecycleWorkAuthority? = nil,
         now: @escaping @Sendable () -> AbsoluteTime = { AbsoluteTime(Date()) }
     ) {
         self.scanner = scanner
@@ -119,6 +122,7 @@ actor SessionRecoveryCoordinator {
         self.finalization = finalization
         self.catalog = catalog
         self.activity = activity
+        self.authority = authority
         self.now = now
     }
 
@@ -170,8 +174,15 @@ actor SessionRecoveryCoordinator {
         await withCheckedContinuation { settlementWaiters.append($0) }
     }
 
+    func quiesceOwnedRecovery() async {
+        lifecycleQuiescing = true
+        await cancelOwnedRecovery()
+        refreshPending = false // wake or a later explicit refresh will discover durable work
+        lifecycleQuiescing = false
+    }
+
     func cancelOwnedRecovery() async {
-        guard !cancelling else { return }
+        if cancelling { await waitForCurrentPassSettlement(); return }
         cancelling = true
         generation &+= 1 // invalidates every stale continuation before cleanup begins
         let task = operation
@@ -186,7 +197,7 @@ actor SessionRecoveryCoordinator {
         resumeDiscoveryWaiters()
         resumeSettlementWaiters()
         cancelling = false
-        if refreshPending { refreshPending = false; launch(explicitRetry: false) }
+        if refreshPending && !lifecycleQuiescing { refreshPending = false; launch(explicitRetry: false) }
     }
 
     private func launch(explicitRetry: Bool) {
@@ -199,8 +210,14 @@ actor SessionRecoveryCoordinator {
         // Existing observers must see that this pass has begun before its scan
         // can suspend.  Late observers still receive this same snapshot from
         // `snapshots()`; neither path depends on scanner timing.
+        let lease = authority?.admit()
         publish()
-        operation = Task { [weak self] in await self?.run(pass: pass, explicitRetry: explicitRetry) }
+        let authority = authority
+        operation = Task { [weak self] in
+            await self?.run(pass: pass, explicitRetry: explicitRetry)
+            if let lease { authority?.release(lease) }
+            await self?.publish()
+        }
     }
 
     private func run(pass: UInt64, explicitRetry: Bool) async {

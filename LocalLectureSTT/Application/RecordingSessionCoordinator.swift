@@ -100,6 +100,15 @@ struct RecordingStartConfiguration: Sendable, Equatable {
     }
 }
 
+/// A semantic, durable reason for a non-user terminal capture path.  This is
+/// deliberately separate from `stop()`: callers must not accidentally turn a
+/// sleep or quit interruption into a completed capture.
+enum RecordingInterruptionReason: String, Sendable, Equatable {
+    case systemSleep
+    case applicationQuit
+    case systemPowerOff
+}
+
 enum RecordingSessionFailure: Error, Sendable, Equatable {
     case busy
     case storageRoot(StorageErrorCode)
@@ -110,6 +119,7 @@ enum RecordingSessionFailure: Error, Sendable, Equatable {
     case recordingStreamEnded
     case invalidRecorderSummary
     case cancelled
+    case interrupted(RecordingInterruptionReason)
     case unknown
 
     var stableCode: String {
@@ -123,6 +133,7 @@ enum RecordingSessionFailure: Error, Sendable, Equatable {
         case .recordingStreamEnded: "capture.recordingStreamEnded"
         case .invalidRecorderSummary: "recorder.invalidSummary"
         case .cancelled: "session.cancelled"
+        case let .interrupted(reason): "session.interrupted.\(reason.rawValue)"
         case .unknown: "session.unknown"
         }
     }
@@ -198,7 +209,20 @@ protocol RecordingSessionCoordinating: Sendable {
     func refreshPermissionStatus() async
     func start(_ configuration: RecordingStartConfiguration) async throws -> RecordingSessionSnapshot
     func stop() async -> RecordingSessionResult
+    func interrupt(_ reason: RecordingInterruptionReason) async -> RecordingSessionResult
+    func recordSystemWakeIfApplicable() async
     func reset() async
+    func essentialSaveEvidence() async -> EssentialTerminationSaveResult?
+    func interruptForLifecycle(_ reason: RecordingInterruptionReason, admission: UInt64?) async -> RecordingSessionResult
+    func invalidatePendingStart(_ reason: RecordingInterruptionReason, admission: UInt64?) async
+    func settleFinalizationHandoffs() async
+}
+
+extension RecordingSessionCoordinating {
+    func essentialSaveEvidence() async -> EssentialTerminationSaveResult? { nil }
+    func interruptForLifecycle(_ reason: RecordingInterruptionReason, admission: UInt64?) async -> RecordingSessionResult { await interrupt(reason) }
+    func invalidatePendingStart(_ reason: RecordingInterruptionReason, admission: UInt64?) async {}
+    func settleFinalizationHandoffs() async {}
 }
 
 actor RecordingSessionCoordinator: RecordingSessionCoordinating {
@@ -223,6 +247,9 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         var cancellationRequested = false
         var firstFailure: RecordingSessionFailure?
         var persistenceWarningCode: String?
+        var operationalFailure: RecordingSessionFailure?
+        var settlementWarnings: [String] = []
+        var terminalMetadataWritten = false
         var catalogWarningCode: CatalogErrorCode?
         var lastMediaPositionMilliseconds: UInt64 = 0
         var noInputEpisode = 0
@@ -262,6 +289,10 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     private let ticker: any RecordingTicking
     private let environment: RecordingSessionEnvironment
     private let identifiers: RecordingSessionIdentifiers
+    private let onSettlementJoin: @Sendable () -> Void
+    private let authority: LifecycleWorkAuthority?
+    private var workLease: UUID?
+    private var saveEvidence: EssentialTerminationSaveResult?
     private let activity: SessionActivityRegistry?
 
     private var nextToken: UInt64 = 0
@@ -269,9 +300,17 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     private var startOperation: StartOperation?
     private var settlementOperation: SettlementOperation?
     private var cancelledStartTokens: Set<UInt64> = []
+    /// An interruption is a durable policy decision for a start attempt.  It
+    /// must be recorded before awaiting the start task: the task can be
+    /// suspended before `active` exists, then otherwise succeed and leave a
+    /// live recorder behind after sleep/quit has already been accepted.
+    private var startInterruptionFailures: [UInt64: RecordingSessionFailure] = [:]
     private var snapshot = RecordingSessionSnapshot.idle()
     private var snapshotContinuations: [UUID: AsyncStream<RecordingSessionSnapshot>.Continuation] = [:]
     private var lastResult: RecordingSessionResult?
+    private var interruptedWakeLocation: SessionLocation?
+    private var interruptedWakePosition: UInt64 = 0
+    private var systemWakeRecorded = false
 
     init(
         roots: any RecordingStorageRootChecking,
@@ -284,7 +323,9 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         ticker: any RecordingTicking = SystemRecordingTicker(),
         environment: RecordingSessionEnvironment,
         identifiers: RecordingSessionIdentifiers = .live,
-        activity: SessionActivityRegistry? = nil
+        activity: SessionActivityRegistry? = nil,
+        authority: LifecycleWorkAuthority? = nil,
+        onSettlementJoin: @escaping @Sendable () -> Void = {}
     ) {
         self.roots = roots
         self.permission = permission
@@ -297,6 +338,8 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         self.environment = environment
         self.identifiers = identifiers
         self.activity = activity
+        self.authority = authority
+        self.onSettlementJoin = onSettlementJoin
     }
 
     func snapshots() -> AsyncStream<RecordingSessionSnapshot> {
@@ -311,6 +354,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     }
 
     func currentSnapshot() -> RecordingSessionSnapshot { snapshot }
+    func essentialSaveEvidence() async -> EssentialTerminationSaveResult? { saveEvidence }
 
     func refreshPermissionStatus() async {
         guard startOperation == nil, settlementOperation == nil else { return }
@@ -326,6 +370,8 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         }
         let incremented = nextToken.addingReportingOverflow(1)
         guard !incremented.overflow else { throw RecordingSessionFailure.busy }
+        workLease = authority?.admit()
+        saveEvidence = nil
         nextToken = incremented.partialValue
         let token = nextToken
         lastResult = nil
@@ -360,9 +406,12 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         })
         if startOperation?.token == token { startOperation = nil }
         cancelledStartTokens.remove(token)
+        startInterruptionFailures[token] = nil
         switch result {
         case let .success(value): return value
-        case let .failure(failure): throw failure
+        case let .failure(failure):
+            if let workLease { authority?.release(workLease); self.workLease = nil }
+            throw failure
         }
     }
 
@@ -379,6 +428,55 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
             return lastResult ?? .error(.busy)
         }
         return await beginSettlement(token: active.token, expectedUserStop: true)
+    }
+
+    func interruptForLifecycle(_ reason: RecordingInterruptionReason, admission: UInt64?) async -> RecordingSessionResult {
+        guard admission == authority?.state().generation else { return .error(.busy) }
+        return await interrupt(reason)
+    }
+
+    func interrupt(_ reason: RecordingInterruptionReason) async -> RecordingSessionResult {
+        if let operation = settlementOperation {
+            onSettlementJoin()
+            // A normal Stop has already acquired the terminal transition.  Its
+            // completed outcome is authoritative and may not be rewritten.
+            return await operation.task.value
+        }
+        if let operation = startOperation {
+            let interruption = RecordingSessionFailure.interrupted(reason)
+            // First interruption wins.  This is deliberately set even before
+            // an ActiveSession exists, so every later start await observes it.
+            if startInterruptionFailures[operation.token] == nil {
+                startInterruptionFailures[operation.token] = interruption
+                cancelledStartTokens.insert(operation.token)
+            }
+            if active?.token == operation.token {
+                requestAbnormalSettlement(token: operation.token,
+                                          failure: startInterruptionFailures[operation.token] ?? interruption)
+            }
+            _ = await operation.task.value
+            if let settlement = settlementOperation { return await settlement.task.value }
+            return lastResult ?? .error(startInterruptionFailures[operation.token] ?? interruption)
+        }
+        guard let active else { return lastResult ?? .error(.busy) }
+        requestAbnormalSettlement(token: active.token, failure: .interrupted(reason))
+        guard let settlement = settlementOperation else { return lastResult ?? .error(.interrupted(reason)) }
+        return await settlement.task.value
+    }
+
+    func recordSystemWakeIfApplicable() async {
+        guard let location = interruptedWakeLocation, !systemWakeRecorded else { return }
+        do {
+            let event = try SessionEventRecord(sessionId: location.sessionID, eventId: identifiers.eventID(),
+                                               occurredAt: clock.wallNow(), kind: .systemWake,
+                                               mediaPositionMs: try MediaMilliseconds(Int64(clamping: interruptedWakePosition)),
+                                               detail: try SessionEventDetail(code: "systemWake"))
+            try await repository.appendEvent(event, at: location)
+            systemWakeRecorded = true
+        } catch {
+            // Wake diagnostics are best effort.  Recovery MOV and the first
+            // terminal failure remain authoritative.
+        }
     }
 
     func reset() async {
@@ -761,8 +859,17 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         } else if let reservation = active?.activityReservation {
             await activity?.release(reservation)
         }
-        if active?.token == token { active = nil }
+        if let session = active, session.token == token {
+            var warnings = session.settlementWarnings
+            if let catalog = session.catalogWarningCode { warnings.append("catalog.\(catalog.rawValue)") }
+            saveEvidence = .init(durableRecoveryState: session.terminalMetadataWritten,
+                cleanupSettled: true, firstFailure: session.operationalFailure, warnings: warnings,
+                requiresUserAttention: session.operationalFailure != nil || !session.terminalMetadataWritten)
+            active = nil
+        }
+        if let workLease { authority?.release(workLease); self.workLease = nil }
         lastResult = result
+        publishSnapshot() // observers see settled durability and resource release
         if settlementOperation?.token == token { settlementOperation = nil }
         return result
     }
@@ -770,6 +877,9 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     private func requestCaptureStop(token: UInt64) {
         guard active?.token == token, active?.captureStopIssued == false else { return }
         active?.captureStopIssued = true
+        // Closing intake is intentional even while the start-event write is
+        // suspended. Its resulting stream end is not a second operational failure.
+        active?.expectedStop = true
         let capture = capture
         active?.captureStopTask = Task { await capture.stop() }
     }
@@ -810,6 +920,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
                 updatedAt: endedAt
             )
             try await writeMetadata(metadata, token: token)
+            active?.terminalMetadataWritten = true
             await refreshCatalogBestEffort(token: token)
             let secured = RecordingSessionSecuredResult(location: session.location, metadata: metadata, recorderSummary: summary)
             snapshot = RecordingSessionSnapshot(
@@ -886,13 +997,19 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
                 updatedAt: endedAt
             )
             try await repository.writeMetadata(metadata, at: session.location)
-            if active?.token == token { active?.metadata = metadata }
+            if active?.token == token { active?.metadata = metadata; active?.terminalMetadataWritten = true }
         } catch {
             notePersistenceWarning(error, token: token)
         }
         await refreshCatalogBestEffort(token: token)
 
         let phase: RecordingSessionPhase = session.startedDurably ? .interrupted : .error
+        if session.startedDurably,
+           case .interrupted(.systemSleep) = failure {
+            interruptedWakeLocation = session.location
+            interruptedWakePosition = mediaPosition
+            systemWakeRecorded = false
+        }
         snapshot = RecordingSessionSnapshot(
             phase: phase,
             permissionStatus: snapshot.permissionStatus,
@@ -905,7 +1022,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
             microphoneDisplayName: session.captureHandle?.device.displayName,
             normalizedInputLevel: 0,
             noInputWarning: false,
-            failure: failure,
+            failure: active?.operationalFailure ?? failure,
             persistenceWarningCode: active?.persistenceWarningCode,
             catalogWarningCode: active?.catalogWarningCode,
             canStart: false,
@@ -1157,12 +1274,16 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     private func registerFailure(_ failure: RecordingSessionFailure, token: UInt64) {
         guard active?.token == token else { return }
         if active?.firstFailure == nil { active?.firstFailure = failure }
+        if case .interrupted = failure { return }
+        if active?.operationalFailure == nil { active?.operationalFailure = failure }
+        else { active?.settlementWarnings.append(failure.stableCode) }
     }
 
     private func notePersistenceWarning(_ error: Error, token: UInt64) {
         guard active?.token == token else { return }
         let failure = Self.persistenceFailure(error)
         active?.persistenceWarningCode = failure.stableCode
+        registerFailure(failure, token: token)
     }
 
     private func validate(summary: AudioRecorderSummary, token: UInt64) -> Bool {
@@ -1176,6 +1297,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
 
     private func ensureStartMayContinue(_ token: UInt64) throws {
         guard startOperation?.token == token else { throw RecordingSessionFailure.cancelled }
+        if let interruption = startInterruptionFailures[token] { throw interruption }
         if active?.token == token, let failure = active?.firstFailure {
             throw failure
         }
@@ -1335,6 +1457,12 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         _ failure: RecordingSessionFailure
     ) -> (key: String, kind: SessionEventKind) {
         switch failure {
+        case .interrupted(.systemSleep):
+            ("systemSleep", .systemSleep)
+        case .interrupted(.applicationQuit):
+            ("applicationQuit", .applicationTermination)
+        case .interrupted(.systemPowerOff):
+            ("systemPowerOff", .applicationTermination)
         case let .capture(code) where code == .activeDeviceDisconnected || code == .inputRouteChanged:
             ("microphoneDisconnected.\(code.rawValue)", .microphoneDisconnected)
         case .recorder(.storageAccess), .recorder(.storageRootUnavailable),

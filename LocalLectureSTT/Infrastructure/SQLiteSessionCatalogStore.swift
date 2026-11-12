@@ -350,3 +350,19 @@ actor SQLiteSessionCatalogStore: SessionCatalogStore {
         } catch { throw CatalogError(.quarantineFailed) }
     }
 }
+
+/// Composition is inert; the first explicit catalog operation opens SQLite.
+/// The actor serializes factory creation before forwarding concurrent callers.
+actor DeferredSessionCatalog: SessionCataloging {
+    private let factory: @Sendable () throws -> any SessionCataloging
+    private var value: (any SessionCataloging)?
+    init(factory: @escaping @Sendable () throws -> any SessionCataloging) { self.factory = factory }
+    private func resolved() throws -> any SessionCataloging {
+        if let value { return value }
+        let created = try factory()
+        value = created
+        return created
+    }
+    func reconcile() async throws -> CatalogReconciliationReport { try await resolved().reconcile() }
+    func orderedItems() async throws -> [SessionCatalogItem] { try await resolved().orderedItems() }
+}

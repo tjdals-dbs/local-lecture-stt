@@ -1,0 +1,134 @@
+diff --git a/LocalLectureSTTTests/AppLifecycleTests.swift b/LocalLectureSTTTests/AppLifecycleTests.swift
+index 1df75e1..31d5ce7 100644
+--- a/LocalLectureSTTTests/AppLifecycleTests.swift
++++ b/LocalLectureSTTTests/AppLifecycleTests.swift
+@@ -3,6 +3,42 @@ import AppKit
+ @testable import LocalLectureSTT
+
+ final class AppLifecycleTests: XCTestCase {
++    @MainActor
++    func testReviewCachedIdleDecisionMustNotAllowQuitAfterRecordingStarts() async {
++        let readiness = SynchronousTerminationReadiness()
++        let recording = LifecycleRecordingStub()
++        let lifecycle = AppLifecycleCoordinator(recording: recording, finalization: LifecycleFinalizationStub(),
++            recovery: LifecycleRecoveryStub(), activity: LifecycleActivitySpy(), termination: LifecycleTerminationSpy(),
++            terminationReadiness: readiness)
++        _ = await lifecycle.terminationDecision()
++        XCTAssertEqual(readiness.currentDecision(), .terminateNow)
++        // Simulates the interval after a producer changes state but before its
++        // asynchronous stream observation reaches the main-actor mirror.
++        await recording.setSnapshot(.lifecycle(.recording))
++        let delegate = MacLifecycleDelegate(activity: LifecycleActivitySpy(), automaticTermination: LifecycleTerminationSpy(),
++            presenter: LifecycleQuitPresenterSpy(), terminationReply: LifecycleTerminationReplySpy(),
++            windowClassifier: LifecycleWindowClassifierSpy(), terminationReadiness: readiness)
++        delegate.configure(recording: recording, finalization: LifecycleFinalizationStub(), recovery: LifecycleRecoveryStub())
++        let answer = delegate.applicationShouldTerminate(NSApplication.shared)
++        XCTAssertNotEqual(answer, .terminateNow, "A cached idle result must not bypass a new live recording")
++    }
++
++    func testReviewNewRecordingDuringFinalQuitReadsMustDenyOldQuit() async {
++        let gate = LifecycleGate()
++        let recording = LifecycleRecordingStub(snapshot: .lifecycle(.recording))
++        let finalization = ReviewFinalizationReadGate(gate: gate)
++        let lifecycle = AppLifecycleCoordinator(recording: recording, finalization: finalization,
++            recovery: LifecycleRecoveryStub(), activity: LifecycleActivitySpy(), termination: LifecycleTerminationSpy())
++        let quit = Task { await lifecycle.resolveTermination(.essentialSaveAndQuit) }
++        await gate.waitEntered()
++        // The quit already read the interrupted snapshot. A newer recording
++        // begins while its next owner read is suspended.
++        await recording.setSnapshot(.lifecycle(.recording))
++        await gate.release()
++        let allowed = await quit.value
++        XCTAssertFalse(allowed, "The old quit must not authorize termination of newer capture")
++    }
++
+     func testProductionActivityOptionsProtectSystemSleepButAllowDisplaySleep() {
+         let options = ProcessInfoLifecycleActivityAdapter.activityOptions
+         XCTAssertTrue(options.contains(.idleSystemSleepDisabled))
+@@ -265,6 +301,19 @@ final class AppLifecycleTests: XCTestCase {
+
+ }
+
++private actor ReviewFinalizationReadGate: LifecycleFinalizationCoordinating {
++    let gate: LifecycleGate
++    var reads = 0
++    init(gate: LifecycleGate) { self.gate = gate }
++    func snapshots() -> AsyncStream<[AudioFinalizationSnapshot]> { AsyncStream { $0.finish() } }
++    func allSnapshots() async -> [AudioFinalizationSnapshot] {
++        reads += 1
++        if reads == 2 { await gate.enterAndWait() }
++        return []
++    }
++    func quiesceOwnedWork() {}
++}
++
+ private actor LifecycleRecordingStub: RecordingSessionCoordinating {
+     private var interrupts = 0
+     private var snapshotValue: RecordingSessionSnapshot
+diff --git a/LocalLectureSTTTests/RecordingSessionCoordinatorTests.swift b/LocalLectureSTTTests/RecordingSessionCoordinatorTests.swift
+index baafc75..283542b 100644
+--- a/LocalLectureSTTTests/RecordingSessionCoordinatorTests.swift
++++ b/LocalLectureSTTTests/RecordingSessionCoordinatorTests.swift
+@@ -1100,6 +1100,62 @@ final class RecordingSessionCoordinatorTests: XCTestCase {
+     }
+ }
+
++extension RecordingSessionCoordinatorTests {
++    func testReviewQuitMustDenyFailedTerminalMetadataPersistence() async throws {
++        let fixture = CoordinatorFixture(prebufferedFrameCounts: [8], repositoryFault: .metadataWrite(3))
++        let recording = fixture.makeCoordinator()
++        _ = try await recording.start(.init(title: "diagnostic", timeZone: .gmt))
++        let lifecycle = AppLifecycleCoordinator(recording: recording, finalization: ReviewNoopFinalization(),
++            recovery: ReviewCountingRecovery(), activity: ReviewNoopActivity(), termination: ReviewNoopTermination())
++        let allowed = await lifecycle.resolveTermination(.essentialSaveAndQuit)
++        let snapshot = await recording.currentSnapshot()
++        let metadata = await fixture.repository.metadataDocuments()
++        XCTAssertNotNil(snapshot.persistenceWarningCode)
++        XCTAssertEqual(metadata.last?.status, .recording, "terminal metadata write was rejected")
++        XCTAssertFalse(allowed, "Failed required terminal metadata must deny termination")
++    }
++
++    func testReviewWakeMustWaitForNormalStopEssentialSettlement() async throws {
++        let gate = ControlledTestGate()
++        let fixture = CoordinatorFixture(prebufferedFrameCounts: [8], repositoryGate: .metadataWrite(3, gate))
++        let recording = fixture.makeCoordinator()
++        _ = try await recording.start(.init(title: "diagnostic", timeZone: .gmt))
++        let stop = Task { await recording.stop() }
++        await gate.waitForArrival()
++        let recovery = ReviewCountingRecovery()
++        let lifecycle = AppLifecycleCoordinator(recording: recording, finalization: ReviewNoopFinalization(),
++            recovery: recovery, activity: ReviewNoopActivity(), termination: ReviewNoopTermination())
++        await lifecycle.handlePowerEvent(.willSleep)
++        await lifecycle.handlePowerEvent(.didWake)
++        let refreshesBeforeSave = await recovery.refreshCount()
++        let snapshot = await recording.currentSnapshot()
++        await gate.release()
++        _ = await stop.value
++        XCTAssertEqual(snapshot.phase, .securing)
++        XCTAssertEqual(refreshesBeforeSave, 0, "Wake recovery must not run while normal Stop still owns essential save")
++    }
++}
++
++private actor ReviewNoopFinalization: LifecycleFinalizationCoordinating {
++    func snapshots() -> AsyncStream<[AudioFinalizationSnapshot]> { AsyncStream { $0.finish() } }
++    func allSnapshots() -> [AudioFinalizationSnapshot] { [] }
++    func quiesceOwnedWork() {}
++}
++private actor ReviewCountingRecovery: LifecycleRecoveryCoordinating {
++    var refreshes = 0
++    func snapshots() -> AsyncStream<SessionRecoverySnapshot> { AsyncStream { $0.finish() } }
++    func currentSnapshot() -> SessionRecoverySnapshot { .init(generation: 0, phase: .idle, report: nil) }
++    func refresh() { refreshes += 1 }
++    func cancelOwnedRecovery() {}
++    func refreshCount() -> Int { refreshes }
++}
++private actor ReviewNoopActivity: LifecycleActivityControlling {
++    func setRelevantWorkActive(_ active: Bool) {}
++}
++private actor ReviewNoopTermination: LifecycleTerminationRequesting {
++    func requestAutomaticTermination(isStillValid: @escaping @Sendable () async -> Bool) {}
++}
++
+ private final class CoordinatorFixture: @unchecked Sendable {
+     let rootID = StorageRootID(UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!)
+     let roots: TestRootChecker

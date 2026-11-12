@@ -1748,6 +1748,8 @@ actor FinalizationRecordingStub: RecordingSessionCoordinating {
         .secured(.init(location: location, metadata: metadata, recorderSummary: .init(location: location,
             artifact: .recoveryAudio, writtenFrameCount: 96_000, mediaDurationMilliseconds: 2000, outputFormat: .recoveryAAC)))
     }
+    func interrupt(_ reason: RecordingInterruptionReason) -> RecordingSessionResult { .interrupted(.interrupted(reason)) }
+    func recordSystemWakeIfApplicable() {}
     func reset() {}
 }
 extension FinalizationFixture {
@@ -2151,5 +2153,176 @@ private final class FinalizationMediaProbe: @unchecked Sendable {
         if mutated { return false }
         mutated = true
         return true
+    }
+}
+
+extension AudioFinalizationTests {
+    @MainActor
+    func testLifecycleQuitWaitsForProductionCleanupThenRepliesOnceWithoutExport() async throws {
+        let f = try await FinalizationFixture.make()
+        defer { f.clean() }
+        let source = try Data(contentsOf: f.url(FinalizationFileAccess.source))
+        let export = FinalizationGate(), cleanup = FinalizationGate()
+        let trace = FinalizationTrace()
+        var worker = f.worker()
+        worker.hook = { point in
+            await trace.append(point)
+            if point == .beforeExport { await export.blockOnce() }
+            if point == .beforeRelease { await cleanup.blockOnce() }
+        }
+        let authority = LifecycleWorkAuthority()
+        let finalization = AudioFinalizationCoordinator(worker: worker, authority: authority)
+        await finalization.enqueue(.init(location: f.location))
+        await export.waitEntered()
+        let before = await f.bookmarks.counts()
+        let stream = await finalization.snapshots()
+        let cancelled = expectation(description: "quiesce delivered")
+        let observe = Task {
+            for await states in stream {
+                if states.first?.phase == .cancelling { cancelled.fulfill(); break }
+            }
+        }
+        let replies = LifecycleTerminationReplySpy()
+        let replied = expectation(description: "one affirmative reply after cleanup")
+        replies.onReply = { _ in replied.fulfill() }
+        let presenter = LifecycleQuitPresenterSpy()
+        let delegate = MacLifecycleDelegate(activity: LifecycleActivitySpy(), automaticTermination: LifecycleTerminationSpy(),
+            presenter: presenter, terminationReply: replies, windowClassifier: LifecycleWindowClassifierSpy())
+        delegate.configure(recording: LifecycleRecordingStub(), finalization: finalization, recovery: LifecycleRecoveryStub(), authority: authority)
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        await fulfillment(of: [cancelled], timeout: 3)
+        XCTAssertEqual(replies.values, [])
+        await export.open() // cancellation bypasses export at this production ownership boundary
+        await cleanup.waitEntered()
+        XCTAssertEqual(replies.values, [])
+        let held = await f.bookmarks.counts()
+        XCTAssertEqual(held, before)
+        await cleanup.open()
+        await fulfillment(of: [replied], timeout: 3)
+        await observe.value
+        XCTAssertEqual(replies.values, [true]); XCTAssertEqual(presenter.calls, 0)
+        let after = await f.bookmarks.counts(), points = await trace.values
+        XCTAssertEqual(after[0], after[1]); XCTAssertEqual(after[1], before[1] + 1)
+        XCTAssertFalse(points.contains(.afterExport))
+        XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), source)
+        let checkpoint = try await f.repository.readFinalizationCheckpoint(at: f.location)
+        XCTAssertEqual(checkpoint.completedSteps, [.workingAudioSecured])
+        XCTAssertFalse(authority.state().active)
+        let freshFinalization = AudioFinalizationCoordinator(worker: f.worker())
+        let freshRecovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+            finalization: freshFinalization, catalog: FinalizationCatalog())
+        await freshRecovery.start(); await freshRecovery.waitForCurrentPassSettlement()
+        let resumed = await freshFinalization.currentSnapshot(at: f.location)
+        XCTAssertEqual(resumed?.location, f.location); XCTAssertNil(resumed?.result?.failure)
+        XCTAssertNotNil(resumed?.result?.media)
+        XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), source)
+    }
+
+    func testPowerOffQuiesceRetainsCheckpointAndFreshRecoveryResumesSameFiles() async throws {
+        let f = try await FinalizationFixture.make()
+        defer { f.clean() }
+        let source = try Data(contentsOf: f.url(FinalizationFileAccess.source))
+        let export = FinalizationGate(), cleanup = FinalizationGate()
+        var worker = f.worker()
+        worker.hook = { point in
+            if point == .beforeExport { await export.blockOnce() }
+            if point == .beforeRelease { await cleanup.blockOnce() }
+        }
+        let finalization = AudioFinalizationCoordinator(worker: worker)
+        await finalization.enqueue(.init(location: f.location))
+        await export.waitEntered()
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+            finalization: finalization, catalog: FinalizationCatalog())
+        let joined = expectation(description: "power-off cleanup joined")
+        let lifecycle = AppLifecycleCoordinator(recording: LifecycleRecordingStub(), finalization: finalization, recovery: recovery,
+            activity: LifecycleActivitySpy(), termination: LifecycleTerminationSpy(), onWakeJoining: { _ in joined.fulfill() })
+        let stream = await finalization.snapshots()
+        let cancelled = expectation(description: "power-off cancellation")
+        let observe = Task {
+            for await states in stream { if states.first?.phase == .cancelling { cancelled.fulfill(); break } }
+        }
+        await lifecycle.handlePowerEvent(.willPowerOff)
+        let wake = Task { await lifecycle.handlePowerEvent(.didWake) }
+        await fulfillment(of: [cancelled, joined], timeout: 3)
+        await export.open(); await cleanup.waitEntered()
+        let snapshot = await recovery.currentSnapshot()
+        XCTAssertEqual(snapshot.phase, .cancelled)
+        XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), source)
+        let checkpoint = try await f.repository.readFinalizationCheckpoint(at: f.location)
+        XCTAssertEqual(checkpoint.completedSteps, [.workingAudioSecured])
+        await cleanup.open(); await observe.value; await wake.value
+        await recovery.waitForCurrentPassSettlement()
+        // Relaunch-style fresh T08/T09 owners use retained durable evidence.
+        let freshFinalization = AudioFinalizationCoordinator(worker: f.worker())
+        let freshRecovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: f.roots), persistence: f.repository,
+            finalization: freshFinalization, catalog: FinalizationCatalog())
+        await freshRecovery.start(); await freshRecovery.waitForCurrentPassSettlement()
+        let recovered = await freshFinalization.currentSnapshot(at: f.location)
+        XCTAssertNil(recovered?.result?.failure); XCTAssertNotNil(recovered?.result?.media)
+        XCTAssertEqual(recovered?.location, f.location)
+        XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), source)
+        let scopes = await f.bookmarks.counts()
+        XCTAssertEqual(scopes[0], scopes[1])
+    }
+}
+
+extension AudioFinalizationTests {
+    @MainActor
+    func testLifecycleCancellationCleanupFailureDeniesReplyAndPreservesWarningAndBytes() async throws {
+        let f = try await FinalizationFixture.make()
+        defer { f.clean() }
+        let original = try Data(contentsOf: f.url(FinalizationFileAccess.source))
+        let gate = FinalizationGate()
+        var worker = f.worker()
+        worker.hook = { point in
+            if point == .beforeExport { await gate.blockOnce() }
+            if point == .beforeRelease { throw AudioFinalizationCode.persistence }
+        }
+        let finalization = AudioFinalizationCoordinator(worker: worker)
+        await finalization.enqueue(.init(location: f.location))
+        await gate.waitEntered()
+        let states = await finalization.snapshots()
+        let cancelled = expectation(description: "cancel before export")
+        let observer = Task {
+            for await values in states { if values.first?.phase == .cancelling { cancelled.fulfill(); break } }
+        }
+        let replies = LifecycleTerminationReplySpy()
+        let delegate = MacLifecycleDelegate(activity: LifecycleActivitySpy(), automaticTermination: LifecycleTerminationSpy(),
+            presenter: LifecycleQuitPresenterSpy(), terminationReply: replies, windowClassifier: LifecycleWindowClassifierSpy())
+        delegate.configure(recording: LifecycleRecordingStub(), finalization: finalization, recovery: LifecycleRecoveryStub())
+        XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        await fulfillment(of: [cancelled], timeout: 3)
+        await gate.open(); await observer.value; await delegate.waitForPendingTermination()
+        let result = await finalization.waitForResult(at: f.location)
+        XCTAssertEqual(result?.failure, .cancelled)
+        XCTAssertEqual(result?.warnings.filter { $0.hasPrefix("cleanup.") }, ["cleanup.persistence"])
+        XCTAssertEqual(replies.values, [false])
+        XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), original)
+        let scopes = await f.bookmarks.counts()
+        XCTAssertEqual(scopes[0], scopes[1])
+    }
+}
+
+extension AudioFinalizationTests {
+    func testAutomaticExitRejectsUnobservedProductionFailure() async throws {
+        let f = try await FinalizationFixture.make()
+        defer { f.clean() }
+        let authority = LifecycleWorkAuthority()
+        var worker = f.worker()
+        worker.hook = { if $0 == .beforeSecuredCheckpoint { throw AudioFinalizationCode.persistence } }
+        let finalization = AudioFinalizationCoordinator(worker: worker, authority: authority)
+        let gateway = LifecycleTerminationSpy()
+        let lifecycle = AppLifecycleCoordinator(recording: LifecycleRecordingStub(), finalization: finalization,
+            recovery: LifecycleRecoveryStub(), activity: LifecycleActivitySpy(), termination: gateway, authority: authority)
+        let initial = await lifecycle.terminationDecision()
+        XCTAssertEqual(initial, .terminateNow)
+        // Deliberately no observation subscription: the producer completes a
+        // new failed operation before its notification can reach lifecycle.
+        let result = await finalization.finalize(.init(location: f.location))
+        XCTAssertEqual(result.failure, .persistence); XCTAssertFalse(authority.state().active)
+        await lifecycle.userWindowCountChanged(0)
+        let exits = await gateway.count(), snapshot = await lifecycle.currentSnapshot()
+        XCTAssertEqual(exits, 0); XCTAssertTrue(snapshot.requiresUserAttention)
     }
 }

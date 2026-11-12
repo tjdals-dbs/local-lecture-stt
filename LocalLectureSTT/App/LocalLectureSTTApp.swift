@@ -2,37 +2,31 @@ import SwiftUI
 
 @main
 struct LocalLectureSTTApp: App {
+    @NSApplicationDelegateAdaptor(MacLifecycleDelegate.self) private var lifecycleDelegate
     @StateObject private var storageRoots: StorageRootViewModel
     @StateObject private var catalogStartup: CatalogStartupCoordinator
     @StateObject private var recording: RecordingSessionViewModel
 
     init() {
         let roots = StorageRootManager.live()
-        let catalog: any SessionCataloging
-        do {
-            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: support)
-            catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: store)
-        } catch let error as CatalogError {
-            catalog = UnavailableSessionCatalog(error: error.code)
-        } catch {
-            catalog = UnavailableSessionCatalog(error: .openFailed)
-        }
+        let catalog = Self.makeCatalog(roots: roots)
         let repository = FileSessionRepository(roots: roots)
         let activity = SessionActivityRegistry()
+        let processActivity = ProcessInfoLifecycleActivityAdapter()
+        let authority = LifecycleWorkAuthority(activity: { processActivity.update($0) })
         let permission = AVFoundationMicrophonePermissionAuthorizer()
         let capture = MicrophoneCaptureController(
             permission: permission,
             driver: AVAudioEngineMicrophoneDriver(),
             monitor: InputSignalMonitor()
         )
-        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: roots, catalog: catalog))
+        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: roots, catalog: catalog), authority: authority)
         let recovery = SessionRecoveryCoordinator(
             scanner: SessionFileScanner(roots: roots),
             persistence: repository,
             finalization: finalization,
             catalog: catalog,
-            activity: activity
+            activity: activity, authority: authority
         )
         let coordinator = CatalogStartupCoordinator(catalog: catalog, recovery: recovery)
         let recordingCoordinator = RecordingSessionCoordinator(
@@ -46,10 +40,10 @@ struct LocalLectureSTTApp: App {
                 appVersion: Self.appVersion,
                 osVersion: ProcessInfo.processInfo.operatingSystemVersionString
             ),
-            activity: activity
+            activity: activity, authority: authority
         )
         let lifetime = RecordingFinalizationCoordinator(recording: recordingCoordinator, finalization: finalization,
-                                                        startupRecovery: recovery, activity: activity)
+                                                        startupRecovery: recovery, activity: activity, authority: authority)
         _catalogStartup = StateObject(wrappedValue: coordinator)
         _recording = StateObject(wrappedValue: RecordingSessionViewModel(coordinator: lifetime, finalization: finalization))
         _storageRoots = StateObject(wrappedValue: StorageRootViewModel(
@@ -57,6 +51,7 @@ struct LocalLectureSTTApp: App {
             directorySelector: OpenPanelDirectorySelector(),
             onRootChanged: { coordinator.refreshAfterRootChange() }
         ))
+        lifecycleDelegate.configure(recording: lifetime, finalization: finalization, recovery: recovery, authority: authority)
     }
 
     var body: some Scene {
@@ -67,6 +62,16 @@ struct LocalLectureSTTApp: App {
 
         Settings {
             SettingsView(storageRoots: storageRoots)
+        }
+    }
+
+    static func makeCatalog(roots: StorageRootManager,
+                            directory: @escaping @Sendable () -> URL = {
+                                FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                            }) -> DeferredSessionCatalog {
+        DeferredSessionCatalog {
+            let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: directory())
+            return SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: store)
         }
     }
 

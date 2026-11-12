@@ -4,6 +4,59 @@ import XCTest
 @testable import LocalLectureSTT
 
 final class RecordingSessionFileIntegrationTests: XCTestCase {
+    /// T10 B06: this deliberately crosses the production root, repository,
+    /// capture, recorder and catalog path.  It proves the sleep path keeps a
+    /// readable MOV and does not accidentally submit normal finalization.
+    func testT10SleepInterruptionRetainsReadableRecoveryMOVWithoutDerivedPlaceholders() async throws {
+        let fixture = try RecordingFileIntegrationFixture()
+        defer { fixture.cleanup() }
+        let roots = StorageRootManager(applicationSupportDirectory: fixture.applicationSupport, bookmarkCodec: fixture.bookmarks)
+        let rootSummary = try await roots.registerSelectedDirectory(fixture.root)
+        let permission = AuthorizedIntegrationPermission()
+        let capture = MicrophoneCaptureController(
+            permission: permission,
+            driver: SyntheticIntegrationCaptureDriver(chunkCount: 48, framesPerChunk: 2_048),
+            buffers: CaptureBufferConfiguration(recordingCapacity: 64, speechCapacity: 4),
+            monitor: InputSignalMonitor(clock: FixedIntegrationMonotonicClock(), scheduler: NoopIntegrationSignalScheduler())
+        )
+        let repository = FileSessionRepository(roots: roots)
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: fixture.applicationSupport)
+        let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: store)
+        let coordinator = RecordingSessionCoordinator(
+            roots: roots, permission: permission, capture: capture,
+            recorders: ClosureAudioRecorderFactory { AVFoundationAudioRecorder(roots: roots) },
+            repository: repository, catalog: catalog,
+            environment: RecordingSessionEnvironment(appVersion: "T10-integration", osVersion: "synthetic")
+        )
+
+        let started = try await coordinator.start(.init(title: "sleep interruption", timeZone: .gmt))
+        XCTAssertEqual(started.phase, .recording)
+        let result = await coordinator.interrupt(.systemSleep)
+        guard case let .interrupted(failure) = result else { return XCTFail("expected interrupted sleep result, got \(result)") }
+        XCTAssertEqual(failure, .interrupted(.systemSleep))
+        let sessionID = try XCTUnwrap(started.sessionID)
+        let folderURL = try XCTUnwrap(try FileManager.default.contentsOfDirectory(at: fixture.root,
+            includingPropertiesForKeys: [.isDirectoryKey]).first(where: { $0.hasDirectoryPath }))
+        let folder = try SessionFolderName(validating: folderURL.lastPathComponent)
+        let session = SessionLocation(rootID: rootSummary.id, sessionID: sessionID, folderName: folder)
+        let recoveryURL = folderURL.appendingPathComponent(SessionArtifact.recoveryAudio.relativePath)
+        let decoded = try await decodeIntegrationAsset(at: recoveryURL)
+        XCTAssertGreaterThan(decoded.sampleBufferCount, 0)
+        XCTAssertGreaterThan(decoded.decodedBytes, 0)
+        XCTAssertGreaterThan(decoded.durationSeconds, 0)
+
+        let metadata = try await repository.readMetadata(at: session)
+        XCTAssertEqual(metadata.status, .interrupted)
+        XCTAssertEqual(metadata.captureOutcome, .interrupted)
+        let events = try decodeIntegrationEvents(at: folderURL.appendingPathComponent(SessionArtifact.events.relativePath))
+        XCTAssertEqual(events.filter { $0.kind == .systemSleep }.count, 1)
+        XCTAssertEqual(events.filter { $0.kind == .recordingEnded }.count, 1)
+        for artifact in [SessionArtifact.finalAudio, .transcript, .transcriptText, .transcriptMarkdown, .transcriptJournal] {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: folderURL.appendingPathComponent(artifact.relativePath).path))
+        }
+        try await store.close()
+    }
+
     func testT09RecoversPreFinishMultiMoofSnapshotWithFreshServices() async throws {
         let fixture = try RecordingFileIntegrationFixture()
         defer { fixture.cleanup() }
@@ -703,4 +756,73 @@ private actor AppFinalizationGate {
         if !entered { await withCheckedContinuation { entryWaiters.append($0) } }
     }
     func open() { openState = true; blocked?.resume(); blocked = nil }
+}
+
+extension RecordingSessionFileIntegrationTests {
+    func testT10RequiredTerminalMetadataFaultRetainsDecodableAudioAndDeniesQuit() async throws {
+        let fixture = try RecordingFileIntegrationFixture()
+        defer { fixture.cleanup() }
+        let roots = StorageRootManager(applicationSupportDirectory: fixture.applicationSupport, bookmarkCodec: fixture.bookmarks)
+        let root = try await roots.registerSelectedDirectory(fixture.root)
+        let fault = TerminalMetadataFault()
+        let repository = FileSessionRepository(roots: roots, atomicWriter: AtomicFileWriter(fault: { try fault.check($0) }))
+        let permission = AuthorizedIntegrationPermission()
+        let capture = MicrophoneCaptureController(permission: permission,
+            driver: SyntheticIntegrationCaptureDriver(chunkCount: 48, framesPerChunk: 2048),
+            buffers: CaptureBufferConfiguration(recordingCapacity: 64, speechCapacity: 4),
+            monitor: InputSignalMonitor(clock: FixedIntegrationMonotonicClock(), scheduler: NoopIntegrationSignalScheduler()))
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: fixture.applicationSupport)
+        let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: store)
+        let recording = RecordingSessionCoordinator(roots: roots, permission: permission, capture: capture,
+            recorders: ClosureAudioRecorderFactory { AVFoundationAudioRecorder(roots: roots) }, repository: repository,
+            catalog: catalog, environment: .init(appVersion: "T10-fault", osVersion: "synthetic"))
+        let started = try await recording.start(.init(title: "durability fault", timeZone: .gmt))
+        fault.arm() // target terminal metadata explicitly, independent of start write ordinals
+        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: roots, catalog: catalog))
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: repository,
+            finalization: finalization, catalog: catalog)
+        let lifecycle = AppLifecycleCoordinator(recording: recording, finalization: finalization, recovery: recovery,
+            activity: FileIntegrationActivity(), termination: FileIntegrationTermination())
+        let allowed = await lifecycle.resolveTermination(.essentialSaveAndQuit)
+        XCTAssertFalse(allowed); XCTAssertEqual(fault.deliveries(), 1)
+        let evidence = await recording.essentialSaveEvidence()
+        XCTAssertEqual(evidence?.firstFailure, .persistence(.atomicRenameFailed))
+        XCTAssertEqual(evidence?.cleanupSettled, true); XCTAssertEqual(evidence?.requiresUserAttention, true)
+        let directory = try XCTUnwrap(try FileManager.default.contentsOfDirectory(at: fixture.root,
+            includingPropertiesForKeys: [.isDirectoryKey]).first(where: { $0.hasDirectoryPath }))
+        let location = SessionLocation(rootID: root.id, sessionID: try XCTUnwrap(started.sessionID),
+            folderName: try SessionFolderName(validating: directory.lastPathComponent))
+        let metadata = try await repository.readMetadata(at: location)
+        XCTAssertEqual(metadata.sessionId, started.sessionID)
+        XCTAssertEqual(metadata.status, .recording)
+        let decoded = try await decodeIntegrationAsset(at: directory.appendingPathComponent(SessionArtifact.recoveryAudio.relativePath))
+        XCTAssertGreaterThan(decoded.decodedBytes, 0); XCTAssertGreaterThan(decoded.sampleBufferCount, 0)
+        let events = try decodeIntegrationEvents(at: directory.appendingPathComponent(SessionArtifact.events.relativePath))
+        XCTAssertEqual(events.filter { $0.kind == .recordingEnded }.count, 1)
+        XCTAssertTrue(events.allSatisfy { $0.sessionId == started.sessionID })
+        for artifact in [SessionArtifact.finalAudio, .transcript, .transcriptText, .transcriptMarkdown] {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(artifact.relativePath).path))
+        }
+        let scopes = await fixture.bookmarks.counts()
+        XCTAssertEqual(scopes.start, scopes.stop)
+        try await store.close()
+    }
+}
+
+private final class TerminalMetadataFault: @unchecked Sendable {
+    private let lock = NSLock()
+    private var armed = false, count = 0
+    func arm() { lock.withLock { armed = true } }
+    func deliveries() -> Int { lock.withLock { count } }
+    func check(_ point: AtomicWriteStep) throws {
+        try lock.withLock {
+            if armed && point == .beforeRename { armed = false; count += 1; throw StorageError(.atomicRenameFailed) }
+        }
+    }
+}
+private actor FileIntegrationActivity: LifecycleActivityControlling {
+    func setRelevantWorkActive(_ active: Bool) {}
+}
+private actor FileIntegrationTermination: LifecycleTerminationRequesting {
+    func requestAutomaticTermination(isStillValid: @escaping @Sendable () async -> Bool) -> Bool { false }
 }
