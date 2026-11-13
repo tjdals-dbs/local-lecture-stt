@@ -153,16 +153,28 @@ struct ModelPackageDescriptor: Codable, Sendable, Equatable {
 struct BundledModelCatalog: Codable, Sendable, Equatable {
     let schemaVersion: Int
     let entries: [ModelPackageDescriptor]
-    init(schemaVersion: Int = 1, entries: [ModelPackageDescriptor]) throws {
+    /// Optional v1 extension; excluded from installed identities and manifests.
+    let deliveries: [ModelDelivery]
+    init(schemaVersion: Int = 1, entries: [ModelPackageDescriptor], deliveries: [ModelDelivery] = []) throws {
         guard schemaVersion == 1 else { throw ModelRepositoryCode.unsupportedSchema }
         guard entries.count <= 4096, Set(entries.map(\.key)).count == entries.count else { throw ModelRepositoryCode.invalidDescriptor }
-        self.schemaVersion = schemaVersion; self.entries = entries
+        guard deliveries.count <= entries.count, Set(deliveries.map(\.key)).count == deliveries.count else {
+            throw ModelRepositoryCode.invalidDescriptor
+        }
+        for delivery in deliveries {
+            guard let descriptor = entries.first(where: { $0.key == delivery.key }),
+                  delivery.locations.map(\.path).sorted() == descriptor.files.map(\.path).sorted() else {
+                throw ModelRepositoryCode.invalidDescriptor
+            }
+        }
+        self.schemaVersion = schemaVersion; self.entries = entries; self.deliveries = deliveries
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let version = try c.decode(Int.self, forKey: .schemaVersion)
         guard version == 1 else { throw ModelRepositoryCode.unsupportedSchema }
-        try self.init(schemaVersion: version, entries: c.decode([ModelPackageDescriptor].self, forKey: .entries))
+        try self.init(schemaVersion: version, entries: c.decode([ModelPackageDescriptor].self, forKey: .entries),
+                      deliveries: c.decodeIfPresent([ModelDelivery].self, forKey: .deliveries) ?? [])
     }
 }
 

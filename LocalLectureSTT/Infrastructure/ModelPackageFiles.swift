@@ -2,7 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 
-struct ModelFileStamp: Equatable, Sendable {
+struct ModelFileStamp: Codable, Equatable, Sendable {
     let device: Int32
     let inode: UInt64
     let size: Int64
