@@ -231,11 +231,18 @@ final class MicrophoneCaptureTests: XCTestCase {
         let handle = try await controller.start()
         await driver.emitRuntime(.activeDeviceDisconnected)
         await driver.emitRuntime(.inputRouteChanged)
-        for _ in 0 ..< 20 where await controller.currentLifecycle() == .running { await Task.yield() }
-        let lifecycle = await controller.currentLifecycle()
         let events = await collect(handle.events)
+        let terminalCodes = events.compactMap { event -> CaptureErrorCode? in
+            if case let .terminalFailure(code) = event { return code }
+            return nil
+        }
+        let code = try XCTUnwrap(terminalCodes.first)
+        XCTAssertEqual(terminalCodes.count, 1)
+        // Stream completion precedes driver cleanup. Wait for .failed, not merely departure from .running.
+        await waitForLifecycle(controller, .failed(code))
+        let lifecycle = await controller.currentLifecycle()
         let counts = await driver.counts
-        guard case let .failed(code) = lifecycle else { return XCTFail("Expected a terminal device error") }
+        XCTAssertEqual(lifecycle, .failed(code))
         XCTAssertTrue([.activeDeviceDisconnected, .inputRouteChanged].contains(code))
         XCTAssertTrue(events.contains(.terminalFailure(code)))
         XCTAssertEqual(counts.stop, 1)

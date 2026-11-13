@@ -1,26 +1,26 @@
 # Local Lecture STT Project Status
 
 - Status document version: 1.0
-- Last updated: 2026-11-12
+- Last updated: 2026-11-13
 - Specification baseline: `MVP_SPEC.md` 1.0, confirmed
-- Implementation plan: `IMPLEMENTATION_PLAN.md` 1.3
+- Implementation plan: `IMPLEMENTATION_PLAN.md` 1.4
 
 ## Current position
 
-- Current milestone: M1 safe recorder
-- Current Task: none in progress
-- Next action: G1 safe-recorder gate validation; await a separate gate prompt before T11/STT work
-- Latest completed Task: T10 app lifecycle (independently reviewed and separately authorized for dev integration)
+- Current milestone: M2 models and engines; M1/G1 hardware validation remains unverified
+- Current Task: none in progress; T11 integrated into dev after independent review and separate authorization
+- Next action: T12 model repository, manifest and import; await a separate implementation prompt
+- Latest completed Task: T11 STTEngine contracts and deterministic fake (through independently approved dev integration)
 - Latest passed gate: T01 initial runnable baseline
-- Application implementation: recording, app-owned final M4A generation, verification and resumable audio checkpoints, plus filesystem-authoritative startup/root-change session recovery, app-owned sleep/wake/window policy and safe essential-save termination; STT/transcript finalization remains unimplemented
+- Application implementation: recording, app-owned final M4A generation and recovery, app lifecycle policy, and framework-independent STTEngine contracts with a deterministic isolated fake. Actual model inference, live STT wiring and transcript finalization remain unimplemented.
 
 ## Repository state at this handoff
 
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
 - Local branch: `dev`
-- Approved T10 source: `68b9fa076de3a9ac01dbfc5e5e97ef85876a4f80`, independently reviewed against the original repair prompt and both follow-up regressions, then explicitly authorized for Phase 2 integration
-- `dev` branch: T10 is squash-integrated from the approved source onto `1001613c441bd91944a3f9f818cc99527bfcd204`; the final integration SHA and exact-head validation/CI linkage are recorded in the Phase 2 task handoff
+- Approved T11 source: `ad9888e2b67b49c89f22759dccfa1b8ce83843e3`, independently reviewed including the FIFO callback repair, then explicitly authorized for Phase 2 integration
+- `dev` branch: T11 is squash-integrated from the approved source onto `73b4a7adaa16a2ff97ff8affda04fe3b99573b0c`; the final integration SHA and committed-HEAD validation/CI linkage are recorded in the Phase 2 task handoff
 - `main` and `origin/main`: preserved at the verified T01 baseline `38e126f92ac823d29306ea8c1f7703f7060a5818`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -48,18 +48,19 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T08 final audio finalization pipeline | Complete on `dev` through separately authorized squash integration | Approved candidate: unsigned arm64 Debug build, 162 tests including 2-hour AAC, 11 related tests × 20 iterations (220 executions), and exact-task CI passed; independently confirmed by the coordinator. Integration-SHA validation is separate. |
 | T09 app-start session recovery | Complete on `dev` through separately authorized squash integration | Filesystem-authoritative startup/root-change discovery, interrupted recovery transitions, shared T08 finalization ownership, terminal canonical/source revalidation across await boundaries, catalog/UI refresh, and recoverable-file preservation. Exact integration validation is recorded in the Phase 2 handoff. |
 | T10 app lifecycle | Complete on `dev` through separately authorized squash integration | App-owned work admission/activity, sleep/power-off/wake settlement, close/reopen reservations, safe quit replies, required-save failure evidence, pending-discovery-start cancellation and rejected automatic-exit retry. Approved candidate: 264 tests and 8 × 20 repetitions passed; merged-dev validation is recorded below and in the exact-SHA Phase 2 handoff. |
+| T11 STTEngine contracts and deterministic fake | Complete on `dev` through independently reviewed, separately authorized squash integration | Framework-independent Codable/Sendable payloads, immutable model/session provenance, bounded FIFO/terminal ownership and acknowledged logical time. Approved source: 299 tests including 35 T11 selectors and exact-task CI passed. New integration-commit validation is recorded in the Phase 2 handoff. |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-T10 is integrated into `dev`. The canonical checklist is in section 9 of `IMPLEMENTATION_PLAN.md`. G1 remains pending and is the next step; no T11/STT implementation or `dev → main` promotion is authorized by this integration.
+T11 is integrated into `dev` after independent review and separate Phase 2 authorization on 2026-11-13. Only T11's completion checkbox is newly checked in section 9 of `IMPLEMENTATION_PLAN.md`. T12 is the next planned Task and requires a separate implementation prompt. G1 remains **Unverified**, not passed or waived; no `dev → main` promotion, release or later Task implementation is authorized.
 
 ## Gate status
 
 | Gate | Status | Promotion |
 | --- | --- | --- |
 | T01 initial runnable baseline | Passed | First `main` created from verified `dev` |
-| G1 safe recorder | Pending | `v0.1.0-alpha.1` |
+| G1 safe recorder | Unverified; manual validation deferred by user on 2026-11-13 | `v0.1.0-alpha.1` (not authorized) |
 | G2 engine and model selection | Pending | `v0.1.0-alpha.2` |
 | G3 feature complete | Pending | `v0.1.0-beta.1` |
 | G4 MVP complete | Pending | `v0.1.0` |
@@ -74,6 +75,7 @@ T10 is integrated into `dev`. The canonical checklist is in section 9 of `IMPLEM
 - After independent approval, this coordinator sends a separate integration prompt to that same session; only then may it update completion status, squash merge into `dev`, verify/push `dev`, and delete the task branch.
 - A new implementation session starts for the next Task.
 - G1~G4 should use a fresh validation session when practical.
+- User decision, 2026-11-13: G1's unverified hardware checks do not block the assigned T11 contract/fake-engine work. Keep G1 unverified and preserve automated recorder/lifecycle regressions. Diagnose later STT problems by comparing current-code recording without STT, isolated inference on the same audio, and combined operation; a G1 pass alone does not prove a defect belongs exclusively to STT.
 - New implementation sessions load `AGENTS.md`, this status file, their Task section, and only the relevant specification sections.
 - Conversations are not the source of project continuity; committed repository documents and Git state are.
 
@@ -81,6 +83,7 @@ T10 is integrated into `dev`. The canonical checklist is in section 9 of `IMPLEM
 
 - No current blocker.
 - The app is intentionally unsigned for local and CI verification; a developer signing identity is required only for separately installed signed builds.
+- G1 hardware/long-recording validation is deferred and remains an explicit verification gap, not a known passing result or a T11 blocker under the user's 2026-11-13 scheduling decision.
 
 ## T08 handoff
 
@@ -105,9 +108,19 @@ T10 is integrated into `dev`. The canonical checklist is in section 9 of `IMPLEM
 - One shared admission/activity authority owns recording preparation, securing, T08/T09 work and cleanup. Normal Stop is joined through the T08 handoff; sleep/quit interruption retains recoverable audio and actual durability evidence. Pending starts waiting for T09 discovery are invalidated before cancellation releases them; rejected automatic-exit dispatches release only their own reservation claim and safely re-evaluate.
 - Merged-dev validation on 2026-11-12: unsigned arm64 Debug build succeeded; **264 passed (254 unit + 10 integration), 0 failed, 0 skipped**, structurally verified in `/private/tmp/stt-t10-integration.27iLjC/MergedTree.xcresult`. Command: `xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /private/tmp/stt-t10-integration.27iLjC/DerivedData -resultBundlePath /private/tmp/stt-t10-integration.27iLjC/MergedTree.xcresult CODE_SIGNING_ALLOWED=NO build test`. Final committed-HEAD local verification (`CommittedHead.xcresult` in the same directory) and exact-head dev CI are reported in the Phase 2 task handoff; no self-referential SHA amendment is required.
 - [Acceptance and assertions](docs/T10_ACCEPTANCE.md), [architecture](docs/ARCHITECTURE.md#t10-app-lifetime-and-lifecycle-policy), and [development/manual procedures](docs/DEVELOPMENT.md#t10-lifecycle-verification) describe the implemented boundaries. STT/transcript generation and recovery-file deletion remain outside T10.
-- Physical microphone/TCC, signed sandbox/bookmark access, lid, real window/quit UX, logout, process kill and power loss remain Manual/Pending. G1 is not passed by this integration; `main` stays at the T01 baseline. Begin G1 validation before deciding whether T11 can start.
+- Physical microphone/TCC, signed sandbox/bookmark access, lid, real window/quit UX, logout, process kill and power loss remain Manual/Pending. G1 is not passed by this integration; `main` stays at the T01 baseline. The later user decision on 2026-11-13 authorizes T11 while leaving G1 unverified.
+
+## T11 handoff
+
+- Approved source: `ad9888e2b67b49c89f22759dccfa1b8ce83843e3`; starting dev/origin/dev: `73b4a7adaa16a2ff97ff8affda04fe3b99573b0c`. Latest dev was unchanged, so no integration-preparation commit or source conflict resolution was needed. [Separate Phase 2 authorization](prompts/T11_DEV_INTEGRATION.md) permits this squash integration, completion records and verified task-branch cleanup.
+- The approved candidate passed 299 tests (289 unit + 10 integration), including all 35 T11 selectors and four FIFO callback/drain regressions, plus [exact-source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/43349002465). These are source results, not a substitute for the committed dev result.
+- One immutable engine/model/language/options configuration owns each session. Owned audio and response payloads are Codable/Sendable; hypotheses use session-relative media time and one terminal per accepted request. All admissions enter one bounded FIFO; accepted early final/failed callbacks promote its head and settle waiting end operations through the same nonrecursive driver. [Acceptance](docs/T11_ACCEPTANCE.md) and [architecture](docs/ARCHITECTURE.md#t11-engine-contracts-and-deterministic-fake) contain the assertions and implemented boundaries.
+- Integration verification runs on the actual committed dev HEAD with `xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /private/tmp/stt-t11-integration.0PZz4D/DerivedData -resultBundlePath /private/tmp/stt-t11-integration.0PZz4D/CommittedHead.xcresult -test-timeouts-enabled YES -default-test-execution-time-allowance 60 CODE_SIGNING_ALLOWED=NO build test`. The Phase 2 final handoff records its actual target/T11 pass/fail/skip counts, integration SHA, exact-head dev CI and cleanup outcome; those checks are required before push/cleanup. No self-referential SHA amendment is required.
+- G1 hardware/long-recording, physical microphone/TCC, signed Sandbox/bookmark, lid, process-kill and power-loss checks remain Manual/Unverified. Actual model inference, model installation, live capture/STT integration and transcript finalization are not implemented. T12 awaits a new prompt; main stays at the T01 baseline and no release tag is authorized.
 
 ## Status update rules
+
+Coordinator-recorded user decisions about scheduling or gates may be documented before implementation. The 2026-11-13 G1 deferral is such a planning update, not a T11 completion claim. A T11 implementation session may carry and commit this pre-existing decision text unchanged, as explicitly authorized in its prompt, but may not mark T11 complete or modify the completion checklist in Phase 1.
 
 Only after independent review approval, when a Task is successfully integrated into `dev`, update this file with:
 

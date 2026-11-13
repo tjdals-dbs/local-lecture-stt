@@ -1,0 +1,42 @@
+diff --git a/LocalLectureSTTTests/FakeSTTEngineTests.swift b/LocalLectureSTTTests/FakeSTTEngineTests.swift
+index 515eea9..0e10a71 100644
+--- a/LocalLectureSTTTests/FakeSTTEngineTests.swift
++++ b/LocalLectureSTTTests/FakeSTTEngineTests.swift
+@@ -31,6 +31,37 @@ final class FakeSTTEngineTests: XCTestCase {
+         return fake
+     }
+ 
++    func testIndependentEarlyCallbackCannotLetNewAdmissionOvertakeQueuedWork() async throws {
++        let fake = try makeFake(.init(requests: [
++            STTTestFixture.final("first", at: 100),
++            STTTestFixture.final("queued second", at: 10),
++            STTTestFixture.final("new third", at: 10)
++        ]))
++        try await STTTestFixture.ready(fake)
++        let firstRequest = try STTTestFixture.request(0)
++        let first = try await fake.infer(firstRequest)
++        let second = try await fake.infer(STTTestFixture.request(1))
++        let captured = await fake.callbackLease()
++        let lease = try XCTUnwrap(captured)
++        let early = try STTResponse(context: firstRequest.context, revision: 1, kind: .final)
++        let accepted = await fake.deliver(early, lease: lease)
++        XCTAssertTrue(accepted)
++        XCTAssertEqual(first.observation().terminals, 1)
++        let third = try await fake.infer(STTTestFixture.request(2))
++        let afterAdmission = await fake.snapshot()
++        try await fake.advance(by: 10)
++        let secondAtTen = second.observation().latest
++        let thirdAtTen = third.observation().latest
++        try await fake.advance(by: 10)
++        try await fake.end()
++        await settled(fake)
++        XCTAssertEqual(afterAdmission.activeSequence, 1, "Previously queued work must remain first")
++        XCTAssertEqual(afterAdmission.queuedSequences, [2])
++        XCTAssertEqual(secondAtTen?.kind, .final)
++        XCTAssertEqual(secondAtTen?.segments.first?.text, "queued second")
++        XCTAssertNil(thirdAtTen, "New admission must not overtake already accepted FIFO work")
++    }
++
+     func testConstructionAndProtocolLifecycleRejectUnpreparedAndDuplicateOperations() async throws {
+         let fake = try makeFake()
+         let engine: any STTEngine = fake

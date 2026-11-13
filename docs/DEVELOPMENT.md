@@ -259,3 +259,37 @@ Manual checks remain pending. Use a locally signed app and a new empty disposabl
 4. During recording use Cmd-Q → 계속 사용; confirm continued capture and unchanged metadata/events. Use Cmd-Q → 필수 저장 후 종료; relaunch and inspect retained recovery, interrupted outcome and T09 resume.
 5. Close the lid during recording: interrupted outcome, readable MOV, no capture restart after wake. Repeat during securing/finalization and check checkpoint resume after cleanup.
 6. Exercise real logout/power-off/process kill and power loss only under a separately safe hardware procedure. Keep recoverable artifacts for inspection. Do not infer physical TCC/microphone, signed sandbox/bookmark behavior or power-loss durability from unsigned synthetic tests.
+
+## T11 engine contract and fake verification
+
+No new dependency, setup command, model file, network access or microphone permission is needed. Both new test files belong to the existing unit target and shared scheme. The fake is not wired into live composition or previews.
+
+A scenario supplies `loads`/`starts` preparation delays/failures and a FIFO `requests` array. Each request script contains `FakeSTTStep(after:kind:text:detectedLanguage:failure:)`; `after` is logical milliseconds since **processing start**. Construct a synthetic model/session/request, use the instance through `any STTEngine`, load/start/infer, and advance the concrete fake with `advance(by:)`. The returned feed's `events()` may be claimed once. Read partials as replacement snapshots; the final/failed/cancelled value finishes that request. Use `withdraw()` for explicit cancellation and await cleanup. Nonzero delays require explicit clock advances, including cancellation/unload cleanup. Before advancing held preparation/control tasks, await `waitUntil` for their registered phase or owned waiter count. `advance` itself acknowledges all due events; no `Task.yield` or polling is needed. Breaking a stream loop is not a request cancellation; cancelled `next()` or explicit withdrawal is.
+
+Reproducible focused and full commands (new result names each run):
+
+```sh
+t11_run=$(mktemp -d /private/tmp/stt-t11-validation.XXXXXX)
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath "$t11_run/DerivedData" -resultBundlePath "$t11_run/Focused.xcresult" \
+  -only-testing:LocalLectureSTTTests/STTEngineTests \
+  -only-testing:LocalLectureSTTTests/FakeSTTEngineTests \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 30 \
+  CODE_SIGNING_ALLOWED=NO test
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath "$t11_run/DerivedData" -resultBundlePath "$t11_run/Full.xcresult" \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
+  CODE_SIGNING_ALLOWED=NO build test
+xcrun xcresulttool get test-results summary --path "$t11_run/Full.xcresult" --compact
+xcrun xcresulttool get test-results tests --path "$t11_run/Full.xcresult" --compact
+```
+
+Tests use explicit synthetic IDs, audio arrays, barriers and logical time. Wall-clock sleep is restricted to the failure watchdog, which releases held work/probes using the same fake lifecycle; it is never a success/timing assertion. Exact execution paths, counts and requirement assertions are in [T11 acceptance](T11_ACCEPTANCE.md). Physical G1 remains Unverified under the user's scheduling decision; it is not a T11 submission prerequisite.
+
+The FIFO callback repair adds four tests to the same focused suite commands: the supplied `testIndependentEarlyCallbackCannotLetNewAdmissionOvertakeQueuedWork`, plus failed-terminal/activation-origin, waiting-end and equal-deadline worker coverage. Accepted `deliver` callbacks acknowledge FIFO progression and drain settlement immediately; no artificial zero-time advance is needed. Exact selectors, the before-fix failure and current execution evidence are in [FIFO callback repair](T11_ACCEPTANCE.md#fifo-callback-repair).
+
+T11 re-review adds regression selectors `FakeSTTEngineTests/testDisabledPartialsStillDetectLanguageAndDeliverTheFinalSnapshot` and `FakeSTTEngineTests/testLogicalClockNearInt64LimitStillSettlesCancellationAndUnload`, plus four coverage tests for rejected clock-budget admissions and language validation. The same focused commands above include all of them; no project or scheme changes are needed. A disabled partial still performs scripted language detection at its logical deadline and only suppresses publication. At Int64's clock boundary, new work must fit its full FIFO/cleanup horizon; cleanup itself remains settleable at the last tick. The real-clock watchdog is joined during teardown. Re-review execution evidence and commands are appended to [T11 acceptance](T11_ACCEPTANCE.md#re-review-and-same-task-repair).
+
+The re-review's first full execution exposed a pre-existing capture test snapshot race. Only `MicrophoneCaptureTests/testDeviceDisconnectRouteChangeAndLateEventsAreTerminalOnce` changes: after terminal events it waits for the exact failed lifecycle using the existing test helper, then checks the fresh state, one stop and ignored late event. Capture production is unchanged. The case passed 20 repetitions after repair; run it with the same Xcode settings plus `-only-testing:LocalLectureSTTTests/MicrophoneCaptureTests/testDeviceDisconnectRouteChangeAndLateEventsAreTerminalOnce -test-iterations 20`. This legacy case's bounded polling helper is separate from the fake's explicit logical-clock timing.
