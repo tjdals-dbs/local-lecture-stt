@@ -8,19 +8,19 @@
 ## Current position
 
 - Current milestone: M2 models and engines; M1/G1 hardware validation remains unverified
-- Current Task: none in progress; T11 integrated into dev after independent review and separate authorization
-- Next action: T12 model repository, manifest and import; await a separate implementation prompt
-- Latest completed Task: T11 STTEngine contracts and deterministic fake (through independently approved dev integration)
+- Current Task: none in progress; T12 squash-integrated into dev after user-accepted review and separate integration authorization
+- Next action: T13 remains the next planned Task; await a separate implementation prompt
+- Latest completed Task: T12 model repository, manifests and local import (through separately authorized dev integration)
 - Latest passed gate: T01 initial runnable baseline
-- Application implementation: recording, app-owned final M4A generation and recovery, app lifecycle policy, and framework-independent STTEngine contracts with a deterministic isolated fake. Actual model inference, live STT wiring and transcript finalization remain unimplemented.
+- Application implementation: recording, app-owned final M4A generation and recovery, lifecycle policy, framework-independent STTEngine contracts/fake, and an offline model repository with manifests, verified local import and confirmed deletion. Real model format recognizers/inference, live STT wiring and transcript finalization remain unimplemented.
 
 ## Repository state at this handoff
 
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
 - Local branch: `dev`
-- Approved T11 source: `ad9888e2b67b49c89f22759dccfa1b8ce83843e3`, independently reviewed including the FIFO callback repair, then explicitly authorized for Phase 2 integration
-- `dev` branch: T11 is squash-integrated from the approved source onto `73b4a7adaa16a2ff97ff8affda04fe3b99573b0c`; the final integration SHA and committed-HEAD validation/CI linkage are recorded in the Phase 2 task handoff
+- Approved T12 source: `4beac0c5ccd2ba8f067de6629dbc8b72e9bed2f7`, including all three repository review repairs; the user accepted re-review and explicitly authorized Phase 2 integration on 2026-11-13
+- `dev` branch: T12 is squash-integrated from the approved source onto `c9f03f4ead5956cecfa50870ddd6ad87a443d622`; final integration SHA, committed-HEAD validation and exact-head CI linkage are recorded in the Phase 2 task handoff
 - `main` and `origin/main`: preserved at the verified T01 baseline `38e126f92ac823d29306ea8c1f7703f7060a5818`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -49,11 +49,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T09 app-start session recovery | Complete on `dev` through separately authorized squash integration | Filesystem-authoritative startup/root-change discovery, interrupted recovery transitions, shared T08 finalization ownership, terminal canonical/source revalidation across await boundaries, catalog/UI refresh, and recoverable-file preservation. Exact integration validation is recorded in the Phase 2 handoff. |
 | T10 app lifecycle | Complete on `dev` through separately authorized squash integration | App-owned work admission/activity, sleep/power-off/wake settlement, close/reopen reservations, safe quit replies, required-save failure evidence, pending-discovery-start cancellation and rejected automatic-exit retry. Approved candidate: 264 tests and 8 × 20 repetitions passed; merged-dev validation is recorded below and in the exact-SHA Phase 2 handoff. |
 | T11 STTEngine contracts and deterministic fake | Complete on `dev` through independently reviewed, separately authorized squash integration | Framework-independent Codable/Sendable payloads, immutable model/session provenance, bounded FIFO/terminal ownership and acknowledged logical time. Approved source: 299 tests including 35 T11 selectors and exact-task CI passed. New integration-commit validation is recorded in the Phase 2 handoff. |
+| T12 model repository, manifests and local import | Complete on dev through user-accepted review and separately authorized squash integration | Value-only schema/provenance, offline inventory and format-validation policy, pinned/no-clobber verified import, exact-once scopes, session-reference assessment and confirmed deletion. Approved source/re-review: 332 tests (322 unit + 10 integration), including 33 T12 and 35 T11 selectors; exact-source CI passed. New dev commit verification is recorded in the Phase 2 handoff. |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-T11 is integrated into `dev` after independent review and separate Phase 2 authorization on 2026-11-13. Only T11's completion checkbox is newly checked in section 9 of `IMPLEMENTATION_PLAN.md`. T12 is the next planned Task and requires a separate implementation prompt. G1 remains **Unverified**, not passed or waived; no `dev → main` promotion, release or later Task implementation is authorized.
+T12 is integrated into `dev` after review accepted by the user and separate Phase 2 authorization on 2026-11-13. Only T12's completion checkbox is newly checked in section 9 of `IMPLEMENTATION_PLAN.md`. T13 remains unstarted and requires a separate implementation prompt. G1 remains **Unverified**, not passed or waived; no `dev → main` promotion, release or later Task implementation is authorized.
 
 ## Gate status
 
@@ -117,6 +118,13 @@ T11 is integrated into `dev` after independent review and separate Phase 2 autho
 - One immutable engine/model/language/options configuration owns each session. Owned audio and response payloads are Codable/Sendable; hypotheses use session-relative media time and one terminal per accepted request. All admissions enter one bounded FIFO; accepted early final/failed callbacks promote its head and settle waiting end operations through the same nonrecursive driver. [Acceptance](docs/T11_ACCEPTANCE.md) and [architecture](docs/ARCHITECTURE.md#t11-engine-contracts-and-deterministic-fake) contain the assertions and implemented boundaries.
 - Integration verification runs on the actual committed dev HEAD with `xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /private/tmp/stt-t11-integration.0PZz4D/DerivedData -resultBundlePath /private/tmp/stt-t11-integration.0PZz4D/CommittedHead.xcresult -test-timeouts-enabled YES -default-test-execution-time-allowance 60 CODE_SIGNING_ALLOWED=NO build test`. The Phase 2 final handoff records its actual target/T11 pass/fail/skip counts, integration SHA, exact-head dev CI and cleanup outcome; those checks are required before push/cleanup. No self-referential SHA amendment is required.
 - G1 hardware/long-recording, physical microphone/TCC, signed Sandbox/bookmark, lid, process-kill and power-loss checks remain Manual/Unverified. Actual model inference, model installation, live capture/STT integration and transcript finalization are not implemented. T12 awaits a new prompt; main stays at the T01 baseline and no release tag is authorized.
+
+## T12 handoff
+
+- Approved source: `4beac0c5ccd2ba8f067de6629dbc8b72e9bed2f7`; starting/latest dev was unchanged at `c9f03f4ead5956cecfa50870ddd6ad87a443d622`. The user accepted the three-finding re-review and separately authorized local squash integration, status/checklist updates, verified dev push/CI and task-branch deletion on 2026-11-13. No task-branch preparation commit or conflict resolution was needed. [Exact-source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/43414298791) passed; re-review also executed 332 tests (322 unit + 10 integration), including all 33 T12 and 35 T11 selectors. These are source results, not a substitute for the dev commit's verification.
+- The repository uses a bundled empty production catalog, validated version-1 manifests, hashed engine/model/revision namespaces, bounded SHA-256 revalidation, pinned local-copy staging and no-clobber publication. Verification evidence survives the manifest-write await; idempotent imports revalidate after scope release; unknown schemas are classified before v1 layout parsing. Permanent deletion requires a current reference assessment and explicit acknowledgments. Session files remain authoritative and unchanged. The default format validator reports unavailable; no actual model inference or network/model UI is activated.
+- Committed dev verification runs with `xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /private/tmp/stt-t12-integration.QDPdUo/DerivedData -resultBundlePath /private/tmp/stt-t12-integration.QDPdUo/CommittedHead.xcresult -test-timeouts-enabled YES -default-test-execution-time-allowance 60 CODE_SIGNING_ALLOWED=NO build test`. The Phase 2 final handoff records actual target/T12 pass/fail/skip counts, integration SHA, exact-head dev CI and cleanup outcome. No amendment to insert the commit's own future SHA is required.
+- [T12 acceptance and review repairs](docs/T12_ACCEPTANCE.md#same-task-review-repair--three-findings), [architecture](docs/ARCHITECTURE.md#t12-offline-model-repository) and [development/manual checks](docs/DEVELOPMENT.md#t12-model-repository-verification) describe the implemented scope. Historical Phase 1 restrictions are superseded only by this separate integration authorization. Signed-Sandbox/source-scope checks remain manual; the earlier recorder-test scheduling-sensitive failure remains documented, with no recorder code/test changes. G1, main and T13 implementation are unchanged; no gate promotion or release is authorized.
 
 ## Status update rules
 

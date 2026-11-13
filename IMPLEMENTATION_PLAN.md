@@ -984,7 +984,7 @@ fix(transcript): prevent overlap duplication (T18)
 - [x] T09 시작 시 복구
 - [x] T10 앱 생명주기
 - [x] T11 STTEngine 계약과 fake
-- [ ] T12 모델 저장소와 가져오기
+- [x] T12 모델 저장소와 가져오기
 - [ ] T13 모델 다운로드와 설치
 - [ ] T14 WhisperKit 어댑터
 - [ ] T15 whisper.cpp 어댑터

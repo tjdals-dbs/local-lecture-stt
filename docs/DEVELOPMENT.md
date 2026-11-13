@@ -293,3 +293,66 @@ The FIFO callback repair adds four tests to the same focused suite commands: the
 T11 re-review adds regression selectors `FakeSTTEngineTests/testDisabledPartialsStillDetectLanguageAndDeliverTheFinalSnapshot` and `FakeSTTEngineTests/testLogicalClockNearInt64LimitStillSettlesCancellationAndUnload`, plus four coverage tests for rejected clock-budget admissions and language validation. The same focused commands above include all of them; no project or scheme changes are needed. A disabled partial still performs scripted language detection at its logical deadline and only suppresses publication. At Int64's clock boundary, new work must fit its full FIFO/cleanup horizon; cleanup itself remains settleable at the last tick. The real-clock watchdog is joined during teardown. Re-review execution evidence and commands are appended to [T11 acceptance](T11_ACCEPTANCE.md#re-review-and-same-task-repair).
 
 The re-review's first full execution exposed a pre-existing capture test snapshot race. Only `MicrophoneCaptureTests/testDeviceDisconnectRouteChangeAndLateEventsAreTerminalOnce` changes: after terminal events it waits for the exact failed lifecycle using the existing test helper, then checks the fresh state, one stop and ignored late event. Capture production is unchanged. The case passed 20 repetitions after repair; run it with the same Xcode settings plus `-only-testing:LocalLectureSTTTests/MicrophoneCaptureTests/testDeviceDisconnectRouteChangeAndLateEventsAreTerminalOnce -test-iterations 20`. This legacy case's bounded polling helper is separate from the fake's explicit logical-clock timing.
+
+## T12 model repository verification
+
+T12 uses only generated tiny payloads, disposable roots and injected scope/format/reference adapters. No real model weights, user Application Support, lecture recordings, runtime catalogs or bookmarks belong in fixtures. Construction is inert; tests explicitly invoke repository/catalog operations. Test-format validation recognizes a generated header, while the live default reports unavailable validation.
+
+Baseline executed before implementation: unsigned Debug arm64 build/test, **299 passed, 0 failed, 0 skipped** (289 unit + 10 integration). Result: `/private/tmp/stt-t12-baseline.8nwMTV/Baseline.xcresult`; log: `build.log` in that directory.
+
+Focused command (choose a fresh result path on each run):
+
+```sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/stt-t12-work/DerivedData \
+  -resultBundlePath /private/tmp/stt-t12-targeted-final.xcresult \
+  -only-testing:LocalLectureSTTTests/ModelRepositoryTests \
+  -only-testing:LocalLectureSTTTests/RecordingSessionCoordinatorTests/testSettlementWaitsForPriorPumpDrainAndObserverTerminationBeforeNewSessionStarts \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
+  CODE_SIGNING_ALLOWED=NO test
+```
+
+Race tests use acknowledged continuation gates. XCTest's bounded waiter is a failure watchdog, not ordering; no sleep, repeated-run quota, yield loop or polling drives correctness. Held filesystem mutation blocks release/join their worker on failure. Focused failures during development are retained in temporary logs/results; they are not passing evidence. The current verified focused/full counts and exact result paths are in [T12 acceptance](T12_ACCEPTANCE.md).
+
+Full command:
+
+```sh
+t12_run="$(mktemp -d /private/tmp/stt-t12-validation.XXXXXX)"
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath "$t12_run/DerivedData" \
+  -resultBundlePath "$t12_run/Full.xcresult" \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
+  CODE_SIGNING_ALLOWED=NO build test
+xcrun xcresulttool get test-results summary --path "$t12_run/Full.xcresult" --compact
+xcrun xcresulttool get test-results tests --path "$t12_run/Full.xcresult" --compact
+```
+
+Xcode testmanagerd and xcresult cache access require the normal permitted macOS execution path. Runner/cache failure or zero executions is not a pass. Existing warnings must be compared with the baseline; T12 must add no attributable compiler warnings.
+
+Manual signed-Sandbox procedure — Pending, not executed by T12:
+
+1. Build/install a separately authorized signed Sandbox app. A later model-management UI or a narrowly instrumented development harness may call the Infrastructure registration adapter for an explicitly selected test folder; there is no file panel/UI in T12.
+2. Prepare a generated package with explicit identity, revision, file hashes, lengths, format and redistributable license metadata. Inject its offline test recognizer; the default recognizer must keep an unrecognized package unvalidated.
+3. Select only that source, confirm start/stop balance on success, permission denial and cancellation, and confirm the live path resolves inside the container's Application Support/LocalLectureSTT/Models. Registration records selected directory identity; inability to inspect it must fail conservatively rather than accept a replacement.
+4. Remove/unmount the original source after success. Relaunch with no network and verify only the app-owned package. Check revision coexistence and explicit deletion assessment/acknowledgment, including an unavailable historical session root.
+5. Verify that session audio/transcripts/metadata remain unchanged and readable after model deletion. Inspect retained operation diagnostics for interrupted cleanup; never manually delete unknown directories as part of the automated procedure.
+
+Physical microphone/TCC, actual inference/model benchmark and G1 hardware checks are outside T12. G1 remains Unverified. The task branch is a Phase 1 candidate only; status/checklist updates, dev integration and the next Task require independent coordinator review and separate authorization.
+
+T12 same-Task review repair adds three formal selectors to `ModelRepositoryTests`: `testReviewPayloadMutationAfterVerificationMustNotPublishSuccess`, `testReviewIdempotentResultMustRevalidateAfterScopeRelease` and `testReviewFutureManifestSchemaMustBeReportedWithoutV1Fields`. All run through the existing production seams. The first two use acknowledged manifest-write/scope-release gates; the third verifies schema-first decode and preservation of unknown future layout. No legacy recorder test changes.
+
+Repair focused command, executed with the final source/test tree:
+
+```sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/stt-t12-work/DerivedData \
+  -resultBundlePath /private/tmp/stt-t12-repair-focused-final.xcresult \
+  -only-testing:LocalLectureSTTTests/ModelRepositoryTests \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
+  CODE_SIGNING_ALLOWED=NO test
+```
+
+Repair full runs use the full command above, with `-derivedDataPath /private/tmp/stt-t12-work/DerivedData` and a fresh `/private/tmp/stt-t12-repair-validation.XXXXXX/Full.xcresult`. Exact latest paths, actual execution counts and original failing diagnostic evidence are in the acceptance document's same-Task repair section. Executable fingerprints for the repair are `/private/tmp/stt-t12-repair-executable.sha256`; recheck them against the committed tree before push. The initial candidate's 329-test result is historical, not the repaired tree's final result.
