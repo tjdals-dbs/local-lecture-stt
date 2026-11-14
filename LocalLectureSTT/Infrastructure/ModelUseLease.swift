@@ -7,9 +7,15 @@ final class ModelUseLease: @unchecked Sendable {
     private let tree: [String]
     private let manifest: Data
     private let claim: ModelStoreClaim
-    init(directory: ModelPackageDirectory, descriptor: ModelPackageDescriptor, claim: ModelStoreClaim) throws {
+    init(directory: ModelPackageDirectory, descriptor: ModelPackageDescriptor, claim: ModelStoreClaim,
+         verifiedTree: [String], verifiedManifest: ModelInstallationManifest) throws {
         self.directory = directory; self.descriptor = descriptor; self.claim = claim
-        tree = try directory.treeStamps(); manifest = try directory.readMetadata("manifest.json")
+        tree = verifiedTree
+        manifest = try directory.readMetadata("manifest.json")
+        guard try JSONDecoder().decode(ModelInstallationManifest.self, from: manifest) == verifiedManifest else {
+            throw ModelRepositoryCode.identityChanged
+        }
+        try check()
     }
     func check() throws {
         guard claim.matches(claim.value) else { throw ModelRepositoryCode.identityChanged }

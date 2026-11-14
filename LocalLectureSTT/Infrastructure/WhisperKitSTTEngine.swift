@@ -14,21 +14,42 @@ struct WhisperDecodeSettings: Codable, Sendable, Equatable {
     let timestamps: Bool
     let promptText: String?
 }
-protocol WhisperKitBackend: Sendable {
+protocol WhisperIntervalBackend: Sendable {
     func load(_ lease: ModelUseLease) async throws
     func decode(_ audio: STTInferenceAudio, settings: WhisperDecodeSettings,
                 partial: @escaping @Sendable (WhisperSnapshot) async -> Void) async throws -> WhisperSnapshot
     func unload() async throws
     func loadTiming() async -> STTBenchmarkLoadTiming
 }
-extension WhisperKitBackend {
+extension WhisperIntervalBackend {
     func loadTiming() async -> STTBenchmarkLoadTiming { .init(prewarmSeconds: nil, modelSeconds: nil) }
 }
 
-actor WhisperKitSTTEngine: STTEngine {
-    static let revision = "1bbc57cb7fe6410248a685b1c5a3c6d56adc2ed4"
-    static let identity = try! EngineIdentity(id: EngineID("whisperkit"), version: revision)
+protocol WhisperAdapterProfile: Sendable {
+    static var identity: EngineIdentity { get }
+    static var compute: String { get }
+    static var format: String { get }
+    static func makeBackend() -> any WhisperIntervalBackend
+}
+
+enum WhisperKitProfile: WhisperAdapterProfile {
+    static let identity = try! EngineIdentity(id: EngineID("whisperkit"), version: "1bbc57cb7fe6410248a685b1c5a3c6d56adc2ed4")
     static let compute = "cpuAndGPU+cpuAndNeuralEngine;prewarm=true"
+    static let format = "whisperkit-coreml-v1"
+    static func makeBackend() -> any WhisperIntervalBackend { SDKWhisperKitBackend() }
+}
+
+typealias WhisperKitSTTEngine = WhisperIntervalEngine<WhisperKitProfile>
+
+protocol BenchmarkIntervalEngine: STTEngine {
+    var cleanupDiagnostics: [STTEngineError] { get async }
+    var lastRequestTiming: STTBenchmarkRequestTiming? { get async }
+    func loadTiming() async -> STTBenchmarkLoadTiming
+}
+
+actor WhisperIntervalEngine<Profile: WhisperAdapterProfile>: BenchmarkIntervalEngine {
+    static var identity: EngineIdentity { Profile.identity }
+    static var compute: String { Profile.compute }
     nonisolated let capabilities = try! STTCapabilities(inputFormats: [STTInputFormat()],
         languageModes: [.korean, .english, .automatic], languages: [LanguageCode("ko"), LanguageCode("en")],
         partialResults: true, timestamps: true)
@@ -36,14 +57,14 @@ actor WhisperKitSTTEngine: STTEngine {
     private(set) var phase: Phase = .unloaded
     private(set) var cleanupDiagnostics: [STTEngineError] = []
     private let resolve: @Sendable (InstalledModelKey) async throws -> ModelUseLease
-    private let makeBackend: @Sendable () -> any WhisperKitBackend
+    private let makeBackend: @Sendable () -> any WhisperIntervalBackend
     private let capacity: Int
     private let now: @Sendable () -> Double
     private let cleanupJoinAcknowledged: @Sendable () -> Void
     private(set) var cleanupJoiners = 0
     private(set) var lastRequestTiming: STTBenchmarkRequestTiming?
     func loadTiming() async -> STTBenchmarkLoadTiming { await backend?.loadTiming() ?? .init(prewarmSeconds: nil, modelSeconds: nil) }
-    private var backend: (any WhisperKitBackend)?
+    private var backend: (any WhisperIntervalBackend)?
     private var lease: ModelUseLease?
     private var model: STTModelConfiguration?
     private var session: STTSessionConfiguration?
@@ -71,12 +92,12 @@ actor WhisperKitSTTEngine: STTEngine {
         self.capacity = capacity; now = { ProcessInfo.processInfo.systemUptime }
         cleanupJoinAcknowledged = {}
         resolve = { try await repository.acquireUseLease($0) }
-        makeBackend = { SDKWhisperKitBackend() }
+        makeBackend = { Profile.makeBackend() }
     }
     init(capacity: Int = 2, resolve: @escaping @Sendable (InstalledModelKey) async throws -> ModelUseLease,
          now: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime },
          cleanupJoinAcknowledged: @escaping @Sendable () -> Void = {},
-         makeBackend: @escaping @Sendable () -> any WhisperKitBackend) throws {
+         makeBackend: @escaping @Sendable () -> any WhisperIntervalBackend) throws {
         guard (1...16).contains(capacity) else { throw STTEngineError(.invalidConfiguration) }
         self.capacity = capacity; self.now = now; self.resolve = resolve; self.makeBackend = makeBackend
         self.cleanupJoinAcknowledged = cleanupJoinAcknowledged
@@ -105,7 +126,7 @@ actor WhisperKitSTTEngine: STTEngine {
             let acquired = try await resolve(key); lease = acquired
             try Self.checkCancellation()
             guard acquired.descriptor.engine == configuration.engine, acquired.descriptor.model == configuration.model,
-                  acquired.descriptor.format == "whisperkit-coreml-v1", acquired.descriptor.variant == "large-v3",
+                  acquired.descriptor.format == Profile.format, acquired.descriptor.variant == "large-v3",
                   acquired.descriptor.quantization == "none", acquired.descriptor.compute == Self.compute else {
                 throw STTEngineError(.unsupportedModel)
             }

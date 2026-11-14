@@ -42,6 +42,63 @@ private final class FootprintSampler: STTBenchmarkMemoryProbe, @unchecked Sendab
     deinit { timer.cancel() }
 }
 
+private final class BenchmarkNativeHooks: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entry: AsyncStream<Void>.Continuation?
+    private var observed = false
+
+    func arm() -> AsyncStream<Void> {
+        let pair = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        lock.withLock { entry = pair.continuation; observed = false }
+        return pair.stream
+    }
+    func entered() { lock.withLock { _ = entry?.yield(()) } }
+    func aborted() { lock.withLock { if entry != nil { observed = true } } }
+    func disarm() -> Bool {
+        lock.withLock { entry?.finish(); entry = nil; return observed }
+    }
+}
+
+/// Only the single-job benchmark executable owns stderr. The library exposes no
+/// per-context device getter. Keep upstream diagnostics and classify actual load
+/// evidence without installing a process-global ggml callback in either adapter.
+private final class NativeBenchmarkTrace {
+    private let url: URL
+    private var original: Int32
+    init(directory: URL, repetition: Int) throws {
+        url = directory.appendingPathComponent("native-\(repetition).log")
+        let file = open(url.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard file >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        defer { close(file) }
+        original = dup(STDERR_FILENO)
+        guard original >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        if dup2(file, STDERR_FILENO) < 0 {
+            close(original); original = -1; throw CocoaError(.fileWriteUnknown)
+        }
+    }
+    private func restore() {
+        guard original >= 0 else { return }
+        fflush(nil)
+        _ = dup2(original, STDERR_FILENO)
+        close(original); original = -1
+    }
+    deinit { restore() }
+
+    func finish() throws -> String {
+        restore()
+        let log = try String(contentsOf: url, encoding: .utf8)
+        if log.contains("whisper_backend_init_gpu: using MTL0 backend"),
+           log.contains("ggml_metal_init: found device:"),
+           !log.contains("failed to initialize MTL0 backend") {
+            return "Metal (MTL0)" + (log.contains("using BLAS backend") ? " + Accelerate BLAS" : "")
+        }
+        if log.contains("no GPU found") || log.contains("failed to initialize MTL0 backend") {
+            return "CPU fallback"
+        }
+        return "unavailable"
+    }
+}
+
 @main
 struct BenchmarkMain {
     static func main() async {
@@ -85,7 +142,14 @@ struct BenchmarkMain {
         let catalog = try JSONDecoder().decode(BundledModelCatalog.self, from: Data(contentsOf: url(args[1])))
         guard let descriptor = catalog.entries.first, catalog.entries.count == 1 else { throw ModelRepositoryCode.invalidDescriptor }
         let sources = ModelImportSources(); let store = url(command == "import" ? args[3] : args[2])
-        let repository = FileModelRepository(storeURL: { store }, sources: sources, validator: WhisperKitModelValidator(),
+        let native = descriptor.engine == WhisperCppProfile.identity
+        let validator: any OfflineModelFormatValidating
+        switch (descriptor.engine, descriptor.format) {
+        case (WhisperCppProfile.identity, WhisperCppProfile.format): validator = WhisperCppModelValidator()
+        case (WhisperKitProfile.identity, WhisperKitProfile.format): validator = WhisperKitModelValidator()
+        default: throw ModelRepositoryCode.incompatible
+        }
+        let repository = FileModelRepository(storeURL: { store }, sources: sources, validator: validator,
             references: NoSessionRoots(), catalogLoader: .init(load: { catalog }))
         if command == "import" {
             let source = await sources.register(url(args[2]), start: { true }, stop: {})
@@ -100,28 +164,48 @@ struct BenchmarkMain {
         guard STTBenchmarkInput.pcmDigest(input.audio.samples) == input.pcmSHA256 else { throw STTEngineError(.invalidInput) }
         let output = url(args[4])
         let export = try STTBenchmarkOutput(output)
-        let engine = try WhisperKitSTTEngine(repository: repository)
-        let options = try STTInferenceOptions(partialResults: true, timestamps: true, computeMode: WhisperKitSTTEngine.compute)
+        let options = try STTInferenceOptions(partialResults: true, timestamps: true, computeMode: descriptor.compute)
         let configuration = STTModelConfiguration(engine: descriptor.engine, model: descriptor.model, options: options)
         var measurements: [STTBenchmarkMeasurement] = []
         var reportSession = STTSessionConfiguration(sessionID: SessionID(), operationID: STTOperationID(UUID()), model: configuration, languageMode: languageMode)
-        // One warm-up, two measured repetitions; full unload/reload before each. Same canonical samples.
+        // Stream acknowledgements belong to this benchmark. Only the cancelled
+        // repetition arms them; use the same engine for all three full lifecycles.
+        let hooks = BenchmarkNativeHooks()
+        let engine: any BenchmarkIntervalEngine
+        if native {
+            engine = try WhisperCppSTTEngine(resolve: { try await repository.acquireUseLease($0) }) {
+                NativeWhisperBackend(encoderEntered: hooks.entered, abortObserved: hooks.aborted)
+            }
+        } else {
+            engine = try WhisperKitSTTEngine(repository: repository)
+        }
+        var effective: [String] = []
+        var cancellationVerified = true
         for repetition in 0...2 {
             let session = STTSessionConfiguration(sessionID: SessionID(), operationID: STTOperationID(UUID()), model: configuration, languageMode: languageMode)
             reportSession = session
+            let cancelling = command == "cancel" && repetition == 1
+            let entry = native && cancelling ? hooks.arm() : nil
+            let trace = native ? try NativeBenchmarkTrace(directory: output, repetition: repetition) : nil
             let measurement = await STTBenchmarkRunner().measure(engine: engine, input: input, session: session,
-                repetition: repetition, warmup: repetition == 0, cancelOnFirstPartial: command == "cancel" && repetition == 1,
+                repetition: repetition, warmup: repetition == 0, cancelOnFirstPartial: !native && cancelling,
+                cancelAtNativeEntry: entry,
                 memory: FootprintSampler(), cleanupWarnings: { await engine.cleanupDiagnostics.map { "Cleanup: \($0.code.rawValue)" } }, observe: { (await engine.loadTiming(), await engine.lastRequestTiming) })
+            if let trace { effective.append(try trace.finish()) }
+            if native && cancelling {
+                cancellationVerified = hooks.disarm()
+                print("Native abort hook observed cancellation: \(cancellationVerified)")
+            }
             measurements.append(measurement)
             print("Repetition \(repetition): terminal=\(measurement.terminal?.kind.rawValue ?? "missing") load=\(measurement.loadSeconds) inference=\(measurement.inferenceSeconds?.description ?? "null")")
             if measurement.failure != nil { break }
         }
-        let success = measurements.count == 3 && measurements.allSatisfy { $0.failure == nil && $0.terminal != nil && $0.warnings.isEmpty }
-        let report = STTBenchmarkReport(schemaVersion: 1, appVersion: "0.1.0/T14-developer", os: ProcessInfo.processInfo.operatingSystemVersionString,
+        let success = cancellationVerified && measurements.count == 3 && measurements.allSatisfy { $0.failure == nil && $0.terminal != nil && $0.warnings.isEmpty }
+        let report = STTBenchmarkReport(schemaVersion: 1, appVersion: native ? "0.1.0/T15-developer" : "0.1.0/T14-developer", os: ProcessInfo.processInfo.operatingSystemVersionString,
             hardware: hardware(),
             model: descriptor, input: input, settings: reportSession,
-            policy: "Float16 converted storage, no quantization. transcribe; sampleLength=224; promptLimit=111 tokens; automatic mode uses explicit checked detection, transcribe detectLanguage=false; topK=5; temperatureFallbackCount=0; wordTimestamps=false; no chunking; one decoder worker; prewarm=true. One warm-up excluded from throughput; two measured repetitions. Unload/reload each time. RTF=inferenceSeconds/audioSeconds; excludes load, prewarm, queue, warmup. Per-repetition values only; no aggregate speed/accuracy claim. First partial is buffered window-processing latency, not microphone utterance-end latency.",
-            memoryMethod: "TASK_VM_INFO.phys_footprint, process-wide baseline before load and observed peak every 50 ms through unload, plus final sample; short peaks may be missed, OS CoreML caches may survive, not isolated model memory. Timer cancelled and queue joined on all paths.",
+            policy: native ? "whisper.cpp v1.9.5/b5454 (ABI \(NativeWhisperBackend.libraryVersion)); GGML mixed F16/F32; embedded Metal, GPU preferred with CPU fallback; effective per repetition=\(effective.joined(separator: ", ")); four threads, flash attention, greedy best_of=1, no temperature fallback; explicit checked detection then transcribe; no implicit context, 223-token prompt cap; first partial is a complete native segment callback. Cancel-mode native abort observed=\(command == "cancel" ? String(cancellationVerified) : "not requested"). One warmup and two measured reloads. RTF=inferenceSeconds/audioSeconds." : "Float16 converted storage, no quantization. transcribe; sampleLength=224; promptLimit=111 tokens; automatic mode uses explicit checked detection, transcribe detectLanguage=false; topK=5; temperatureFallbackCount=0; wordTimestamps=false; no chunking; one decoder worker; prewarm=true. One warm-up excluded from throughput; two measured repetitions. Unload/reload each time. RTF=inferenceSeconds/audioSeconds; excludes load, prewarm, queue, warmup. Per-repetition values only; no aggregate speed/accuracy claim. First partial is buffered window-processing latency, not microphone utterance-end latency.",
+            memoryMethod: "TASK_VM_INFO.phys_footprint, process-wide baseline before load and observed peak every 50 ms through unload, plus final sample; short peaks may be missed, OS CoreML caches may survive, GPU/ANE attribution is incomplete. Timer cancelled and queue joined on all paths.",
             measurements: measurements, success: success)
         try export.write(report)
         if !success { throw STTEngineError(.inferenceFailed) }

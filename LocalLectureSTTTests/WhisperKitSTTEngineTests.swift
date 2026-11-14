@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 @testable import LocalLectureSTT
 
-private actor T14Gate {
+actor T14Gate {
     let entered = XCTestExpectation(description: "backend acknowledged boundary")
     private var held = true
     private var arrived = false
@@ -16,7 +16,7 @@ private actor T14Gate {
     }
     func release() { held = false; let joined = waiters; waiters = []; joined.forEach { $0.resume() } }
 }
-private actor T14Backend: WhisperKitBackend {
+actor T14Backend: WhisperIntervalBackend {
     let loadGate: T14Gate?
     let decodeGates: [T14Gate]
     let unloadGate: T14Gate?
@@ -66,7 +66,9 @@ private struct T14FixtureValidator: OfflineModelFormatValidating {
 private struct T14References: ModelReferenceChecking {
     func references(to descriptor: ModelPackageDescriptor) async -> ModelReferenceReport { .init(sessions: [], warnings: []) }
 }
-private final class T14Fixture: @unchecked Sendable {
+typealias T14Fixture = IntervalFixture<WhisperKitProfile>
+
+final class IntervalFixture<Profile: WhisperAdapterProfile>: @unchecked Sendable {
     let root = URL(fileURLWithPath: "/private/tmp/stt-t14-test-" + UUID().uuidString)
     let sources = ModelImportSources()
     let descriptor: ModelPackageDescriptor
@@ -76,8 +78,8 @@ private final class T14Fixture: @unchecked Sendable {
         let source = root.appendingPathComponent("source")
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
         let data = Data("synthetic".utf8); try data.write(to: source.appendingPathComponent("test.bin"))
-        descriptor = try .init(engine: WhisperKitSTTEngine.identity, modelID: ModelID("test-large"), revision: "fixture-v1",
-            format: "whisperkit-coreml-v1", variant: "large-v3", quantization: "none", compute: WhisperKitSTTEngine.compute,
+        descriptor = try .init(engine: Profile.identity, modelID: ModelID("test-large"), revision: "fixture-v1",
+            format: Profile.format, variant: "large-v3", quantization: "none", compute: Profile.compute,
             licenseIdentifier: "LicenseRef-Test", licenseTextOrReference: "Generated test data", licenseProvenance: "this test",
             files: [ModelPayloadFile(path: "test.bin", byteCount: Int64(data.count), sha256: ModelPackageRules.sha256(data))])
         repository = FileModelRepository(storeURL: { root.appendingPathComponent("store") }, sources: sources,
@@ -88,7 +90,7 @@ private final class T14Fixture: @unchecked Sendable {
         _ = try await repository.importPackage(from: source, descriptor: descriptor, origin: .suppliedLocal)
     }
     func engine(_ backend: T14Backend, capacity: Int = 2,
-                cleanupJoinAcknowledged: @escaping @Sendable () -> Void = {}) throws -> WhisperKitSTTEngine {
+                cleanupJoinAcknowledged: @escaping @Sendable () -> Void = {}) throws -> WhisperIntervalEngine<Profile> {
         try .init(capacity: capacity, resolve: { [repository] in try await repository.acquireUseLease($0) },
                   cleanupJoinAcknowledged: cleanupJoinAcknowledged, makeBackend: { backend })
     }

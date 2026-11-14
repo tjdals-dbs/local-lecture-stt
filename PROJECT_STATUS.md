@@ -8,19 +8,19 @@
 ## Current position
 
 - Current milestone: M2 models and engines; M1/G1 hardware validation remains unverified
-- Current Task: none in progress; T14 squash-integrated into dev after independent review and separate integration authorization
-- Next action: T15 whisper.cpp experimental adapter is the next planned Task; await a separate implementation prompt
-- Latest completed Task: T14 pinned offline WhisperKit experimental adapter and reproducible developer benchmark (through independently reviewed, separately authorized dev integration)
+- Current Task: none in progress
+- Next action: T16 engine/model comparison and user decision, awaiting a separate comparison prompt
+- Latest completed Task: T15 experimental whisper.cpp adapter, independently reviewed and squash-integrated into dev with separate authorization
 - Latest passed gate: T01 initial runnable baseline
-- Application implementation: recording, app-owned final M4A generation and recovery, lifecycle policy, framework-independent STTEngine contracts/fake, verified model import/download/deletion, and an explicitly invoked experimental WhisperKit backend with real local model/tokenizer validation, bounded optional context, lifetime model-use lease and developer benchmark. Actual developer inference is implemented. The production catalog remains empty; product model-management UI, live capture/STT integration and canonical transcript finalization remain unimplemented, and the final product engine/model is undecided.
+- Application implementation: recording, app-owned M4A finalization and recovery, lifecycle policy, framework-independent STTEngine contracts/fake and verified model import/download/deletion. The experimental WhisperKit and whisper.cpp interval adapters run developer inference on verified, leased installations and share cancellation, input and benchmark report contracts. Each uses a pinned engine and a separate candidate manifest with strict local format validation. The production catalog is empty. Product model-management UI, live capture/STT integration and canonical transcript finalization remain unimplemented. The product engine and model await user selection.
 
 ## Repository state at this handoff
 
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
 - Local branch: `dev`
-- Approved T14 source: `b4551c21324e76952f07cc4fd3b85a24e2594492`, including all three review repairs; the user accepted independent review and separately authorized Phase 2 integration on 2026-11-15
-- `dev` branch: T14 is squash-integrated from the approved source onto unchanged latest `dev`/`origin/dev` `1724853e1d1942c7f32c0b8d998177d76d2f7c2c`; final integration SHA, committed-HEAD validation, exact-head CI and verified task-branch cleanup are recorded in the Phase 2 task handoff
+- Approved T15 source: `6a5f0dde8e35423ecd8d4ab918cb73f5ea556def`. The user accepted independent review and authorized Phase 2 integration on 2026-11-15.
+- `dev` branch: T15 squash-integrated onto `59690f3dee5e21330e3ac60646b3da51d0dbd433`, the latest fetched `origin/dev`. The Phase 2 delivery handoff records the resulting SHA, its validation and CI, and branch cleanup.
 - `main` and `origin/main`: preserved at the verified T01 baseline `38e126f92ac823d29306ea8c1f7703f7060a5818`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -52,11 +52,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T12 model repository, manifests and local import | Complete on dev through user-accepted review and separately authorized squash integration | Value-only schema/provenance, offline inventory and format-validation policy, pinned/no-clobber verified import, exact-once scopes, session-reference assessment and confirmed deletion. Approved source/re-review: 332 tests (322 unit + 10 integration), including 33 T12 and 35 T11 selectors; exact-source CI passed. New dev commit verification is recorded in the Phase 2 handoff. |
 | T13 explicit model downloads and verified atomic installation | Complete on dev through user-accepted review and separately authorized squash integration | Capacity admission, real URLSession receipts/range resume, private durable state, shared verification/publication, exact task cancellation and pinned cleanup. Approved source/re-review: 381 tests (371 unit + 10 integration), including 49 T13, 33 T12 and 35 T11 selectors; all five review repairs and exact-source CI passed. Committed-dev verification is recorded in the Phase 2 handoff. |
 | T14 experimental WhisperKit adapter and developer benchmark | Complete on dev through independently reviewed, separately authorized squash integration | Approved source: 423 tests (413 unit + 10 integration), including 42 T14, 49 T13, 33 T12 and 35 T11; actual large-v3 offline repetition/cancel/context/negative evidence and exact-source CI passed. Committed-dev validation is separate and recorded in the Phase 2 handoff. |
+| T15 experimental whisper.cpp adapter | Complete on dev through independently reviewed, separately authorized squash integration | Approved source passed 432 tests and task CI. The coordinator reproduced installed large-v3 automatic transcription and active cancellation/reuse under OS network denial. [Integration evidence](docs/T15_ACCEPTANCE.md#phase-2-dev-integration) |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-T14 is integrated into `dev` after independent review accepted by the user and separate Phase 2 authorization on 2026-11-15. Only T14's completion checkbox is newly checked in section 9 of `IMPLEMENTATION_PLAN.md`. T15 remains unimplemented and awaits a separate implementation prompt. G1 remains **Unverified** and G2 pending/unpassed; no `dev → main` promotion, release, final product engine/model selection or later Task implementation is authorized.
+T15 is integrated into `dev`. Section 9 of `IMPLEMENTATION_PLAN.md` records T15 completion. T16 awaits a separate comparison prompt and the product choice requires the user's review of lecture samples. G1 remains **Unverified** and G2 is pending.
 
 ## Gate status
 
@@ -143,6 +144,12 @@ T14 is integrated into `dev` after independent review accepted by the user and s
 - Repaired contracts: at most 111 prompt tokens reach actual SDK prefill without suffix loss, context/control tokens cannot masquerade as transcript partials, explicit checked detection cannot turn an error into English success, and end/cancel join owning cleanup through lease release despite control-caller cancellation. [Architecture](docs/ARCHITECTURE.md#t14-experimental-whisperkit-adapter-and-developer-benchmark) and [repair evidence](docs/T14_ACCEPTANCE.md#same-task-review-repair--three-findings) describe FIFO, time mapping, ownership and actual SDK-boundary/held-cleanup regressions.
 - Integration preserves all 89 approved executable/test/project/package/catalog/bootstrap/offline-profile input hashes, so the reviewed real-model/offline evidence is reused without another model acquisition/inference run. Committed dev verification uses `xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /private/tmp/stt-t14-work/DerivedData -resultBundlePath /private/tmp/stt-t14-integration.WeavII/CommittedHead.xcresult -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -test-timeouts-enabled YES -default-test-execution-time-allowance 60 CODE_SIGNING_ALLOWED=NO build test`, plus `swift build --scratch-path /private/tmp/stt-t14-repair.RpKBXk/CLIBuild --disable-automatic-resolution`. Actual committed-dev counts, SHA, exact-head CI and cleanup outcome are recorded in the Phase 2 final handoff, without self-referential amendments.
 - [Development](docs/DEVELOPMENT.md#t14-same-task-review-repairs) retains reproducible commands. Short synthetic-speech RTF around 0.43 does not pass a performance/accuracy gate. The 111-token repeated-word stress input produces repetition, roughly 7 s first partial and RTF around 1.74. G1 physical microphone/TCC/signed-Sandbox/bookmark/lid/power/long-recording checks remain Unverified; G2/real-lecture comparisons remain unpassed. Main stays at T01, T15 awaits a separate prompt, and live STT/transcript finalization remain unimplemented.
+
+## T15 handoff
+
+- Approved source `6a5f0dde8e35423ecd8d4ab918cb73f5ea556def` passed 432 tests (422 unit and 10 integration), including 9 native adapter tests. The coordinator independently verified the same selectors and actual offline automatic transcription, native abort and same-engine reuse. [Source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/43625949746) · [Integration authorization](prompts/T15_DEV_INTEGRATION.md)
+- The v1.9.5/b5454 XCFramework uses source `d1be6fde11ac6e0407606b4e42fe72d34add8037` and reports ABI `1.9.5-dev`. The non-quantized GGML large-v3 candidate uses revision `5359861c739e955e79d9a303bcbc70fb988958b1`. One serial queue owns the native context and verifies a model-sized temporary snapshot. Cancellation holds the model lease through native return and callback settlement. Automatic detection pins a checked language, hints use a 223-token budget, and checked 10 ms segment ticks receive the session offset once. [Architecture](docs/ARCHITECTURE.md#t15-experimental-whispercpp-adapter)
+- Execution inputs match the approved source. Phase 2 reuses its real-model evidence and runs the full unsigned arm64 suite and CLI build on committed dev before push and exact-SHA CI. The short synthetic case leaves lecture accuracy, long-running live STT and G1 hardware/lifecycle checks open. [Acceptance and evidence](docs/T15_ACCEPTANCE.md#phase-2-dev-integration) · [Development commands](docs/DEVELOPMENT.md#t15-native-benchmark)
 
 ## Status update rules
 

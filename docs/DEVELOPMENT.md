@@ -573,3 +573,60 @@ t14_offline run tools/t14/candidate.json /private/tmp/stt-t14-offline/store \
 The two negative commands use the same `t14_offline run tools/t14/candidate.json` argv with store `$t14_repair/NegativeStore`, original `input.json`, language `automatic`, and outputs `$t14_repair/VerifiedMissingTokenizer` / `VerifiedMissingComponent`. Before each invocation only its named asset is moved out of that APFS clone, and restored in `finally`; original verified source/stores are untouched. Both exit 1 with `loadFailed` before SDK construction. The network probe is `/usr/bin/sandbox-exec -f tools/t14/offline.sb /usr/bin/python3 -c 'import socket; socket.create_connection(("1.1.1.1",443),timeout=2)'`; exit 1 is expected with EPERM. Cache/profile limits and generation/import commands above still apply.
 
 Actual JSON/TXT exports and per-command `.log`/`.exit` are under that repair root. The 111-token repeated-word stress hint produced repeated model output and slower processing; it proves the accepted boundary, not useful context accuracy or a performance gate. Its corrected first partial is about 7.05 s, rather than counting prompt/prefill text as a transcript. Full validation is repeated after the real runs on the same frozen inputs; current counts, report hashes and measurements are in acceptance.
+
+## T15 native benchmark
+
+Xcode and SwiftPM both consume `Packages/WhisperNative`. Its binary target verifies the upstream XCFramework archive. Git dependencies retain the two T14 resolutions. The macOS arm64 slice has minimum macOS 13.3 and embeds its Metal library. Keep the CLI beside its `whisper.framework`, as emitted by SwiftPM. The app embeds the framework in `Contents/Frameworks`. The default weight-free CI builds the app, runs both Xcode test targets and builds the CLI.
+
+The following shell examples use a new disposable directory, a no-follow absolute store path and the canonical T14 input. Use an installed matching candidate when available. For the first developer bootstrap only, create the source in a fresh directory, fetch the one published LFS object, verify it, then explicitly import it through the repository. Allow space for source, installation, verified temporary snapshot and normal build products.
+
+```sh
+P=/Users/andyoon/stt
+D=$(mktemp -d /private/tmp/stt-t15-validation.XXXXXX)
+I=/private/tmp/stt-t14-assets/input.json
+cd "$P"
+swift build --scratch-path "$D/CLI"
+BIN="$D/CLI/debug/stt-benchmark"
+CAT="$P/tools/t15/candidate.json"
+mkdir "$D/source"
+curl -fL --retry 2 'https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3.bin' -o "$D/source/ggml-large-v3.bin"
+(cd "$D/source" && echo '64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2  ggml-large-v3.bin' | shasum -a 256 -c -)
+cd "$D"
+"$BIN" import "$CAT" "$D/source" "$D/store"
+"$BIN" run "$CAT" "$D/store" "$I" "$D/Normal" english
+```
+
+Each invocation requires a new report directory. `report.json` embeds the checked input, options and all terminal results. `report.txt` shows text and media times. `native-N.log` retains actual backend/device initialization and cancellation diagnostics. The model-free tests use a generated vocabulary-only native fixture and acknowledged load/decode/callback/cleanup boundaries. Real evidence and the original CLI commands are in [T15 acceptance](T15_ACCEPTANCE.md).
+
+```sh
+offline() {
+  local name="$1"
+  shift
+  local roots="$D/${name}Cache"
+  mkdir -p "$roots/home" "$roots/cache" "$roots/tmp"
+  /usr/bin/sandbox-exec -f "$P/tools/t14/offline.sb" /usr/bin/env \
+    HOME="$roots/home" CFFIXED_USER_HOME="$roots/home" XDG_CACHE_HOME="$roots/cache" TMPDIR="$roots/tmp" "$@"
+}
+offline NetworkProbe /usr/bin/python3 -c 'import socket; socket.create_connection(("1.1.1.1",443),timeout=2)'
+# Expect EPERM for the probe.
+offline Automatic "$BIN" run "$CAT" "$D/store" "$I" "$D/Automatic" automatic
+offline Cancel "$BIN" cancel "$CAT" "$D/store" "$I" "$D/Cancel" english
+offline WhisperKit "$BIN" run "$P/tools/t14/candidate.json" /private/tmp/stt-t14-offline/store "$I" "$D/WhisperKit" automatic
+python3 "$P/tools/t15/check-negative-assets.py" "$BIN" "$D/store" "$I" "$D/Negative"
+```
+
+The cancel repetition withdraws the active request after the native encoder hook acknowledges entry. The benchmark checks the subsequent abort acknowledgement, joins native return and reloads the same engine for repetition 2. A GPU graph can finish before the next cancellation checkpoint. The T14 cancel command still withdraws after the first partial. For missing, truncated and same-length corrupt cases the script requires APFS clone support, runs only against new copies, preserves the evidence and checks the original hash afterward.
+
+```sh
+cd "$P"
+xcodebuild -resolvePackageDependencies -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT -derivedDataPath "$D/DerivedData"
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT -configuration Debug \
+  -destination 'platform=macOS,arch=arm64' -derivedDataPath "$D/DerivedData" \
+  -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
+  -resultBundlePath "$D/Full.xcresult" CODE_SIGNING_ALLOWED=NO build test
+xcrun xcresulttool get test-results summary --path "$D/Full.xcresult"
+xcrun xcresulttool get test-results tests --path "$D/Full.xcresult"
+```
+
+For the focused execution insert `-only-testing:LocalLectureSTTTests/WhisperCppAdapterTests` and use a fresh `Focused.xcresult` path. The process sandbox covers this benchmark invocation. Physical microphone/TCC, signed app sandbox/bookmarks, lid/power, long recordings and lecture accuracy remain unverified.

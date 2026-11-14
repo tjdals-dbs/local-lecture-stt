@@ -36,3 +36,5 @@ jobs:
             -destination 'platform=macOS,arch=arm64' \
             CODE_SIGNING_ALLOWED=NO \
             test
+      - name: Build developer benchmark with pinned native bridge
+        run: swift build --disable-automatic-resolution

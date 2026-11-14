@@ -256,9 +256,9 @@ actor FileModelRepository: ModelRepository {
             let dir = try package(key, store: ModelPackageDirectory(url: storeURL()))
             let before = try snapshot(dir); let value = try manifest(dir, key: key)
             try checkCatalogOrigin(value)
-            try await verify(dir, descriptor: value.descriptor, installed: true)
+            let verifiedTree = try await verify(dir, descriptor: value.descriptor, installed: true)
             guard try snapshot(dir) == before else { throw ModelRepositoryCode.identityChanged }
-            return try ModelUseLease(directory: dir, descriptor: value.descriptor, claim: claim)
+            return try ModelUseLease(directory: dir, descriptor: value.descriptor, claim: claim, verifiedTree: verifiedTree, verifiedManifest: value)
         } catch { claim.release(); throw ModelOperationFailure(failure(error)) }
     }
 

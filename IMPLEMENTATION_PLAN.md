@@ -987,7 +987,7 @@ fix(transcript): prevent overlap duplication (T18)
 - [x] T12 모델 저장소와 가져오기
 - [x] T13 모델 다운로드와 설치
 - [x] T14 WhisperKit 어댑터
-- [ ] T15 whisper.cpp 어댑터
+- [x] T15 whisper.cpp 어댑터
 - [ ] T16 비교 및 사용자 결정
 - [ ] T17 제품 엔진 고정
 - [ ] T18 VAD와 reconciler

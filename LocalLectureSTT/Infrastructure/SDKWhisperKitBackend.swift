@@ -3,7 +3,7 @@ import Foundation
 @preconcurrency import WhisperKit
 
 /// Only the owning engine worker calls this instance. Unload is joined after decode/load.
-final class SDKWhisperKitBackend: WhisperKitBackend, @unchecked Sendable {
+final class SDKWhisperKitBackend: WhisperIntervalBackend, @unchecked Sendable {
     private var sdk: WhisperKit?
     private var decodingClient: (any WhisperKitDecodingClient)?
     private var modelLease: ModelUseLease?
@@ -125,7 +125,7 @@ struct WhisperLanguageDetection: Codable, Sendable, Equatable {
     let scores: [String: Double]
 }
 
-/// SDK-only seam; vendor options stay inside Infrastructure, behind WhisperKitBackend.
+/// SDK-only seam; vendor options stay inside Infrastructure, behind WhisperIntervalBackend.
 protocol WhisperKitDecodingClient: Sendable {
     func tokenize(_ text: String) throws -> [Int]
     func detectLanguage(_ audio: STTInferenceAudio) async throws -> WhisperLanguageDetection
