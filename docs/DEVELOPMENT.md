@@ -437,3 +437,139 @@ xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
 ```
 
 Latest full verification uses the same configuration/derived data with `-resultBundlePath /private/tmp/stt-t13-postcommit-verified/Full.xcresult CODE_SIGNING_ALLOWED=NO build test`, without the focused selectors. Inspect summary and tests via `xcrun xcresulttool get test-results summary --path /private/tmp/stt-t13-postcommit-verified/Full.xcresult --compact` and the corresponding `tests` subcommand. Exact outcomes and failed intermediate attempts are in the acceptance postcommit-repair section. All manual signed-Sandbox/background/G1 procedures above remain Pending/Unverified; the app's recording/lifecycle, model catalog, schema, dependencies, entitlements and default unavailable recognizer are unchanged.
+
+## T14 explicit real-model and contract verification
+
+Default app and shared Xcode scheme remain lightweight: no model download, inference or benchmark starts automatically. Both original test targets run. The app links the actual pinned OSS library. Xcode resolves `WhisperKit` at `1bbc57cb7fe6410248a685b1c5a3c6d56adc2ed4` (v1.1.1), with resolution committed under `LocalLectureSTT.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`. Root SwiftPM has its own committed resolution for the opt-in CLI. macOS 15/arm64 and Swift 6 app settings are unchanged.
+
+Executed CLI build (from repository root):
+
+```sh
+swift build --scratch-path /private/tmp/stt-t14-swift-build
+```
+
+Only run bootstrap explicitly when the matching verified package is absent. It downloads exactly the committed descriptor's ~3.09 GB candidate and tokenizer files; creates a new supplied source directory, verifies every pinned length/SHA256 and retains failures for inspection. It does not install or invoke the SDK downloader. `published-files.json` records official immutable HF revisions, LFS SHA256/Git blob IDs and URLs; LFS hashes are published metadata, while non-LFS SHA256 values were locally derived after verifying the published Git blob identity. This is not a signed author guarantee. `candidate.json` includes immutable license/model/tokenizer references; production catalog is still empty. Standard converted weights are Float16, without compression/quantization; no alternative model is substituted.
+
+```sh
+python3 tools/t14/bootstrap.py /private/tmp/stt-t14-assets/source-new
+/private/tmp/stt-t14-swift-build/debug/stt-benchmark import \
+  tools/t14/candidate.json /private/tmp/stt-t14-assets/source-new /private/tmp/stt-t14-assets/store-new
+```
+
+`import` explicitly composes T12's real format validator, catalog authority, security-scope handle, per-file hashing, copied staging and verified atomic installer. The initial actual source is `/private/tmp/stt-t14-assets/source`; installed stores are `/private/tmp/stt-t14-assets/store` and a second independently imported `/private/tmp/stt-t14-offline/store`. No Application Support/user session data is touched. Use canonical no-follow paths (`/private/tmp`, not the `/tmp` symlink); the CLI intentionally avoids Foundation `standardizedFileURL`, which converts `/private/tmp` back to that alias.
+
+The executed nonprivate test input uses the already installed Samantha voice; do not download a voice. Check `say -v '?'` before choosing an available voice on another machine. Generation and one-time canonical preparation:
+
+```sh
+say -v Samantha -r 155 -o /private/tmp/stt-t14-assets/speech.aiff \
+  'This is a local speech recognition test. The model runs without an internet connection. Audio files remain on this computer.'
+afconvert -f WAVE -d LEF32@16000 -c 1 \
+  /private/tmp/stt-t14-assets/speech.aiff /private/tmp/stt-t14-assets/speech.wav
+/private/tmp/stt-t14-swift-build/debug/stt-benchmark prepare \
+  /private/tmp/stt-t14-assets/speech.wav /private/tmp/stt-t14-assets/input.json local-samantha-v1 \
+  'Generated locally by macOS say, installed Samantha voice, rate 155, original nonprivate test sentence; afconvert LEF32@16000 mono; no voice download.'
+```
+
+Preparation requires an already canonical mono/16 kHz file ≤30 seconds, decodes it once to owned Float32 and exports a checked portable plan at a 5-second media offset. No fresh SDK file decoder participates in subsequent runs. The actual input is 112,640 frames/7.040 s. `run`/`cancel` optionally accept one final `english`, `korean` or `automatic` argument; omitted preserves the original English default. Automatic mode uses explicit checked detection; transcribe always receives a fixed language and `detectLanguage=false`. Preserve this JSON for T15 rather than regenerating speech. `run` performs one warm-up plus two measured load/start/infer/end/unload cycles, reloading each time; a new output directory is mandatory. `cancel` performs the same plan but withdraws the measured repetition 1 on the first actual partial, requires its cancelled terminal, then performs fresh successful inference in repetition 2.
+
+```sh
+/private/tmp/stt-t14-swift-build/debug/stt-benchmark run \
+  tools/t14/candidate.json /private/tmp/stt-t14-assets/store \
+  /private/tmp/stt-t14-assets/input.json /private/tmp/stt-t14-assets/run-new
+/private/tmp/stt-t14-swift-build/debug/stt-benchmark cancel \
+  tools/t14/candidate.json /private/tmp/stt-t14-assets/store \
+  /private/tmp/stt-t14-assets/input.json /private/tmp/stt-t14-assets/cancel-new
+```
+
+Actual offline verification uses macOS `sandbox-exec` with the committed process-only `deny network*` profile, without changing system network settings. HTTPS fails with DNS denial; a direct TCP socket to 1.1.1.1:443 fails with `EPERM`. Independently importing the verified local source into a new store also succeeds under this policy. Use fresh explicitly named cache directories, leaving the user's HOME unchanged:
+
+```sh
+mkdir -p /private/tmp/stt-t14-final-cache/home /private/tmp/stt-t14-final-cache/cache /private/tmp/stt-t14-final-cache/tmp
+/usr/bin/sandbox-exec -f tools/t14/offline.sb /usr/bin/env \
+  CFFIXED_USER_HOME=/private/tmp/stt-t14-final-cache/home \
+  XDG_CACHE_HOME=/private/tmp/stt-t14-final-cache/cache TMPDIR=/private/tmp/stt-t14-final-cache/tmp \
+  /private/tmp/stt-t14-swift-build/debug/stt-benchmark run \
+  tools/t14/candidate.json /private/tmp/stt-t14-offline/store \
+  /private/tmp/stt-t14-assets/input.json /private/tmp/stt-t14-offline/final-results
+/usr/bin/sandbox-exec -f tools/t14/offline.sb \
+  /private/tmp/stt-t14-swift-build/debug/stt-benchmark cancel \
+  tools/t14/candidate.json /private/tmp/stt-t14-offline/store \
+  /private/tmp/stt-t14-assets/input.json /private/tmp/stt-t14-offline/final-cancel
+```
+
+The local-only tokenizer factory and fixed model paths do not consult SDK global model/tokenizer caches. The initial offline run also used a fresh model store. These tests do **not** clear undocumented Apple Core ML/Neural Engine system specialization caches or promise a fully cold chip. The OS denial also applies to SDK fallback code even if an unexpected path were reached. For negative verification, clone the disposable store (`cp -cR`), move `tokenizer.json` out of that clone, run under the same denial, restore it, then separately move `MelSpectrogram.mlmodelc/coremldata.bin` out and repeat. Each run must exit nonzero, export `success=false`/typed `loadFailed` with no terminal/inference metric, and leave source/original store intact. Actual clone: `/private/tmp/stt-t14-offline/missing-store`; evidence is listed in acceptance.
+
+Reports use `ProcessInfo.systemUptime` monotonic timing. `loadSeconds` includes repository checksum/format validation and local tokenizer setup; separately measured prewarm/model load are reported when observed. Queue delay is engine admission→worker start; inference is worker start→actual SDK settlement, excluding queue/load/warm-up; final elapsed is caller admission→terminal consumption. First partial exists only if observed. RTF is inference seconds divided by 7.040 s, never inverted; warm-up is marked/excluded and no aggregate speed claim is made. `TASK_VM_INFO.phys_footprint` is process-wide, baseline before load and 50 ms observed peak through unload, plus final sample. Timer cancellation is joined; short peaks can be missed and nil metrics are diagnosed. These are window timings, not microphone utterance-end latency, real-lecture accuracy or G2 performance success.
+
+Focused and full commands actually used on the final executable tree:
+
+```sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT -configuration Debug \
+  -destination 'platform=macOS,arch=arm64' -derivedDataPath /private/tmp/stt-t14-work/DerivedData \
+  -resultBundlePath /private/tmp/stt-t14-focused-final.xcresult \
+  -only-testing:LocalLectureSTTTests/WhisperKitSTTEngineTests \
+  -only-testing:LocalLectureSTTTests/STTEngineTests -only-testing:LocalLectureSTTTests/FakeSTTEngineTests \
+  -only-testing:LocalLectureSTTTests/ModelRepositoryTests -only-testing:LocalLectureSTTTests/ModelDownloadTests \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 60 CODE_SIGNING_ALLOWED=NO test
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT -configuration Debug \
+  -destination 'platform=macOS,arch=arm64' -derivedDataPath /private/tmp/stt-t14-work/DerivedData \
+  -resultBundlePath /private/tmp/stt-t14-full-final.xcresult \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 60 CODE_SIGNING_ALLOWED=NO build test
+xcrun xcresulttool get test-results summary --path /private/tmp/stt-t14-full-final.xcresult --compact
+xcrun xcresulttool get test-results tests --path /private/tmp/stt-t14-full-final.xcresult --compact
+```
+
+Use fresh result/output paths when reproducing. Race ordering uses acknowledged continuation/SDK cancellation barriers, not sleep/yield/polling. Gate watchdogs release workers in teardown. Normal signing/TCC, physical microphones, real long recordings/sleep/power, real lectures, accuracy comparisons, and G1/G2 remain unverified/outside T14. Exact current results and candidate pins are in [T14 acceptance](T14_ACCEPTANCE.md).
+
+
+### T14 same-Task review repairs
+
+The `d2473f2` review found accepted 112–128-token hints being suffix-trimmed by SDK prefill, end/cancel returning before concurrent unload cleanup, and SDK transcription silently falling back to English after detector failure. Current code rejects prompts above the pinned **111-token** prefill limit (plus SDK control tokens), joins the captured cleanup task after work drain, and performs explicit detector calls with supported/finite matching-score validation. The selected language is passed explicitly with SDK redetection disabled. Blank results publish no language, even when the SDK labels its empty result with a default. This adds no VAD or product UI.
+
+`WhisperKitSDKBoundaryTests` executes the actual pinned prefill and public `detectLangauge` helper using tiny synthetic tokenizer/tensors and model-load stubs; it does not download weights, claim format usability, or replace the required real runs. The detector-error case verifies that the SDK helper's typed failure reaches the production backend and that transcription is never called. The cleanup test holds actual backend settlement, acknowledges both control callers capturing the cleanup task and checks the actor-owned waiter count before releasing it. No sleeps/yields/negative-timeout assertions order these races. SDK progress text contains context before SOT; the boundary test verifies output-only token decoding. Empty prefill callbacks cannot publish or create first-partial metrics, and only the first SDK window publishes partials; final results cover all windows.
+
+Repair-focused command (fresh result path on reproduction):
+
+```sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT -configuration Debug \
+  -destination 'platform=macOS,arch=arm64' -derivedDataPath /private/tmp/stt-t14-work/DerivedData \
+  -resultBundlePath /private/tmp/stt-t14-repair-accepted-focused.xcresult \
+  -only-testing:LocalLectureSTTTests/WhisperKitSDKBoundaryTests \
+  -only-testing:LocalLectureSTTTests/WhisperKitSTTEngineTests \
+  -only-testing:LocalLectureSTTTests/STTEngineTests -only-testing:LocalLectureSTTTests/FakeSTTEngineTests \
+  -only-testing:LocalLectureSTTTests/ModelRepositoryTests -only-testing:LocalLectureSTTTests/ModelDownloadTests \
+  -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 60 CODE_SIGNING_ALLOWED=NO test
+```
+
+The final full repair command uses the same project/scheme/destination/derived data/lockfile/timeouts, omits the `-only-testing` selectors, uses `/private/tmp/stt-t14-repair-final-full.xcresult` and `build test`. Repair actual SDK/model/cache/output locations and measured outcomes are in [acceptance](T14_ACCEPTANCE.md#same-task-review-repair--three-findings). RTF in automatic mode includes the explicit detection pass; do not compare it to the earlier forced-English timing as an optimization claim. Source/input/output directories, runtime JSON/TXT and logs remain disposable and outside Git. G1/G2 remain unpassed.
+
+
+Final repair real-model replay (equivalent shell form of the executed subprocess argv/environment; choose new output paths when reproducing because exports never overwrite):
+
+```sh
+t14_repair=/private/tmp/stt-t14-repair.RpKBXk
+swift build --scratch-path "$t14_repair/CLIBuild"
+# Existing input-hints111/112.json are copies of input.json with promptText = " test" repeated 111/112 times.
+# Only hints/case/provenance differ; both retain the same canonical samples and PCM checksum.
+for t14_cache in home cache tmp; do mkdir -p "$t14_repair/VerifiedCache/$t14_cache"; done
+t14_offline() {
+  /usr/bin/sandbox-exec -f tools/t14/offline.sb /usr/bin/env \
+    CFFIXED_USER_HOME="$t14_repair/VerifiedCache/home" \
+    XDG_CACHE_HOME="$t14_repair/VerifiedCache/cache" TMPDIR="$t14_repair/VerifiedCache/tmp" \
+    "$t14_repair/CLIBuild/debug/stt-benchmark" "$@"
+}
+t14_offline run tools/t14/candidate.json /private/tmp/stt-t14-offline/store \
+  /private/tmp/stt-t14-assets/input.json "$t14_repair/VerifiedAutomaticOffline" automatic
+t14_offline cancel tools/t14/candidate.json /private/tmp/stt-t14-offline/store \
+  /private/tmp/stt-t14-assets/input.json "$t14_repair/VerifiedAutomaticCancel" automatic
+t14_offline run tools/t14/candidate.json /private/tmp/stt-t14-offline/store \
+  "$t14_repair/input-hints111.json" "$t14_repair/VerifiedContext111" automatic
+t14_offline run tools/t14/candidate.json /private/tmp/stt-t14-offline/store \
+  "$t14_repair/input-hints112.json" "$t14_repair/VerifiedContext112" english
+# Last command is expected to exit 1 with invalidInput; do not count that as successful inference.
+```
+
+The two negative commands use the same `t14_offline run tools/t14/candidate.json` argv with store `$t14_repair/NegativeStore`, original `input.json`, language `automatic`, and outputs `$t14_repair/VerifiedMissingTokenizer` / `VerifiedMissingComponent`. Before each invocation only its named asset is moved out of that APFS clone, and restored in `finally`; original verified source/stores are untouched. Both exit 1 with `loadFailed` before SDK construction. The network probe is `/usr/bin/sandbox-exec -f tools/t14/offline.sb /usr/bin/python3 -c 'import socket; socket.create_connection(("1.1.1.1",443),timeout=2)'`; exit 1 is expected with EPERM. Cache/profile limits and generation/import commands above still apply.
+
+Actual JSON/TXT exports and per-command `.log`/`.exit` are under that repair root. The 111-token repeated-word stress hint produced repeated model output and slower processing; it proves the accepted boundary, not useful context accuracy or a performance gate. Its corrected first partial is about 7.05 s, rather than counting prompt/prefill text as a transcript. Full validation is repeated after the real runs on the same frozen inputs; current counts, report hashes and measurements are in acceptance.

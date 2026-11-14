@@ -248,6 +248,20 @@ actor FileModelRepository: ModelRepository {
             return result
         } catch { throw ModelOperationFailure(failure(error)) }
     }
+    /// Transfers the exclusive claim to an engine until its backend has actually stopped.
+    func acquireUseLease(_ key: InstalledModelKey) async throws -> ModelUseLease {
+        let claim: ModelStoreClaim
+        do { claim = try self.claim(key) } catch { throw ModelOperationFailure(failure(error)) }
+        do {
+            let dir = try package(key, store: ModelPackageDirectory(url: storeURL()))
+            let before = try snapshot(dir); let value = try manifest(dir, key: key)
+            try checkCatalogOrigin(value)
+            try await verify(dir, descriptor: value.descriptor, installed: true)
+            guard try snapshot(dir) == before else { throw ModelRepositoryCode.identityChanged }
+            return try ModelUseLease(directory: dir, descriptor: value.descriptor, claim: claim)
+        } catch { claim.release(); throw ModelOperationFailure(failure(error)) }
+    }
+
     func importPackage(from source: ModelImportSourceID, descriptor: ModelPackageDescriptor?, origin: ModelPackageOrigin = .suppliedLocal) async throws -> ModelImportResult {
         guard let descriptor else { throw ModelOperationFailure(.descriptorRequired) }
         let claim: ModelStoreClaim

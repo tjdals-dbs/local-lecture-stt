@@ -1,26 +1,26 @@
 # Local Lecture STT Project Status
 
 - Status document version: 1.0
-- Last updated: 2026-11-14
+- Last updated: 2026-11-15
 - Specification baseline: `MVP_SPEC.md` 1.0, confirmed
 - Implementation plan: `IMPLEMENTATION_PLAN.md` 1.4
 
 ## Current position
 
 - Current milestone: M2 models and engines; M1/G1 hardware validation remains unverified
-- Current Task: none in progress; T13 squash-integrated into dev after user-accepted review and separate integration authorization
-- Next action: T14 is the next planned Task; await a separate implementation prompt
-- Latest completed Task: T13 explicit model downloads, resumable transfer and verified atomic installation (through separately authorized dev integration)
+- Current Task: none in progress; T14 squash-integrated into dev after independent review and separate integration authorization
+- Next action: T15 whisper.cpp experimental adapter is the next planned Task; await a separate implementation prompt
+- Latest completed Task: T14 pinned offline WhisperKit experimental adapter and reproducible developer benchmark (through independently reviewed, separately authorized dev integration)
 - Latest passed gate: T01 initial runnable baseline
-- Application implementation: recording, app-owned final M4A generation and recovery, lifecycle policy, framework-independent STTEngine contracts/fake, an offline model repository with verified local import and confirmed deletion, and an explicit resumable download service using the shared verified atomic installer. The production catalog remains empty; real model format recognizers/inference, model-management UI, live STT wiring and transcript finalization remain unimplemented.
+- Application implementation: recording, app-owned final M4A generation and recovery, lifecycle policy, framework-independent STTEngine contracts/fake, verified model import/download/deletion, and an explicitly invoked experimental WhisperKit backend with real local model/tokenizer validation, bounded optional context, lifetime model-use lease and developer benchmark. Actual developer inference is implemented. The production catalog remains empty; product model-management UI, live capture/STT integration and canonical transcript finalization remain unimplemented, and the final product engine/model is undecided.
 
 ## Repository state at this handoff
 
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
 - Local branch: `dev`
-- Approved T13 source: `c7d323c01ecb322b1b855b9b0d740a371148b661`, including all five review repairs; the user accepted re-review and explicitly authorized Phase 2 integration on 2026-11-14
-- `dev` branch: T13 is squash-integrated from the approved source onto latest `dev`/`origin/dev` `1ff211ffbf73f7d35818a4f2e5d154c21fe5bb63`; final integration SHA, committed-HEAD validation, exact-head CI and verified task-branch cleanup are recorded in the Phase 2 task handoff
+- Approved T14 source: `b4551c21324e76952f07cc4fd3b85a24e2594492`, including all three review repairs; the user accepted independent review and separately authorized Phase 2 integration on 2026-11-15
+- `dev` branch: T14 is squash-integrated from the approved source onto unchanged latest `dev`/`origin/dev` `1724853e1d1942c7f32c0b8d998177d76d2f7c2c`; final integration SHA, committed-HEAD validation, exact-head CI and verified task-branch cleanup are recorded in the Phase 2 task handoff
 - `main` and `origin/main`: preserved at the verified T01 baseline `38e126f92ac823d29306ea8c1f7703f7060a5818`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -51,11 +51,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T11 STTEngine contracts and deterministic fake | Complete on `dev` through independently reviewed, separately authorized squash integration | Framework-independent Codable/Sendable payloads, immutable model/session provenance, bounded FIFO/terminal ownership and acknowledged logical time. Approved source: 299 tests including 35 T11 selectors and exact-task CI passed. New integration-commit validation is recorded in the Phase 2 handoff. |
 | T12 model repository, manifests and local import | Complete on dev through user-accepted review and separately authorized squash integration | Value-only schema/provenance, offline inventory and format-validation policy, pinned/no-clobber verified import, exact-once scopes, session-reference assessment and confirmed deletion. Approved source/re-review: 332 tests (322 unit + 10 integration), including 33 T12 and 35 T11 selectors; exact-source CI passed. New dev commit verification is recorded in the Phase 2 handoff. |
 | T13 explicit model downloads and verified atomic installation | Complete on dev through user-accepted review and separately authorized squash integration | Capacity admission, real URLSession receipts/range resume, private durable state, shared verification/publication, exact task cancellation and pinned cleanup. Approved source/re-review: 381 tests (371 unit + 10 integration), including 49 T13, 33 T12 and 35 T11 selectors; all five review repairs and exact-source CI passed. Committed-dev verification is recorded in the Phase 2 handoff. |
+| T14 experimental WhisperKit adapter and developer benchmark | Complete on dev through independently reviewed, separately authorized squash integration | Approved source: 423 tests (413 unit + 10 integration), including 42 T14, 49 T13, 33 T12 and 35 T11; actual large-v3 offline repetition/cancel/context/negative evidence and exact-source CI passed. Committed-dev validation is separate and recorded in the Phase 2 handoff. |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-T13 is integrated into `dev` after review accepted by the user and separate Phase 2 authorization on 2026-11-14. Only T13's completion checkbox is newly checked in section 9 of `IMPLEMENTATION_PLAN.md`. T14 remains unstarted and requires a separate implementation prompt. G1 remains **Unverified**, not passed or waived; no `dev → main` promotion, release or later Task implementation is authorized.
+T14 is integrated into `dev` after independent review accepted by the user and separate Phase 2 authorization on 2026-11-15. Only T14's completion checkbox is newly checked in section 9 of `IMPLEMENTATION_PLAN.md`. T15 remains unimplemented and awaits a separate implementation prompt. G1 remains **Unverified** and G2 pending/unpassed; no `dev → main` promotion, release, final product engine/model selection or later Task implementation is authorized.
 
 ## Gate status
 
@@ -133,6 +134,15 @@ T13 is integrated into `dev` after review accepted by the user and separate Phas
 - Explicit commands own catalog-bound operations. Capacity is checked as `3S − C + 16 MiB` before uncommitted transfer; URLSession receipts are opened during the delegate callback, Apple resume data stays opaque, and completed payloads/catalog identity are revalidated before reuse. Shared T12 claims and pinned no-follow ownership cover transfer, verification, atomic publication and cleanup. Fresh cancellation joins the exact retained task; partial-copy resume preserves completed siblings; public retry reconciles the original operation. Verified final installations take precedence over disposable remnants/capacity, and postcommit cancellation preserves installed truth with a warning.
 - Committed-dev verification runs with `xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /private/tmp/stt-t13-integration.fYtZLB/DerivedData -resultBundlePath /private/tmp/stt-t13-integration.fYtZLB/CommittedHead.xcresult -test-timeouts-enabled YES -default-test-execution-time-allowance 60 CODE_SIGNING_ALLOWED=NO build test`. The Phase 2 final handoff records actual unit/integration/T13/T12/T11 pass/fail/skip counts, integration SHA, exact-head dev CI, local/origin agreement and branch cleanup. No amendment to insert the commit's own future SHA is required.
 - [T13 acceptance and all five repairs](docs/T13_ACCEPTANCE.md), [architecture](docs/ARCHITECTURE.md) and [development/manual procedure](docs/DEVELOPMENT.md#t13-download-verification) record the implemented scope. Historical Phase 1 restrictions are superseded only by this separate integration authorization. The production catalog remains empty and the live format recognizer remains unavailable. Signed-Sandbox/background-daemon/process-relaunch/lid/power checks and real inference remain Pending/Unverified; automated ordinary-session range resume is not proof of daemon behavior or the full MVP 17.7 suite. G1 stays Unverified, main stays at the T01 baseline, and T14 awaits a new prompt.
+
+## T14 handoff
+
+- Approved source: `b4551c21324e76952f07cc4fd3b85a24e2594492`; starting/latest fetched dev was unchanged at `1724853e1d1942c7f32c0b8d998177d76d2f7c2c`. [Separate Phase 2 authorization](prompts/T14_DEV_INTEGRATION.md) on 2026-11-15 permits this squash integration, completion records, committed-dev validation/push/CI and subsequent verified task-branch deletion. No preparation commit or conflict resolution was needed.
+- The coordinator independently verified 423 tests (413 unit + 10 integration), including all 42 T14 (32 engine + 10 SDK boundary), 49 T13, 33 T12 and 35 T11, with zero failures/skips; [exact-source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/43571116655) passed. Source result: `/private/tmp/stt-t14-independent.zMaYO3/Full.xcresult`; actual `AutomaticOffline` and `CancelReuseOffline` reports in that directory cover installed-model inference under OS network denial and fresh user/cache roots. These are source results, not new dev results.
+- OSS WhisperKit v1.1.1 is pinned at `1bbc57cb7fe6410248a685b1c5a3c6d56adc2ed4`; one non-quantized Float16 large-v3 candidate uses Core ML revision `0f63a7800b00dd0226abd051b906c246e1907482`, with the tokenizer/package identities in [acceptance](docs/T14_ACCEPTANCE.md#pins-trust-and-license-audit). The developer catalog is fixed and separate from the empty production catalog; ordinary app construction does not load/download/infer. No product engine/model choice or updater is added.
+- Repaired contracts: at most 111 prompt tokens reach actual SDK prefill without suffix loss, context/control tokens cannot masquerade as transcript partials, explicit checked detection cannot turn an error into English success, and end/cancel join owning cleanup through lease release despite control-caller cancellation. [Architecture](docs/ARCHITECTURE.md#t14-experimental-whisperkit-adapter-and-developer-benchmark) and [repair evidence](docs/T14_ACCEPTANCE.md#same-task-review-repair--three-findings) describe FIFO, time mapping, ownership and actual SDK-boundary/held-cleanup regressions.
+- Integration preserves all 89 approved executable/test/project/package/catalog/bootstrap/offline-profile input hashes, so the reviewed real-model/offline evidence is reused without another model acquisition/inference run. Committed dev verification uses `xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /private/tmp/stt-t14-work/DerivedData -resultBundlePath /private/tmp/stt-t14-integration.WeavII/CommittedHead.xcresult -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -test-timeouts-enabled YES -default-test-execution-time-allowance 60 CODE_SIGNING_ALLOWED=NO build test`, plus `swift build --scratch-path /private/tmp/stt-t14-repair.RpKBXk/CLIBuild --disable-automatic-resolution`. Actual committed-dev counts, SHA, exact-head CI and cleanup outcome are recorded in the Phase 2 final handoff, without self-referential amendments.
+- [Development](docs/DEVELOPMENT.md#t14-same-task-review-repairs) retains reproducible commands. Short synthetic-speech RTF around 0.43 does not pass a performance/accuracy gate. The 111-token repeated-word stress input produces repetition, roughly 7 s first partial and RTF around 1.74. G1 physical microphone/TCC/signed-Sandbox/bookmark/lid/power/long-recording checks remain Unverified; G2/real-lecture comparisons remain unpassed. Main stays at T01, T15 awaits a separate prompt, and live STT/transcript finalization remain unimplemented.
 
 ## Status update rules
 

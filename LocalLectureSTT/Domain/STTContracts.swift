@@ -170,30 +170,48 @@ struct STTRequestContext: Codable, Sendable, Equatable {
     }
 }
 
+/// Optional text only; token IDs remain Infrastructure details. No implicit history.
+struct STTDecodingHints: Codable, Sendable, Equatable {
+    static let maximumUTF8Bytes = 4096
+    let promptText: String
+    init(promptText: String) throws {
+        guard promptText.utf8.count <= Self.maximumUTF8Bytes,
+              !promptText.contains("\0") else { throw STTEngineError(.invalidInput) }
+        self.promptText = promptText
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(promptText: c.decode(String.self, forKey: .promptText))
+    }
+}
+
 struct STTInferenceRequest: Codable, Sendable, Equatable {
     let context: STTRequestContext
     let audio: STTInferenceAudio
+    let decodingHints: STTDecodingHints?
 
     init(session: STTSessionConfiguration, requestID: STTRequestID, sequence: Int64,
-         mediaStart: MediaMilliseconds, audio: STTInferenceAudio) throws {
+         mediaStart: MediaMilliseconds, audio: STTInferenceAudio, decodingHints: STTDecodingHints? = nil) throws {
         let end = mediaStart.rawValue.addingReportingOverflow(audio.duration.rawValue)
         guard !end.overflow else { throw STTEngineError(.invalidInput) }
         try self.init(context: STTRequestContext(session: session, requestID: requestID, sequence: sequence,
-                                               mediaStart: mediaStart, mediaEnd: MediaMilliseconds(end.partialValue)), audio: audio)
+                                               mediaStart: mediaStart, mediaEnd: MediaMilliseconds(end.partialValue)), audio: audio, decodingHints: decodingHints)
     }
 
-    init(context: STTRequestContext, audio: STTInferenceAudio) throws {
+    init(context: STTRequestContext, audio: STTInferenceAudio, decodingHints: STTDecodingHints? = nil) throws {
         guard context.mediaEnd.rawValue - context.mediaStart.rawValue == audio.duration.rawValue else {
             throw STTEngineError(.invalidInput)
         }
         self.context = context
         self.audio = audio
+        self.decodingHints = decodingHints
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(context: c.decode(STTRequestContext.self, forKey: .context),
-                      audio: c.decode(STTInferenceAudio.self, forKey: .audio))
+                      audio: c.decode(STTInferenceAudio.self, forKey: .audio),
+                      decodingHints: c.decodeIfPresent(STTDecodingHints.self, forKey: .decodingHints))
     }
 }
 
