@@ -8,7 +8,7 @@ private struct NoSessionRoots: ModelReferenceChecking {
         .init(sessions: [], warnings: ["Disposable developer store; no session roots configured"])
     }
 }
-private final class FootprintSampler: STTBenchmarkMemoryProbe, @unchecked Sendable {
+final class FootprintSampler: STTBenchmarkMemoryProbe, @unchecked Sendable {
     private let queue = DispatchQueue(label: "stt.benchmark.memory")
     private let timer: DispatchSourceTimer
     private let lock = NSLock()
@@ -62,7 +62,7 @@ private final class BenchmarkNativeHooks: @unchecked Sendable {
 /// Only the single-job benchmark executable owns stderr. The library exposes no
 /// per-context device getter. Keep upstream diagnostics and classify actual load
 /// evidence without installing a process-global ggml callback in either adapter.
-private final class NativeBenchmarkTrace {
+final class NativeBenchmarkTrace {
     private let url: URL
     private var original: Int32
     init(directory: URL, repetition: Int) throws {
@@ -136,7 +136,7 @@ struct BenchmarkMain {
                 mediaStart: MediaMilliseconds(5000))
             try save(json(input), to: url(args[2])); print("Prepared \(samples.count) frames; \(input.pcmSHA256)"); return
         }
-        guard (command == "import" && args.count == 4) || ((command == "run" || command == "cancel") && (5...6).contains(args.count)) else {
+        guard (command == "import" && args.count == 4) || (command == "lecture" && args.count == 5) || ((command == "run" || command == "cancel") && (5...6).contains(args.count)) else {
             throw STTEngineError(.invalidInput)
         }
         let catalog = try JSONDecoder().decode(BundledModelCatalog.self, from: Data(contentsOf: url(args[1])))
@@ -156,18 +156,9 @@ struct BenchmarkMain {
             let result = try await repository.importPackage(from: source, descriptor: descriptor, origin: .bundledCatalog)
             print(String(decoding: try json(result), as: UTF8.self)); return
         }
-        let languageMode: LanguageMode
-        if args.count == 5 { languageMode = .english }
-        else if let selected = LanguageMode(rawValue: args[5]) { languageMode = selected }
-        else { throw STTEngineError(.invalidConfiguration) }
-        let input = try JSONDecoder().decode(STTBenchmarkInput.self, from: Data(contentsOf: url(args[3])))
-        guard STTBenchmarkInput.pcmDigest(input.audio.samples) == input.pcmSHA256 else { throw STTEngineError(.invalidInput) }
         let output = url(args[4])
-        let export = try STTBenchmarkOutput(output)
         let options = try STTInferenceOptions(partialResults: true, timestamps: true, computeMode: descriptor.compute)
         let configuration = STTModelConfiguration(engine: descriptor.engine, model: descriptor.model, options: options)
-        var measurements: [STTBenchmarkMeasurement] = []
-        var reportSession = STTSessionConfiguration(sessionID: SessionID(), operationID: STTOperationID(UUID()), model: configuration, languageMode: languageMode)
         // Stream acknowledgements belong to this benchmark. Only the cancelled
         // repetition arms them; use the same engine for all three full lifecycles.
         let hooks = BenchmarkNativeHooks()
@@ -179,6 +170,19 @@ struct BenchmarkMain {
         } else {
             engine = try WhisperKitSTTEngine(repository: repository)
         }
+        if command == "lecture" {
+            try await LectureBatch.measure(engine: engine, descriptor: descriptor, planURL: url(args[3]), options: options, output: output)
+            return
+        }
+        let languageMode: LanguageMode
+        if args.count == 5 { languageMode = .english }
+        else if let selected = LanguageMode(rawValue: args[5]) { languageMode = selected }
+        else { throw STTEngineError(.invalidConfiguration) }
+        let input = try JSONDecoder().decode(STTBenchmarkInput.self, from: Data(contentsOf: url(args[3])))
+        guard STTBenchmarkInput.pcmDigest(input.audio.samples) == input.pcmSHA256 else { throw STTEngineError(.invalidInput) }
+        let export = try STTBenchmarkOutput(output)
+        var measurements: [STTBenchmarkMeasurement] = []
+        var reportSession = STTSessionConfiguration(sessionID: SessionID(), operationID: STTOperationID(UUID()), model: configuration, languageMode: languageMode)
         var effective: [String] = []
         var cancellationVerified = true
         for repetition in 0...2 {

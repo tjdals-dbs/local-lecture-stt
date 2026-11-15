@@ -29,6 +29,7 @@ protocol WhisperAdapterProfile: Sendable {
     static var identity: EngineIdentity { get }
     static var compute: String { get }
     static var format: String { get }
+    static func supportsTurbo(_ descriptor: ModelPackageDescriptor) -> Bool
     static func makeBackend() -> any WhisperIntervalBackend
 }
 
@@ -36,6 +37,9 @@ enum WhisperKitProfile: WhisperAdapterProfile {
     static let identity = try! EngineIdentity(id: EngineID("whisperkit"), version: "1bbc57cb7fe6410248a685b1c5a3c6d56adc2ed4")
     static let compute = "cpuAndGPU+cpuAndNeuralEngine;prewarm=true"
     static let format = "whisperkit-coreml-v1"
+    static func supportsTurbo(_ descriptor: ModelPackageDescriptor) -> Bool {
+        descriptor.variant == "large-v3-turbo" && WhisperKitModelValidator.matchesPin(descriptor)
+    }
     static func makeBackend() -> any WhisperIntervalBackend { SDKWhisperKitBackend() }
 }
 
@@ -126,7 +130,8 @@ actor WhisperIntervalEngine<Profile: WhisperAdapterProfile>: BenchmarkIntervalEn
             let acquired = try await resolve(key); lease = acquired
             try Self.checkCancellation()
             guard acquired.descriptor.engine == configuration.engine, acquired.descriptor.model == configuration.model,
-                  acquired.descriptor.format == Profile.format, acquired.descriptor.variant == "large-v3",
+                  acquired.descriptor.format == Profile.format,
+                  acquired.descriptor.variant == "large-v3" || Profile.supportsTurbo(acquired.descriptor),
                   acquired.descriptor.quantization == "none", acquired.descriptor.compute == Self.compute else {
                 throw STTEngineError(.unsupportedModel)
             }

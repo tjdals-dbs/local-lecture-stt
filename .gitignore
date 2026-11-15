@@ -76,5 +76,6 @@ downloads/
 *.zip
 
 # Explicit developer STT benchmark assets/results (not default app data)
+tools/t16/__pycache__/
 benchmark-results/
 benchmark-assets/

@@ -9,18 +9,18 @@
 
 - Current milestone: M2 models and engines; M1/G1 hardware validation remains unverified
 - Current Task: none in progress
-- Next action: T16 engine/model comparison and user decision, awaiting a separate comparison prompt
-- Latest completed Task: T15 experimental whisper.cpp adapter, independently reviewed and squash-integrated into dev with separate authorization
+- Next action: await a separate G2 decision and instructions to start T17
+- Latest completed Task: T16 lecture comparison and user selection of whisper.cpp with non-quantized large-v3, independently reviewed and squash-integrated into dev
 - Latest passed gate: T01 initial runnable baseline
-- Application implementation: recording, app-owned M4A finalization and recovery, lifecycle policy, framework-independent STTEngine contracts/fake and verified model import/download/deletion. The experimental WhisperKit and whisper.cpp interval adapters run developer inference on verified, leased installations and share cancellation, input and benchmark report contracts. Each uses a pinned engine and a separate candidate manifest with strict local format validation. The production catalog is empty. Product model-management UI, live capture/STT integration and canonical transcript finalization remain unimplemented. The product engine and model await user selection.
+- Application implementation: recording, app-owned M4A finalization and recovery, lifecycle policy, framework-independent STTEngine contracts/fake and verified model import/download/deletion. The experimental WhisperKit and whisper.cpp interval adapters run developer inference on verified, leased installations and share cancellation, input and benchmark report contracts. Each uses a pinned engine and separate candidate manifests with strict local format validation. The production catalog is empty. Product model-management UI, live capture/STT integration and canonical transcript finalization remain unimplemented. T17 will connect the selected default to the product. [Engine and model decision](docs/T16_ENGINE_MODEL_DECISION.md)
 
 ## Repository state at this handoff
 
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
 - Local branch: `dev`
-- Approved T15 source: `6a5f0dde8e35423ecd8d4ab918cb73f5ea556def`. The user accepted independent review and authorized Phase 2 integration on 2026-11-15.
-- `dev` branch: T15 squash-integrated onto `59690f3dee5e21330e3ac60646b3da51d0dbd433`, the latest fetched `origin/dev`. The Phase 2 delivery handoff records the resulting SHA, its validation and CI, and branch cleanup.
+- Approved T16 source: `672ec984574951e407a683f0a84d35983dbba426`. The user accepted independent review and authorized Phase 2 integration on 2026-11-15.
+- `dev` branch: T16 squash-integrated onto `177152fbc4df848a3dc12d58f41602c6d8e57022`, the latest fetched `origin/dev` and the approved source's parent. The Phase 2 delivery handoff records the resulting SHA, its validation and CI, and branch cleanup.
 - `main` and `origin/main`: preserved at the verified T01 baseline `38e126f92ac823d29306ea8c1f7703f7060a5818`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -53,11 +53,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T13 explicit model downloads and verified atomic installation | Complete on dev through user-accepted review and separately authorized squash integration | Capacity admission, real URLSession receipts/range resume, private durable state, shared verification/publication, exact task cancellation and pinned cleanup. Approved source/re-review: 381 tests (371 unit + 10 integration), including 49 T13, 33 T12 and 35 T11 selectors; all five review repairs and exact-source CI passed. Committed-dev verification is recorded in the Phase 2 handoff. |
 | T14 experimental WhisperKit adapter and developer benchmark | Complete on dev through independently reviewed, separately authorized squash integration | Approved source: 423 tests (413 unit + 10 integration), including 42 T14, 49 T13, 33 T12 and 35 T11; actual large-v3 offline repetition/cancel/context/negative evidence and exact-source CI passed. Committed-dev validation is separate and recorded in the Phase 2 handoff. |
 | T15 experimental whisper.cpp adapter | Complete on dev through independently reviewed, separately authorized squash integration | Approved source passed 432 tests and task CI. The coordinator reproduced installed large-v3 automatic transcription and active cancellation/reuse under OS network denial. [Integration evidence](docs/T15_ACCEPTANCE.md#phase-2-dev-integration) |
+| T16 lecture comparison and user decision | Complete on dev. The user selected whisper.cpp with non-quantized large-v3. | Independent review reproduced three 10-minute excerpts and verified 360 window identities across four candidates. The selected pair returned 90 nonempty finals in 90 windows. [Decision and measurements](docs/T16_ENGINE_MODEL_DECISION.md) |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-T15 is integrated into `dev`. Section 9 of `IMPLEMENTATION_PLAN.md` records T15 completion. T16 awaits a separate comparison prompt and the product choice requires the user's review of lecture samples. G1 remains **Unverified** and G2 is pending.
+Section 9 of `IMPLEMENTATION_PLAN.md` records T16 completion. G1 remains **Unverified**. G2 awaits a separate gate decision. T17 product integration awaits a new instruction.
 
 ## Gate status
 
@@ -65,7 +66,7 @@ T15 is integrated into `dev`. Section 9 of `IMPLEMENTATION_PLAN.md` records T15 
 | --- | --- | --- |
 | T01 initial runnable baseline | Passed | First `main` created from verified `dev` |
 | G1 safe recorder | Unverified; manual validation deferred by user on 2026-11-13 | `v0.1.0-alpha.1` (not authorized) |
-| G2 engine and model selection | Pending | `v0.1.0-alpha.2` |
+| G2 engine and model selection | Pending separate gate decision | `v0.1.0-alpha.2` |
 | G3 feature complete | Pending | `v0.1.0-beta.1` |
 | G4 MVP complete | Pending | `v0.1.0` |
 
@@ -150,6 +151,11 @@ T15 is integrated into `dev`. Section 9 of `IMPLEMENTATION_PLAN.md` records T15 
 - Approved source `6a5f0dde8e35423ecd8d4ab918cb73f5ea556def` passed 432 tests (422 unit and 10 integration), including 9 native adapter tests. The coordinator independently verified the same selectors and actual offline automatic transcription, native abort and same-engine reuse. [Source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/43625949746) · [Integration authorization](prompts/T15_DEV_INTEGRATION.md)
 - The v1.9.5/b5454 XCFramework uses source `d1be6fde11ac6e0407606b4e42fe72d34add8037` and reports ABI `1.9.5-dev`. The non-quantized GGML large-v3 candidate uses revision `5359861c739e955e79d9a303bcbc70fb988958b1`. One serial queue owns the native context and verifies a model-sized temporary snapshot. Cancellation holds the model lease through native return and callback settlement. Automatic detection pins a checked language, hints use a 223-token budget, and checked 10 ms segment ticks receive the session offset once. [Architecture](docs/ARCHITECTURE.md#t15-experimental-whispercpp-adapter)
 - Execution inputs match the approved source. Phase 2 reuses its real-model evidence and runs the full unsigned arm64 suite and CLI build on committed dev before push and exact-SHA CI. The short synthetic case leaves lecture accuracy, long-running live STT and G1 hardware/lifecycle checks open. [Acceptance and evidence](docs/T15_ACCEPTANCE.md#phase-2-dev-integration) · [Development commands](docs/DEVELOPMENT.md#t15-native-benchmark)
+
+## T16 handoff
+
+- The approved source passed 423 unit and 10 integration tests, four Python comparison tests and the SwiftPM benchmark build. The Phase 2 delivery handoff reports the validation run on the committed dev SHA. [Approved source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/43706895281) · [Integration authorization and commands](prompts/T16_DEV_INTEGRATION.md)
+- Eight of the twelve candidate/lecture runs returned finals for every window. Each of the other four runs had one `invalidResponse`. Korean accuracy, English terminology and hallucination/repetition/omission have no human scores. The integration preserves the reviewed engine code, model manifests, dependency pins and comparison tools, so the original measurements support the decision. [Decision](docs/T16_ENGINE_MODEL_DECISION.md) · [Reproduction and review](docs/DEVELOPMENT.md#t16-developer-lecture-comparison)
 
 ## Status update rules
 

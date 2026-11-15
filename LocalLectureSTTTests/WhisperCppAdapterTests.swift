@@ -115,6 +115,30 @@ final class WhisperCppAdapterTests: XCTestCase {
         XCTAssertThrowsError(try WhisperCppSTTEngine.segments(.init(text: "aa", intervals: [interval, interval], language: nil), request: request))
     }
 
+    func testDeveloperModelPinsRejectRelabelledVariants() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        for (catalog, turbo, native) in [
+            ("t14/candidate.json", false, false), ("t16/whisperkit-turbo.json", true, false),
+            ("t15/candidate.json", false, true), ("t16/whispercpp-turbo.json", true, true)
+        ] {
+            let url = repository.appendingPathComponent("tools").appendingPathComponent(catalog)
+            let descriptor = try XCTUnwrap(JSONDecoder().decode(BundledModelCatalog.self, from: Data(contentsOf: url)).entries.first)
+            XCTAssertEqual(descriptor.variant, turbo ? "large-v3-turbo" : "large-v3")
+            if native {
+                XCTAssertEqual(try WhisperCppModelValidator.variant(descriptor), turbo ? .turbo : .large)
+            } else {
+                XCTAssertTrue(WhisperKitModelValidator.matchesPin(descriptor))
+            }
+            let relabelled = try ModelPackageDescriptor(engine: descriptor.engine, modelID: descriptor.model.id,
+                revision: descriptor.model.revision, format: descriptor.format, variant: turbo ? "large-v3" : "large-v3-turbo",
+                quantization: descriptor.quantization, compute: descriptor.compute, licenseIdentifier: descriptor.licenseIdentifier,
+                licenseTextOrReference: descriptor.licenseTextOrReference, licenseProvenance: descriptor.licenseProvenance,
+                files: descriptor.files)
+            XCTAssertFalse(WhisperKitModelValidator.matchesPin(relabelled))
+            XCTAssertThrowsError(try WhisperCppModelValidator.variant(relabelled))
+        }
+    }
+
     func testHeaderRequiresArchitecturePrecisionVocabularyAndExactSize() throws {
         let file = tmpfile()!
         defer { fclose(file) }
@@ -122,15 +146,22 @@ final class WhisperCppAdapterTests: XCTestCase {
         var words: [UInt32] = [0x67676d6c, 51866, 1500, 1280, 20, 32, 448, 1280, 20, 32, 128, 1, 128, 201]
         var vocab: UInt32 = 50257
         XCTAssertEqual(pwrite(fd, &words, 56, 0), 56)
-        XCTAssertThrowsError(try WhisperCppModelValidator.checkHeader(fd, size: WhisperCppModelValidator.size))
+        XCTAssertThrowsError(try WhisperCppModelValidator.checkHeader(fd, size: WhisperCppModelValidator.Variant.large.size))
         XCTAssertEqual(pwrite(fd, &vocab, 4, 56 + 128 * 201 * 4), 4)
         XCTAssertThrowsError(try WhisperCppModelValidator.checkHeader(fd, size: 56))
-        try WhisperCppModelValidator.checkHeader(fd, size: WhisperCppModelValidator.size)
+        try WhisperCppModelValidator.checkHeader(fd, size: WhisperCppModelValidator.Variant.large.size)
+        let turboSize = WhisperCppModelValidator.Variant.turbo.size
+        XCTAssertThrowsError(try WhisperCppModelValidator.checkHeader(fd, size: turboSize, variant: .turbo))
+        var turbo = words
+        turbo[9] = 4
+        XCTAssertEqual(pwrite(fd, &turbo, 56, 0), 56)
+        try WhisperCppModelValidator.checkHeader(fd, size: turboSize, variant: .turbo)
+        XCTAssertThrowsError(try WhisperCppModelValidator.checkHeader(fd, size: WhisperCppModelValidator.Variant.large.size))
         for i in [0, 1, 4, 6, 10, 11, 12] {
             var bad = words
             bad[i] = 7
             XCTAssertEqual(pwrite(fd, &bad, 56, 0), 56)
-            XCTAssertThrowsError(try WhisperCppModelValidator.checkHeader(fd, size: WhisperCppModelValidator.size))
+            XCTAssertThrowsError(try WhisperCppModelValidator.checkHeader(fd, size: WhisperCppModelValidator.Variant.large.size))
         }
     }
 

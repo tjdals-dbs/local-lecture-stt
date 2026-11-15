@@ -630,3 +630,65 @@ xcrun xcresulttool get test-results tests --path "$D/Full.xcresult"
 ```
 
 For the focused execution insert `-only-testing:LocalLectureSTTTests/WhisperCppAdapterTests` and use a fresh `Focused.xcresult` path. The process sandbox covers this benchmark invocation. Physical microphone/TCC, signed app sandbox/bookmarks, lid/power, long recordings and lecture accuracy remain unverified.
+
+## T16 developer lecture comparison
+
+Use Python 3, working FFmpeg/ffprobe, the pinned arm64 CLI and the offline profile. Keep the input folder outside Git and use a fresh ignored output directory for each matrix. The production model catalog stays empty. T14/T15 describe the two original installations. The two additional catalogs in `tools/t16` pin each file, size, SHA-256, revision and license. The Core ML folder `openai_whisper-large-v3-v20240930` is the 32-encoder/4-decoder model with 128 Mel bins and Float16 weights. It uses the pinned T14 multilingual tokenizer. The native turbo file embeds its vocabulary and contains 235 F16 and 352 F32 tensors. Both packages use the T12 checked import and per-load lease validation.
+
+```sh
+swift build --disable-automatic-resolution
+BIN="$(swift build --show-bin-path)/stt-benchmark"
+D=$(mktemp -d /private/tmp/stt-t16-assets.XXXXXX)
+python3 tools/t14/bootstrap.py --candidate whisperkit-turbo "$D/coreml"
+python3 tools/t14/bootstrap.py --candidate whispercpp-turbo "$D/native"
+"$BIN" import tools/t16/whisperkit-turbo.json "$D/coreml" "$D/store"
+"$BIN" import tools/t16/whispercpp-turbo.json "$D/native" "$D/store"
+```
+
+Set `WK_LARGE_STORE` and `CPP_LARGE_STORE` to existing installations and `SAMPLE_A/B/C` to three source files. Start/duration arguments are milliseconds. Independent ranges of a longer source are also supported. Each conversion checks the decoded frame count, hashes the source and emits the common 16 kHz mono Float32 input, listening WAV and window manifest. Channel weights are equal. The last window retains all remaining frames. The source offset is available in the plan and listening table.
+
+```sh
+mkdir -p benchmark-results/t16
+R=$(mktemp -d benchmark-results/t16/lecture.XXXXXX)
+python3 tools/t16/compare.py prepare "$SAMPLE_A" 120000 600000 "$R/sample-01"
+python3 tools/t16/compare.py prepare "$SAMPLE_B" 120000 600000 "$R/sample-02"
+python3 tools/t16/compare.py prepare "$SAMPLE_C" 120000 600000 "$R/sample-03"
+# For public recordings, add the per-sample attribution.json described below before rendering.
+python3 tools/t16/compare.py run "$R" "$BIN" "$WK_LARGE_STORE" "$CPP_LARGE_STORE" "$D/store"
+python3 -B tools/t16/review.py "$R"
+python3 -B -m unittest discover -s tools/t16
+```
+
+If Homebrew FFmpeg or ffprobe on the comparison Mac cannot load `libx265.216.dylib`, use the installed x265 4.2 library for each of the three `prepare` commands. For sample A the command is
+
+```sh
+DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/Cellar/x265/4.2/lib python3 tools/t16/compare.py prepare "$SAMPLE_A" 120000 600000 "$R/sample-01"
+```
+
+Apply the same prefix to the B and C commands. With this setting all three source and PCM SHA-256 pairs and all 30 window records per sample matched the original run. Where FFmpeg and ffprobe already run, use the commands above without the prefix.
+
+`REVIEW.html` plays the shared PCM and links the original, all window transcripts/timestamps, raw timings, failed attempts and a local ratings sheet. Preserve every existing result directory. The runner verifies network denial, rotates candidate order across samples, and runs one process per pair with one model load and one session. Use `--synthetic` on the run command only for explicitly labelled short developer fixtures. Each exit is recorded and other candidates continue on failure. A missing terminal, a failed terminal and a successful empty final remain distinguishable. Output and cache files must stay local.
+
+For public recordings, put an `attribution.json` alongside each `plan.json` before rendering. Include `title`, `artist`, `source` (original file page), `license`, `licenseURL` and `modification` (excerpt, conversion and applicable reuse terms). The local page displays these credits beside the player. The initial, middle and final windows form the listening sample for all candidates. Separate expandable examples identify the first other failed window and the window in which successful candidates differ most in English spellings.
+
+The protocol uses one measured pass, no extra inference warmup, zero retries, forced Korean transcription by default, temperature zero, no hints, partials and timestamps enabled. WhisperKit uses top K 5, 224 tokens, one worker, no temperature fallback, and configured Core ML prewarming. The native decoder requests Metal, Accelerate, four threads, flash attention and greedy best-of-one. The native log records the effective backend. Throughput uses total engine inference seconds divided by full sample seconds. Tail and median submission latencies use nearest ranks on observed events. The queue simulation uses window-end arrivals and measured service time. Memory is process-level physical footprint sampled every 50 ms with a baseline before load. The listening sheet gives the common 40/25/20/10/5 rubric. Quality needs human listening, including empty finals on audible speech. Two-hour live behavior and utterance-relative latency require separate measurement.
+
+### T16 Phase 1 verification
+
+Use a fresh `OUT` directory and set `CACHE` to the directory containing the resolved Xcode and SwiftPM build caches. Set `SYNTHETIC_WAV` to the short mono 16 kHz speech fixture from T14. The two regression runs below use locally installed large-v3 packages.
+
+```sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT -configuration Debug \
+  -destination 'platform=macOS,arch=arm64' -derivedDataPath "$CACHE/DerivedData" \
+  -resultBundlePath "$OUT/Final.xcresult" -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 60 CODE_SIGNING_ALLOWED=NO build test
+xcrun xcresulttool get test-results summary --path "$OUT/Final.xcresult"
+swift build --scratch-path "$CACHE/CLI" --disable-automatic-resolution
+BIN="$CACHE/CLI/debug/stt-benchmark"
+python3 -B -m unittest discover -v -s tools/t16
+"$BIN" prepare "$SYNTHETIC_WAV" "$OUT/legacy-input.json" synthetic-offline 'T16 synthetic speech regression'
+/usr/bin/sandbox-exec -f tools/t14/offline.sb "$BIN" run tools/t15/candidate.json "$CPP_LARGE_STORE" "$OUT/legacy-input.json" "$OUT/legacy-cpp" english
+/usr/bin/sandbox-exec -f tools/t14/offline.sb "$BIN" cancel tools/t14/candidate.json "$WK_LARGE_STORE" "$OUT/legacy-input.json" "$OUT/legacy-wk" english
+```
+
+On the comparison Mac the unsigned app built and all 423 unit and 10 integration tests passed, with zero failures and skips. The CLI built and all four Python tests passed. The fixture reproduced the original T14 PCM digest. The native command returned three finals. WhisperKit returned a final, a cancellation and a final after reload. The lecture audit verified all 360 window identities and playback offsets. The review HTML contains 480 occurrences of `href` or `src`, including repeated references. All 456 local file references resolve to existing files, all 15 in-page anchors have matching targets, and 9 references point to external sources. [Measurements and selected model](T16_ENGINE_MODEL_DECISION.md)
