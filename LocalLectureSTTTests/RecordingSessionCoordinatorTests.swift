@@ -5,6 +5,82 @@ import AppKit
 @testable import LocalLectureSTT
 
 final class RecordingSessionCoordinatorTests: XCTestCase {
+    func testT17PinnedModelLoadsBeforeCaptureAndSurvivesStopInMetadata() async throws {
+        let fixture = CoordinatorFixture()
+        let store = try T14Fixture()
+        let product = try ProductionSpeechModel.make(repository: store.repository)
+        XCTAssertTrue(product.engine is WhisperCppSTTEngine)
+        XCTAssertEqual(product.configuration.engine, WhisperCppProfile.identity)
+        XCTAssertEqual(product.configuration.model.revision, "5359861c739e955e79d9a303bcbc70fb988958b1")
+        XCTAssertEqual(product.configuration.model.checksum, "e12bbe7a21e4ec6be9983fd0f76d04735e115e5ac5d8a3edf9292211c4a20d9c")
+        XCTAssertEqual(product.settings.weightSHA256, "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2")
+        let fake = try FakeSTTEngine(engine: product.configuration.engine, capabilities: product.engine.capabilities)
+        let coordinator = fixture.makeCoordinator(makeSpeechModel: {
+            RecordingSpeechModel(engine: fake, configuration: product.configuration, settings: product.settings)
+        })
+        let started = try await coordinator.start(.init(title: "T17", languageMode: .english, timeZone: .gmt))
+        XCTAssertEqual(started.phase, .recording)
+        let loaded = await fake.snapshot()
+        XCTAssertEqual(loaded.model, product.configuration)
+        guard case .secured = await coordinator.stop() else { return XCTFail("essential save failed") }
+        let documents = await fixture.repository.metadataDocuments()
+        XCTAssertEqual(documents.map(\.status), [.preparing, .recording, .securing])
+        for document in documents {
+            let bytes = try JSONEncoder().encode(document)
+            let saved = try JSONDecoder().decode(SessionMetadataDocument.self, from: bytes)
+            XCTAssertEqual(saved.engine, product.configuration.engine)
+            XCTAssertEqual(saved.model, product.configuration.model)
+            XCTAssertEqual(saved.modelSettings, product.settings)
+            XCTAssertEqual(saved.languageMode, .english)
+        }
+        let released = await fake.snapshot()
+        XCTAssertEqual(released.phase, .unloaded)
+    }
+
+    func testT17MissingInstallationAndNoMatchingCatalogNeverOpenCapture() async throws {
+        let fixture = CoordinatorFixture()
+        let store = try T14Fixture()
+        let coordinator = fixture.makeCoordinator(makeSpeechModel: {
+            try ProductionSpeechModel.make(repository: store.repository)
+        })
+        let failure = await startFailure(coordinator, configuration: .init(title: "", timeZone: .gmt))
+        XCTAssertEqual(failure, .speechModel(.loadFailed))
+        let creates = await fixture.repository.createCount()
+        let captures = await fixture.capture.counts()
+        XCTAssertEqual(creates, 0)
+        XCTAssertEqual(captures.start, 0)
+        let empty = try BundledModelCatalog(entries: [])
+        XCTAssertThrowsError(try ProductionSpeechModel.make(repository: store.repository, catalog: .init(load: { empty }))) {
+            XCTAssertEqual(($0 as? STTEngineError)?.code, .unsupportedModel)
+        }
+    }
+
+    func testT17SleepDuringModelLoadReleasesEngineAndAllowsRetry() async throws {
+        let fixture = CoordinatorFixture()
+        let store = try T14Fixture()
+        let product = try ProductionSpeechModel.make(repository: store.repository)
+        let fake = try FakeSTTEngine(engine: product.configuration.engine, capabilities: product.engine.capabilities,
+                                     scenario: .init(loads: [.init(delay: 1000)]))
+        let coordinator = fixture.makeCoordinator(makeSpeechModel: {
+            RecordingSpeechModel(engine: fake, configuration: product.configuration, settings: product.settings)
+        })
+        let config = RecordingStartConfiguration(title: "T17", timeZone: .gmt)
+        let start = Task { await startFailure(coordinator, configuration: config) }
+        await fake.waitUntil(.phase(.loading))
+        _ = await coordinator.interrupt(.systemSleep)
+        let failure = await start.value
+        XCTAssertEqual(failure, .interrupted(.systemSleep))
+        let released = await fake.snapshot()
+        XCTAssertEqual(released.phase, .unloaded)
+        let creates = await fixture.repository.createCount()
+        XCTAssertEqual(creates, 0)
+        _ = try await coordinator.start(config)
+        _ = await coordinator.interrupt(.systemSleep)
+        let documents = await fixture.repository.metadataDocuments()
+        XCTAssertEqual(documents.last?.status, .interrupted)
+        XCTAssertEqual(documents.last?.modelSettings, product.settings)
+    }
+
     func testFrameworkBoundaryConstructionRootAndPermissionFailuresHaveNoResourceSideEffects() async throws {
         func requireSendable<T: Sendable>(_: T) {}
         requireSendable(RecordingStartConfiguration(title: "", timeZone: .init(secondsFromGMT: 0)!))
@@ -1251,7 +1327,9 @@ private final class CoordinatorFixture: @unchecked Sendable {
         self.ticker = ticker ?? SilentRecordingTicker()
     }
 
-    func makeCoordinator(authority: LifecycleWorkAuthority? = nil, onSettlementJoin: @escaping @Sendable () -> Void = {}) -> RecordingSessionCoordinator {
+    func makeCoordinator(authority: LifecycleWorkAuthority? = nil,
+                         makeSpeechModel: (@Sendable () throws -> RecordingSpeechModel)? = nil,
+                         onSettlementJoin: @escaping @Sendable () -> Void = {}) -> RecordingSessionCoordinator {
         RecordingSessionCoordinator(
             roots: roots,
             permission: permission,
@@ -1262,6 +1340,7 @@ private final class CoordinatorFixture: @unchecked Sendable {
             clock: clock,
             ticker: ticker,
             environment: RecordingSessionEnvironment(appVersion: "7.0-test", osVersion: "testOS"),
+            makeSpeechModel: makeSpeechModel,
             identifiers: RecordingSessionIdentifiers(
                 sessionID: { SessionID(UUID()) },
                 eventID: { SessionEventID(UUID()) }

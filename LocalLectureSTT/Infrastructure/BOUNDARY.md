@@ -8,4 +8,4 @@ T06의 `AVFoundationAudioRecorder` actor는 production과 fault test가 함께 �
 
 T07 live composition은 하나의 `StorageRootManager`, `FileSessionRepository`, `SessionCatalogReconciler`, `AVFoundationMicrophonePermissionAuthorizer`, `MicrophoneCaptureController`를 공유하고 녹음 attempt마다 새 `AVFoundationAudioRecorder`를 만듭니다. Application coordinator에는 root availability와 catalog refresh conformance만 보이며 실제 bookmark URL, file path, AVAudioEngine/AVAssetWriter 객체는 이 경계를 벗어나지 않습니다. Recorder의 장기 write lease와 repository/catalog의 짧은 lexical scope는 각각 독립적으로 균형을 이루며, coordinator construction 자체는 scope acquisition, folder creation, permission request, capture, writer를 시작하지 않습니다.
 
-T11의 `FakeSTTEngine` actor는 같은 STTEngine 계약을 구현하는 명시적 logical-clock/FIFO 테스트 fake입니다. 모델 파일, 네트워크, 마이크, 실제 추론과 앱 composition에 접근하지 않습니다. generation/request lease와 cleanup settlement로 오래된 callback과 새 작업을 분리하며, bounded pending queue와 event feed를 사용합니다.
+테스트 타깃의 `FakeSTTEngine` actor는 같은 STTEngine 계약을 구현하는 명시적 logical-clock/FIFO 테스트 fake입니다. 모델 파일, 네트워크, 마이크, 실제 추론과 앱 composition에 접근하지 않습니다. generation/request lease와 cleanup settlement로 오래된 callback과 새 작업을 분리하며, bounded pending queue와 event feed를 사용합니다.

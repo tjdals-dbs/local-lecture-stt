@@ -1,6 +1,21 @@
 import CoreML
 import Foundation
+#if !SWIFT_PACKAGE
+@testable import LocalLectureSTT
+#endif
 @preconcurrency import WhisperKit
+
+enum WhisperKitProfile: WhisperAdapterProfile {
+    static let identity = try! EngineIdentity(id: EngineID("whisperkit"), version: "1bbc57cb7fe6410248a685b1c5a3c6d56adc2ed4")
+    static let compute = "cpuAndGPU+cpuAndNeuralEngine;prewarm=true"
+    static let format = "whisperkit-coreml-v1"
+    static func supportsTurbo(_ descriptor: ModelPackageDescriptor) -> Bool {
+        descriptor.variant == "large-v3-turbo" && WhisperKitModelValidator.matchesPin(descriptor)
+    }
+    static func makeBackend() -> any WhisperIntervalBackend { SDKWhisperKitBackend() }
+}
+
+typealias WhisperKitSTTEngine = WhisperIntervalEngine<WhisperKitProfile>
 
 /// Only the owning engine worker calls this instance. Unload is joined after decode/load.
 final class SDKWhisperKitBackend: WhisperIntervalBackend, @unchecked Sendable {

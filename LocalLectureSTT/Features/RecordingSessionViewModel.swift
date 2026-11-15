@@ -25,6 +25,7 @@ final class RecordingSessionViewModel: ObservableObject {
     @Published private(set) var snapshot: RecordingSessionSnapshot = .idle()
     @Published private(set) var finalizations: [AudioFinalizationSnapshot] = []
 
+    let modelName: String?
     private let coordinator: any RecordingSessionCoordinating
     private let timeZone: @MainActor @Sendable () -> TimeZone
     private var observationTask: Task<Void, Never>?
@@ -34,8 +35,10 @@ final class RecordingSessionViewModel: ObservableObject {
     init(
         coordinator: any RecordingSessionCoordinating,
         finalization: AudioFinalizationCoordinator? = nil,
+        modelName: String? = nil,
         timeZone: @escaping @MainActor @Sendable () -> TimeZone = { .current }
     ) {
+        self.modelName = modelName
         self.coordinator = coordinator
         self.finalization = finalization
         self.timeZone = timeZone
@@ -131,6 +134,7 @@ final class RecordingSessionViewModel: ObservableObject {
     }
 
     var lifecycleMessage: String? {
+        if case .speechModel = snapshot.failure { return nil }
         if snapshot.phase == .securing { return "필수 저장 중…" }
         if snapshot.persistenceWarningCode != nil { return "필수 저장에 실패했습니다. 복구 자료를 보존했으며 확인이 필요합니다." }
         if snapshot.failure == .interrupted(.systemSleep) { return "시스템 잠자기로 녹음이 중단되었습니다. 녹음은 자동 재개되지 않습니다." }

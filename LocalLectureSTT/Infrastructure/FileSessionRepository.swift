@@ -200,6 +200,7 @@ extension FileSessionRepository: SessionRecoveryPersisting {
             detectedLanguage: current.detectedLanguage,
             engine: current.engine,
             model: current.model,
+            modelSettings: current.modelSettings,
             audio: current.audio,
             transcript: current.transcript,
             appVersion: current.appVersion,

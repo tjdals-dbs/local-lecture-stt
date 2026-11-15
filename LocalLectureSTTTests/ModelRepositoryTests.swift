@@ -131,12 +131,14 @@ final class ModelRepositoryTests: XCTestCase {
         try mutate(m) { $0["schemaVersion"] = 2 }
         try mutate(d.key) { $0["revision"] = "" }
     }
-    func testBundleCatalogIsEmptyOfflineAndConstructionIsInert() async throws {
+    func testBundleCatalogPinsTheProductModelOfflineAndConstructionIsInert() async throws {
         let f = try ModelFixture()
         let repository = f.repository()
         XCTAssertFalse(FileManager.default.fileExists(atPath: f.store.path))
         let catalog = try await repository.catalog()
-        XCTAssertEqual(catalog.entries, []); XCTAssertEqual(catalog.schemaVersion, 1)
+        XCTAssertEqual(catalog.entries.map(\.engine), [WhisperCppProfile.identity])
+        XCTAssertEqual(catalog.entries.first?.variant, "large-v3")
+        XCTAssertEqual(catalog.schemaVersion, 1)
         let counts = await f.scope.counts(); XCTAssertEqual(counts, [0,0])
         XCTAssertFalse(FileManager.default.fileExists(atPath: f.store.path))
     }

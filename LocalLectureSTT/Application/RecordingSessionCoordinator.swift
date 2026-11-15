@@ -118,6 +118,7 @@ enum RecordingSessionFailure: Error, Sendable, Equatable {
     case persistence(StorageErrorCode)
     case recordingStreamEnded
     case invalidRecorderSummary
+    case speechModel(STTErrorCode)
     case cancelled
     case interrupted(RecordingInterruptionReason)
     case unknown
@@ -131,6 +132,7 @@ enum RecordingSessionFailure: Error, Sendable, Equatable {
         case let .recorder(code): "recorder.\(code.rawValue)"
         case let .persistence(code): "persistence.\(code.rawValue)"
         case .recordingStreamEnded: "capture.recordingStreamEnded"
+        case let .speechModel(code): "model.\(code.rawValue)"
         case .invalidRecorderSummary: "recorder.invalidSummary"
         case .cancelled: "session.cancelled"
         case let .interrupted(reason): "session.interrupted.\(reason.rawValue)"
@@ -287,6 +289,9 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     private let catalog: any RecordingCatalogRefreshing
     private let clock: RecordingSessionClock
     private let ticker: any RecordingTicking
+    private let makeSpeechModel: (@Sendable () throws -> RecordingSpeechModel)?
+    private var speechModel: RecordingSpeechModel?
+    private var modelLoad: Task<Void, Error>?
     private let environment: RecordingSessionEnvironment
     private let identifiers: RecordingSessionIdentifiers
     private let onSettlementJoin: @Sendable () -> Void
@@ -322,6 +327,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         clock: RecordingSessionClock = .live,
         ticker: any RecordingTicking = SystemRecordingTicker(),
         environment: RecordingSessionEnvironment,
+        makeSpeechModel: (@Sendable () throws -> RecordingSpeechModel)? = nil,
         identifiers: RecordingSessionIdentifiers = .live,
         activity: SessionActivityRegistry? = nil,
         authority: LifecycleWorkAuthority? = nil,
@@ -335,6 +341,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         self.catalog = catalog
         self.clock = clock
         self.ticker = ticker
+        self.makeSpeechModel = makeSpeechModel
         self.environment = environment
         self.identifiers = identifiers
         self.activity = activity
@@ -449,6 +456,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
             if startInterruptionFailures[operation.token] == nil {
                 startInterruptionFailures[operation.token] = interruption
                 cancelledStartTokens.insert(operation.token)
+                modelLoad?.cancel()
             }
             if active?.token == operation.token {
                 requestAbnormalSettlement(token: operation.token,
@@ -513,6 +521,21 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
             publishSnapshot()
             guard permissionStatus == .authorized else {
                 throw RecordingSessionFailure.permission(permissionStatus)
+            }
+
+            if let makeSpeechModel {
+                do {
+                    let model = try makeSpeechModel()
+                    speechModel = model
+                    let load = Task { try await model.engine.load(model.configuration) }
+                    modelLoad = load
+                    defer { modelLoad = nil }
+                    try await load.value
+                } catch {
+                    try ensureStartMayContinue(token)
+                    throw RecordingSessionFailure.speechModel((error as? STTEngineError)?.code ?? .loadFailed)
+                }
+                try ensureStartMayContinue(token)
             }
 
             let createdAt = clock.wallNow()
@@ -714,6 +737,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
 
     private func failStart(token: UInt64, failure: RecordingSessionFailure) async {
         guard active?.token == token else {
+            await unloadSpeechModel()
             snapshot = errorSnapshot(failure: failure, phase: .error)
             lastResult = .error(failure)
             publishSnapshot()
@@ -723,10 +747,17 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         _ = await beginSettlement(token: token, expectedUserStop: false)
     }
 
+    private func unloadSpeechModel() async {
+        let model = speechModel
+        speechModel = nil
+        await model?.engine.unload()
+    }
+
     private func cancelStartAttempt(token: UInt64, allowsEstablishedRecordingStop: Bool) async {
         guard startOperation?.token == token else { return }
         guard allowsEstablishedRecordingStop || active?.startedDurably != true else { return }
         cancelledStartTokens.insert(token)
+        modelLoad?.cancel()
         guard active?.token == token else { return }
         if active?.startedDurably != true {
             registerFailure(.cancelled, token: token)
@@ -854,6 +885,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
             _ = await activity?.promoteToFinalization(reservation)
         }
         await stopOwnedTasks(token: token)
+        await unloadSpeechModel()
         if case .secured = result {
             // RecordingFinalizationCoordinator now owns release after T08.
         } else if let reservation = active?.activityReservation {
@@ -1340,8 +1372,9 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
             activeDurationMs: MediaMilliseconds(Int64(clamping: durationMilliseconds)),
             languageMode: languageMode,
             detectedLanguage: nil,
-            engine: nil,
-            model: nil,
+            engine: speechModel?.configuration.engine,
+            model: speechModel?.configuration.model,
+            modelSettings: speechModel?.settings,
             audio: audio,
             transcript: TranscriptSummary(segmentCount: try TranscriptSegmentCount(0)),
             appVersion: environment.appVersion,

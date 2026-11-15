@@ -1,1 +1,46 @@
-{"schemaVersion":1,"entries":[]}
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "schemaVersion": 1,
+      "engine": {
+        "id": "whisper.cpp",
+        "version": "d1be6fde11ac6e0407606b4e42fe72d34add8037"
+      },
+      "model": {
+        "id": "ggerganov/ggml-large-v3",
+        "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+        "checksum": "e12bbe7a21e4ec6be9983fd0f76d04735e115e5ac5d8a3edf9292211c4a20d9c"
+      },
+      "format": "whisper.cpp-ggml-v1",
+      "variant": "large-v3",
+      "quantization": "none",
+      "compute": "Metal preferred+Accelerate;threads=4;flash=true",
+      "licenseIdentifier": "MIT",
+      "licenseTextOrReference": "https://huggingface.co/ggerganov/whisper.cpp/blob/5359861c739e955e79d9a303bcbc70fb988958b1/README.md",
+      "licenseProvenance": "GGML conversion of OpenAI Whisper. Pinned model card declares MIT. Size and SHA-256 published in Hugging Face LFS metadata.",
+      "files": [
+        {
+          "path": "ggml-large-v3.bin",
+          "byteCount": 3095033483,
+          "sha256": "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2"
+        }
+      ]
+    }
+  ],
+  "deliveries": [
+    {
+      "key": {
+        "engineID": "whisper.cpp",
+        "modelID": "ggerganov/ggml-large-v3",
+        "revision": "5359861c739e955e79d9a303bcbc70fb988958b1"
+      },
+      "locations": [
+        {
+          "path": "ggml-large-v3.bin",
+          "httpsURL": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3.bin"
+        }
+      ]
+    }
+  ]
+}

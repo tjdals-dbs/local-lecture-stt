@@ -11,6 +11,13 @@ protocol STTEngine: Sendable {
     func unload() async
 }
 
+/// An immutable model choice and a fresh engine for one recording attempt.
+struct RecordingSpeechModel: Sendable {
+    let engine: any STTEngine
+    let configuration: STTModelConfiguration
+    let settings: SessionModelSettings
+}
+
 /// One subscriber per request; two retained values coalesce partials and retain the terminal.
 /// The engine owns work, not the lifetime of the handle. Withdrawal cancels only this request.
 final class STTEventFeed: @unchecked Sendable {

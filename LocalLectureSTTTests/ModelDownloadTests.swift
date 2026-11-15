@@ -44,7 +44,8 @@ final class ModelDownloadTests: XCTestCase {
         let catalog = try await r.catalog(); XCTAssertEqual(catalog, f.catalog)
         do { _ = try await r.validate(f.descriptor.key); XCTFail() } catch {}
         let production = try BundledModelCatalogLoader().load()
-        XCTAssertTrue(production.entries.isEmpty); XCTAssertTrue(production.deliveries.isEmpty)
+        XCTAssertEqual(production.entries.count, 1)
+        XCTAssertEqual(production.deliveries.map(\.key), production.entries.map(\.key))
         XCTAssertEqual(count.value, 0); XCTAssertFalse(FileManager.default.fileExists(atPath: f.downloads.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: f.store.path))
     }

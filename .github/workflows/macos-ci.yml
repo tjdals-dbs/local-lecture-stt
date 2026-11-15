@@ -40,3 +40,9 @@ jobs:
         run: swift build --disable-automatic-resolution
       - name: Check lecture frame boundaries and benchmark aggregation
         run: python3 -B -m unittest discover -s tools/t16
+      - name: Verify the product engine in the Release app
+        run: |
+          xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+            -configuration Release -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/t17-release" CODE_SIGNING_ALLOWED=NO build
+          python3 -B tools/verify_product_engine.py "$RUNNER_TEMP/t17-release/Build/Products/Release/LocalLectureSTT.app"

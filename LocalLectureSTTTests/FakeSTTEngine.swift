@@ -1,4 +1,5 @@
 import Foundation
+@testable import LocalLectureSTT
 
 /// Millisecond logical delays are processing-relative. Equal times preserve array order.
 struct FakeSTTStep: Sendable, Equatable {

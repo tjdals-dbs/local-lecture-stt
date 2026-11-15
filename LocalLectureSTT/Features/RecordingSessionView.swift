@@ -81,10 +81,17 @@ struct RecordingSessionView: View {
             .disabled(!viewModel.actions.canEditConfiguration)
             .accessibilityIdentifier("recording-language")
 
+            if let modelName = viewModel.modelName {
+                LabeledContent("기본 STT 모델", value: modelName)
+                    .accessibilityIdentifier("recording-model")
+            }
             LabeledContent("마이크 권한", value: viewModel.permissionText)
                 .accessibilityIdentifier("microphone-permission-status")
 
             if let failure = viewModel.snapshot.failure {
+                if case .speechModel = failure {
+                    Text("기본 STT 모델을 열 수 없습니다. 모델 설치와 파일 상태를 확인하세요.")
+                }
                 Label(failure.stableCode, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
                     .accessibilityIdentifier("recording-error-code")

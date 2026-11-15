@@ -31,6 +31,14 @@ struct TranscriptSummary: Codable, Sendable, Equatable {
     let segmentCount: TranscriptSegmentCount
 }
 
+/// The model identity carries the package checksum. This digest identifies the weight file itself.
+struct SessionModelSettings: Codable, Sendable, Equatable {
+    let weightSHA256: String
+    let quantization: String
+    let inference: STTInferenceOptions
+    let decodingStrategy: String
+}
+
 struct SessionMetadataDocument: Codable, Sendable, Equatable {
     let schemaVersion: SchemaVersion
     let sessionId: SessionID
@@ -45,6 +53,7 @@ struct SessionMetadataDocument: Codable, Sendable, Equatable {
     let detectedLanguage: LanguageCode?
     let engine: EngineIdentity?
     let model: ModelIdentity?
+    let modelSettings: SessionModelSettings?
     let audio: AudioDescription?
     let transcript: TranscriptSummary
     let appVersion: String
@@ -65,6 +74,7 @@ struct SessionMetadataDocument: Codable, Sendable, Equatable {
         detectedLanguage: LanguageCode? = nil,
         engine: EngineIdentity? = nil,
         model: ModelIdentity? = nil,
+        modelSettings: SessionModelSettings? = nil,
         audio: AudioDescription? = nil,
         transcript: TranscriptSummary,
         appVersion: String,
@@ -89,6 +99,7 @@ struct SessionMetadataDocument: Codable, Sendable, Equatable {
         self.detectedLanguage = detectedLanguage
         self.engine = engine
         self.model = model
+        self.modelSettings = modelSettings
         self.audio = audio
         self.transcript = transcript
         self.appVersion = appVersion
@@ -112,6 +123,7 @@ struct SessionMetadataDocument: Codable, Sendable, Equatable {
             detectedLanguage: container.decodeIfPresent(LanguageCode.self, forKey: .detectedLanguage),
             engine: container.decodeIfPresent(EngineIdentity.self, forKey: .engine),
             model: container.decodeIfPresent(ModelIdentity.self, forKey: .model),
+            modelSettings: container.decodeIfPresent(SessionModelSettings.self, forKey: .modelSettings),
             audio: container.decodeIfPresent(AudioDescription.self, forKey: .audio),
             transcript: container.decode(TranscriptSummary.self, forKey: .transcript),
             appVersion: container.decode(String.self, forKey: .appVersion),

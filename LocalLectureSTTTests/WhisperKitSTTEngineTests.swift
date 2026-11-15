@@ -337,7 +337,7 @@ final class WhisperKitSTTEngineTests: XCTestCase {
         let engine = try WhisperKitSTTEngine(resolve: { _ in XCTFail("No load was requested"); throw STTEngineError(.loadFailed) },
             makeBackend: { _ = count.next(); return T14Backend() })
         checkEqual(engine.capabilities.inputFormats.count, 1)
-        checkEqual(try await f.repository.catalog().entries, [])
+        checkEqual(try await f.repository.catalog().entries.map(\.engine), [WhisperCppProfile.identity])
         checkEqual(try await f.repository.inventory(), [])
         await engine.unload(); checkEqual(count.next(), 0)
     }

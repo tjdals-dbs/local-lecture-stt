@@ -415,7 +415,7 @@ private final class FinalizationRun {
         return try .init(sessionId: m.sessionId, title: m.title, status: status, captureOutcome: m.captureOutcome,
             createdAt: m.createdAt, recordingStartedAt: m.recordingStartedAt, recordingEndedAt: m.recordingEndedAt,
             activeDurationMs: m.activeDurationMs, languageMode: m.languageMode, detectedLanguage: m.detectedLanguage,
-            engine: m.engine, model: m.model, audio: audio, transcript: m.transcript, appVersion: m.appVersion,
+            engine: m.engine, model: m.model, modelSettings: m.modelSettings, audio: audio, transcript: m.transcript, appVersion: m.appVersion,
             osVersion: m.osVersion, lastUpdatedAt: AbsoluteTime(Date()))
     }
     func diagnosticFailure() async {

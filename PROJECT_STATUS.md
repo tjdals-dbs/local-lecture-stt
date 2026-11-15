@@ -7,20 +7,18 @@
 
 ## Current position
 
-- Current milestone: M2 models and engines; M1/G1 hardware validation remains unverified
-- Current Task: none in progress
-- Next action: await a separate G2 decision and instructions to start T17
-- Latest completed Task: T16 lecture comparison and user selection of whisper.cpp with non-quantized large-v3, independently reviewed and squash-integrated into dev
-- Latest passed gate: T01 initial runnable baseline
-- Application implementation: recording, app-owned M4A finalization and recovery, lifecycle policy, framework-independent STTEngine contracts/fake and verified model import/download/deletion. The experimental WhisperKit and whisper.cpp interval adapters run developer inference on verified, leased installations and share cancellation, input and benchmark report contracts. Each uses a pinned engine and separate candidate manifests with strict local format validation. The production catalog is empty. Product model-management UI, live capture/STT integration and canonical transcript finalization remain unimplemented. T17 will connect the selected default to the product. [Engine and model decision](docs/T16_ENGINE_MODEL_DECISION.md)
+- Current milestone: M3 real-time STT. M2 model and engine tasks are complete.
+- Next Task: T18 voice activity detection, utterance segmentation and transcript reconciliation.
+- Latest completed Task: T17 product engine selection and session metadata, reviewed and squash-integrated into dev.
+- Latest passed gate: G2 engine and model selection, approved on 2026-11-15 at dev `f6ba18d`
+- The recording app loads the pinned whisper.cpp engine and verified non-quantized large-v3 before capture. Session metadata preserves the engine and model revisions, checksums and inference settings through finalization and recovery. Both comparison engines are available in developer tooling. Live capture-to-STT processing, canonical transcript finalization and model management UI are scheduled for T19, T20 and T21 respectively. [Engine and model decision](docs/T16_ENGINE_MODEL_DECISION.md)
 
 ## Repository state at this handoff
 
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
-- Local branch: `dev`
-- Approved T16 source: `672ec984574951e407a683f0a84d35983dbba426`. The user accepted independent review and authorized Phase 2 integration on 2026-11-15.
-- `dev` branch: T16 squash-integrated onto `177152fbc4df848a3dc12d58f41602c6d8e57022`, the latest fetched `origin/dev` and the approved source's parent. The Phase 2 delivery handoff records the resulting SHA, its validation and CI, and branch cleanup.
+- Approved T17 source on `task/t17-product-engine`: `05a6e5b2b99514a0778b6571634270e305feedb0`. The user accepted the review and authorized Phase 2 integration on 2026-11-15.
+- `dev` integration base: `f6ba18dcf155715e2a4042101df0fd494566564c` (T16). The delivery handoff identifies the resulting commit, its local validation, its CI run and branch cleanup.
 - `main` and `origin/main`: preserved at the verified T01 baseline `38e126f92ac823d29306ea8c1f7703f7060a5818`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -54,11 +52,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T14 experimental WhisperKit adapter and developer benchmark | Complete on dev through independently reviewed, separately authorized squash integration | Approved source: 423 tests (413 unit + 10 integration), including 42 T14, 49 T13, 33 T12 and 35 T11; actual large-v3 offline repetition/cancel/context/negative evidence and exact-source CI passed. Committed-dev validation is separate and recorded in the Phase 2 handoff. |
 | T15 experimental whisper.cpp adapter | Complete on dev through independently reviewed, separately authorized squash integration | Approved source passed 432 tests and task CI. The coordinator reproduced installed large-v3 automatic transcription and active cancellation/reuse under OS network denial. [Integration evidence](docs/T15_ACCEPTANCE.md#phase-2-dev-integration) |
 | T16 lecture comparison and user decision | Complete on dev. The user selected whisper.cpp with non-quantized large-v3. | Independent review reproduced three 10-minute excerpts and verified 360 window identities across four candidates. The selected pair returned 90 nonempty finals in 90 windows. [Decision and measurements](docs/T16_ENGINE_MODEL_DECISION.md) |
+| T17 product engine and session metadata | Complete on dev. The Release app ships whisper.cpp and the recording path persists the selected model and settings. | Candidate review verified the Release bundle, an installed large-v3 recording, recovery and older metadata. [Validation procedure](docs/DEVELOPMENT.md#t17-product-engine-verification) |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-Section 9 of `IMPLEMENTATION_PLAN.md` records T16 completion. G1 remains **Unverified**. G2 awaits a separate gate decision. T17 product integration awaits a new instruction.
+Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T17. T18 is next. G1 remains **Unverified**. G2 passed on 2026-11-15.
 
 ## Gate status
 
@@ -66,13 +65,13 @@ Section 9 of `IMPLEMENTATION_PLAN.md` records T16 completion. G1 remains **Unver
 | --- | --- | --- |
 | T01 initial runnable baseline | Passed | First `main` created from verified `dev` |
 | G1 safe recorder | Unverified; manual validation deferred by user on 2026-11-13 | `v0.1.0-alpha.1` (not authorized) |
-| G2 engine and model selection | Pending separate gate decision | `v0.1.0-alpha.2` |
+| G2 engine and model selection | Passed for T17. Four candidates compared on three lectures. User selected whisper.cpp + non-quantized large-v3. [Evidence](docs/T16_ENGINE_MODEL_DECISION.md) | No main promotion or release tag authorized |
 | G3 feature complete | Pending | `v0.1.0-beta.1` |
 | G4 MVP complete | Pending | `v0.1.0` |
 
 ## Confirmed workflow decisions
 
-- The coordinator session writes specifications, plans, prompts, and gate decisions but does not implement the app.
+- The coordinator manages specifications, plans, prompts and gate decisions. For T17 the user assigned implementation to the coordinator session and separately authorized dev integration after review.
 - Each Task uses a fresh implementation session and stays in that session through implementation, review fixes, and any later authorized integration, or until safely blocked.
 - The initial implementation prompt ends after task-branch commit/push/CI with `review ready`; it does not authorize official completion, status/checklist updates, `dev` integration, or branch deletion.
 - This coordinator independently verifies the acceptance matrix, diff, tests, and CI. A completion message or green CI by itself is not sufficient.
@@ -156,6 +155,11 @@ Section 9 of `IMPLEMENTATION_PLAN.md` records T16 completion. G1 remains **Unver
 
 - The approved source passed 423 unit and 10 integration tests, four Python comparison tests and the SwiftPM benchmark build. The Phase 2 delivery handoff reports the validation run on the committed dev SHA. [Approved source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/43706895281) · [Integration authorization and commands](prompts/T16_DEV_INTEGRATION.md)
 - Eight of the twelve candidate/lecture runs returned finals for every window. Each of the other four runs had one `invalidResponse`. Korean accuracy, English terminology and hallucination/repetition/omission have no human scores. The integration preserves the reviewed engine code, model manifests, dependency pins and comparison tools, so the original measurements support the decision. [Decision](docs/T16_ENGINE_MODEL_DECISION.md) · [Reproduction and review](docs/DEVELOPMENT.md#t16-developer-lecture-comparison)
+
+## T17 handoff
+
+- Review of `05a6e5b` passed 426 unit tests, 10 integration tests and four Python comparison tests. A network-denied probe using the product factory and installed large-v3 produced a nonempty final transcript from synthetic speech. Review also verified the fixed default with a reordered catalog and decoded older session metadata. [Source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/43711967320)
+- Phase 2 validates the committed dev build with the full unsigned arm64 suite using the installed model, the SwiftPM benchmark build, the Python tests and the Release bundle inspection. The G1 physical microphone, lifecycle and long-recording checks remain unverified. [Commands](docs/DEVELOPMENT.md#t17-product-engine-verification) · [Architecture](docs/ARCHITECTURE.md#t17-product-engine-and-session-provenance)
 
 ## Status update rules
 

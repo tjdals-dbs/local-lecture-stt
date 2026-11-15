@@ -83,10 +83,14 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
         // restore that exact pre-finish byte sequence as the crash fixture.
         _ = try await recorder.stop()
         try snapshot.write(to: sourceURL, options: .atomic)
+        let models = FileModelRepository(sources: ModelImportSources(), validator: WhisperCppModelValidator(),
+                                         references: SessionModelReferenceChecker(roots: initialRoots))
+        let selected = try ProductionSpeechModel.make(repository: models)
         let recordingMetadata = try SessionMetadataDocument(
             sessionId: originalLocation.sessionID, title: "pre-finish snapshot", status: .recording,
             captureOutcome: .inProgress, createdAt: time, recordingStartedAt: time,
             activeDurationMs: try MediaMilliseconds(22_000), languageMode: .english,
+            engine: selected.configuration.engine, model: selected.configuration.model, modelSettings: selected.settings,
             transcript: .init(segmentCount: try TranscriptSegmentCount(0)), appVersion: "T09", osVersion: "test",
             lastUpdatedAt: time
         )
@@ -127,6 +131,9 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
         XCTAssertGreaterThan(independentlyDecodedFinal.last.byteCount, 0)
         XCTAssertEqual(independentlyDecodedFinal.payloadSHA256, finalMedia.payloadSHA256)
         let metadata = try await freshRepository.readMetadata(at: freshLocation)
+        XCTAssertEqual(metadata.engine, selected.configuration.engine)
+        XCTAssertEqual(metadata.model, selected.configuration.model)
+        XCTAssertEqual(metadata.modelSettings, selected.settings)
         XCTAssertEqual(metadata.status, .finalizing)
         XCTAssertEqual(metadata.captureOutcome, .interrupted)
         let checkpoint = try await freshRepository.readFinalizationCheckpoint(at: freshLocation)
@@ -315,6 +322,21 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
             scanner: SessionFileScanner(roots: roots),
             store: store
         )
+        // CI exercises recording with a deterministic engine. An explicit local store exercises
+        // the identical recording path with the packaged factory and its installed native model.
+        let localStore = ProcessInfo.processInfo.environment["LLSTT_T17_TEST_MODEL_STORE"]
+        let storeURL = localStore.map { URL(fileURLWithPath: $0) } ?? fixture.applicationSupport.appendingPathComponent("Models")
+        let models = FileModelRepository(storeURL: { storeURL }, sources: ModelImportSources(), validator: WhisperCppModelValidator(),
+                                         references: SessionModelReferenceChecker(roots: roots))
+        let selected = try ProductionSpeechModel.make(repository: models)
+        let speech: RecordingSpeechModel
+        if localStore != nil {
+            speech = selected
+            print("T17 integration exercising the installed whisper.cpp model")
+        } else {
+            let fake = try FakeSTTEngine(engine: selected.configuration.engine, capabilities: selected.engine.capabilities)
+            speech = RecordingSpeechModel(engine: fake, configuration: selected.configuration, settings: selected.settings)
+        }
         let coordinator = RecordingSessionCoordinator(
             roots: roots,
             permission: permission,
@@ -322,7 +344,8 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
             recorders: ClosureAudioRecorderFactory { AVFoundationAudioRecorder(roots: roots) },
             repository: repository,
             catalog: catalog,
-            environment: RecordingSessionEnvironment(appVersion: "0.1.0-integration", osVersion: "integrationOS")
+            environment: RecordingSessionEnvironment(appVersion: "0.1.0-integration", osVersion: "integrationOS"),
+            makeSpeechModel: { speech }
         )
 
         let initialBookmarkCounts = await fixture.bookmarks.counts()
@@ -375,8 +398,9 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
         XCTAssertEqual(metadata.audio?.channels, 1)
         XCTAssertEqual(metadata.audio?.bitRate, 96_000)
         XCTAssertEqual(metadata.transcript.segmentCount.rawValue, 0)
-        XCTAssertNil(metadata.engine)
-        XCTAssertNil(metadata.model)
+        XCTAssertEqual(metadata.engine, selected.configuration.engine)
+        XCTAssertEqual(metadata.model, selected.configuration.model)
+        XCTAssertEqual(metadata.modelSettings, selected.settings)
         XCTAssertNil(metadata.detectedLanguage)
 
         let eventsURL = sessionDirectory.appendingPathComponent(SessionArtifact.events.relativePath)

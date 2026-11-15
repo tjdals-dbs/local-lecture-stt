@@ -11,6 +11,8 @@ struct LocalLectureSTTApp: App {
         let roots = StorageRootManager.live()
         let catalog = Self.makeCatalog(roots: roots)
         let repository = FileSessionRepository(roots: roots)
+        let models = FileModelRepository(sources: ModelImportSources(), validator: WhisperCppModelValidator(),
+                                         references: SessionModelReferenceChecker(roots: roots))
         let activity = SessionActivityRegistry()
         let processActivity = ProcessInfoLifecycleActivityAdapter()
         let authority = LifecycleWorkAuthority(activity: { processActivity.update($0) })
@@ -40,12 +42,15 @@ struct LocalLectureSTTApp: App {
                 appVersion: Self.appVersion,
                 osVersion: ProcessInfo.processInfo.operatingSystemVersionString
             ),
+            makeSpeechModel: { try ProductionSpeechModel.make(repository: models) },
             activity: activity, authority: authority
         )
         let lifetime = RecordingFinalizationCoordinator(recording: recordingCoordinator, finalization: finalization,
                                                         startupRecovery: recovery, activity: activity, authority: authority)
         _catalogStartup = StateObject(wrappedValue: coordinator)
-        _recording = StateObject(wrappedValue: RecordingSessionViewModel(coordinator: lifetime, finalization: finalization))
+        _recording = StateObject(wrappedValue: RecordingSessionViewModel(
+            coordinator: lifetime, finalization: finalization, modelName: ProductionSpeechModel.displayName
+        ))
         _storageRoots = StateObject(wrappedValue: StorageRootViewModel(
             controller: roots,
             directorySelector: OpenPanelDirectorySelector(),

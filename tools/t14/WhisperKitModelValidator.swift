@@ -1,4 +1,7 @@
 import Foundation
+#if !SWIFT_PACKAGE
+@testable import LocalLectureSTT
+#endif
 
 struct WhisperKitModelValidator: OfflineModelFormatValidating {
     static func matchesPin(_ descriptor: ModelPackageDescriptor) -> Bool {
