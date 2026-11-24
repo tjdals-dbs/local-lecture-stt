@@ -7,6 +7,7 @@ struct LocalLectureSTTApp: App {
     @StateObject private var catalogStartup: CatalogStartupCoordinator
     @StateObject private var recording: RecordingSessionViewModel
     @StateObject private var modelManagement: ModelManagementViewModel
+    @StateObject private var sessionDetail: SessionDetailViewModel
 
     init() {
         let roots = StorageRootManager.live()
@@ -66,11 +67,15 @@ struct LocalLectureSTTApp: App {
             activity: activity, authority: authority
         )
         let coordinator = CatalogStartupCoordinator(catalog: catalog, recovery: recovery)
+        let detail = SessionDetailViewModel(store: FileSessionDetailStore(roots: roots, transcripts: transcripts,
+            catalog: catalog, activity: activity), player: SessionAudioPlayer(roots: roots, activity: activity),
+            authority: authority, changed: { await coordinator.refreshItems() })
+        _sessionDetail = StateObject(wrappedValue: detail)
         let lifetime = RecordingFinalizationCoordinator(recording: recordingCoordinator, finalization: finalization,
                                                         startupRecovery: recovery, activity: activity, authority: authority)
         _catalogStartup = StateObject(wrappedValue: coordinator)
         _recording = StateObject(wrappedValue: RecordingSessionViewModel(
-            coordinator: lifetime, finalization: finalization, modelName: ProductionSpeechModel.displayName, models: modelManagement,
+            coordinator: lifetime, finalization: finalization, sessionActivity: activity, modelName: ProductionSpeechModel.displayName, models: modelManagement,
             microphonePreview: microphonePreview
         ))
         _storageRoots = StateObject(wrappedValue: StorageRootViewModel(
@@ -79,12 +84,12 @@ struct LocalLectureSTTApp: App {
             onRootChanged: { coordinator.refreshAfterRootChange() }
         ))
         lifecycleDelegate.configure(recording: lifetime, finalization: finalization, recovery: recovery, authority: authority,
-                                    auxiliary: LifecycleAuxiliaryGroup([modelManagement, microphonePreview]))
+                                    auxiliary: LifecycleAuxiliaryGroup([modelManagement, microphonePreview, detail]))
     }
 
     var body: some Scene {
         Window("Local Lecture STT", id: "main") {
-            MainWindowView(storageRoots: storageRoots, catalogStartup: catalogStartup, recording: recording)
+            MainWindowView(storageRoots: storageRoots, catalogStartup: catalogStartup, recording: recording, detail: sessionDetail)
         }
         .defaultSize(width: 1000, height: 680)
 

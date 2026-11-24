@@ -126,6 +126,7 @@ protocol SessionFileScanning: Sendable {
 }
 
 protocol SessionCatalogStore: Sendable {
+    func removeTrashedSession(at location: SessionLocation) async throws
     /// The current identity occupying a physical session location, if any.
     func sessionID(at rootID: StorageRootID, folderName: SessionFolderName) async throws -> SessionID?
     func apply(_ results: [RootScanResult], catalogUpdatedAt: AbsoluteTime) async throws
@@ -134,8 +135,16 @@ protocol SessionCatalogStore: Sendable {
 }
 
 protocol SessionCataloging: RecordingCatalogRefreshing {
+    func removeTrashedSession(at location: SessionLocation) async throws
     func reconcile() async throws -> CatalogReconciliationReport
     func orderedItems() async throws -> [SessionCatalogItem]
+}
+
+extension SessionCatalogStore {
+    func removeTrashedSession(at location: SessionLocation) async throws { throw CatalogError(.reconciliationConflict) }
+}
+extension SessionCataloging {
+    func removeTrashedSession(at location: SessionLocation) async throws { throw CatalogError(.reconciliationConflict) }
 }
 
 // MARK: - Startup recovery
@@ -357,7 +366,7 @@ struct SessionActivityReservation: Sendable, Equatable {
 }
 
 actor SessionActivityRegistry {
-    private enum Owner { case recordingCreation, recordingOrFinalization, recovery }
+    private enum Owner { case recordingCreation, recordingOrFinalization, recovery, userOperation }
     private struct Entry { let rootID: StorageRootID; var locationKey: String?; let owner: Owner }
     private var entries: [UUID: Entry] = [:]
 
@@ -380,25 +389,34 @@ actor SessionActivityRegistry {
     /// during queueing and while its detached worker owns file descriptors.
     func promoteToFinalization(_ reservation: SessionActivityReservation) -> Bool {
         guard let entry = entries[reservation.id], entry.locationKey != nil else { return false }
-        return entry.owner != .recovery
+        return entry.owner == .recordingCreation || entry.owner == .recordingOrFinalization
     }
 
     func release(_ reservation: SessionActivityReservation) { entries[reservation.id] = nil }
 
     func releaseRecordingOrFinalization(at location: SessionLocation) {
         let locationKey = key(location)
-        for (id, entry) in entries where entry.locationKey == locationKey && entry.owner != .recovery {
+        for (id, entry) in entries where entry.locationKey == locationKey &&
+            (entry.owner == .recordingCreation || entry.owner == .recordingOrFinalization) {
             entries[id] = nil
         }
     }
 
     func claimRecovery(at location: SessionLocation) -> SessionActivityReservation? {
+        claim(at: location, owner: .recovery)
+    }
+
+    func claimUserOperation(at location: SessionLocation) -> SessionActivityReservation? {
+        claim(at: location, owner: .userOperation)
+    }
+
+    private func claim(at location: SessionLocation, owner: Owner) -> SessionActivityReservation? {
         // A creation reservation intentionally blocks all candidates at that
         // root.  It is short lived and prevents a scan racing folder creation.
         guard !entries.values.contains(where: { $0.rootID == location.rootID &&
             ($0.locationKey == nil || $0.locationKey == key(location)) }) else { return nil }
         let reservation = SessionActivityReservation(id: UUID(), rootID: location.rootID)
-        entries[reservation.id] = .init(rootID: location.rootID, locationKey: key(location), owner: .recovery)
+        entries[reservation.id] = .init(rootID: location.rootID, locationKey: key(location), owner: owner)
         return reservation
     }
 

@@ -80,6 +80,23 @@ actor FileTranscriptRepository: TranscriptFinalizing, TranscriptEditing, Remaini
         try await edit(at: location, mutation: { $0 })
     }
 
+    func updateTitle(at location: SessionLocation, expectedTitle: String, title: String) async throws {
+        try await transaction(at: location, control: .init()) { run in
+            guard run.checkpoint.completedSteps.contains(.metadataCompleted),
+                  [.completed, .interrupted].contains(run.metadata.status),
+                  [.completed, .interrupted].contains(run.metadata.captureOutcome) else {
+                throw TranscriptFailure(code: .notFinalized)
+            }
+            guard run.metadata.title == expectedTitle || run.metadata.title == title else {
+                throw TranscriptFailure(code: .editConflict)
+            }
+            guard let document = try run.canonical() else { throw TranscriptFailure(code: .missingCanonical) }
+            try TranscriptCanonical.validate(document, sessionID: location.sessionID, duration: run.metadata.activeDurationMs)
+            try await run.renameTitle(title)
+            try await run.publish(document, metadata: run.metadata)
+        }
+    }
+
     func updateText(at location: SessionLocation, segmentID: TranscriptSegmentID,
                     expectedText: String, text: String) async throws -> TranscriptDocument {
         try await edit(at: location) { document in
@@ -263,6 +280,20 @@ private final class TranscriptFileTransaction {
             engine: m.engine, model: m.model, modelSettings: m.modelSettings, audio: m.audio,
             transcript: .init(segmentCount: .init(Int64(count))), appVersion: m.appVersion, osVersion: m.osVersion,
             lastUpdatedAt: AbsoluteTime(Date()))
+    }
+    func renameTitle(_ title: String) async throws {
+        guard metadata.title != title else { return }
+        let m = metadata
+        let next = try SessionMetadataDocument(sessionId: m.sessionId, title: title, status: m.status,
+            captureOutcome: m.captureOutcome, createdAt: m.createdAt, recordingStartedAt: m.recordingStartedAt,
+            recordingEndedAt: m.recordingEndedAt, activeDurationMs: m.activeDurationMs, languageMode: m.languageMode,
+            detectedLanguage: m.detectedLanguage, engine: m.engine, model: m.model, modelSettings: m.modelSettings,
+            audio: m.audio, transcript: m.transcript, appVersion: m.appVersion, osVersion: m.osVersion,
+            lastUpdatedAt: AbsoluteTime(Date()))
+        try await reach(.beforeMetadata)
+        try write(next, path: "metadata.json")
+        metadata = next
+        try await reach(.afterMetadata)
     }
     func derivedFilesMatch(_ document: TranscriptDocument, metadata: SessionMetadataDocument) throws -> Bool {
         let rendered = try TranscriptRenderer.render(document, metadata: metadata)

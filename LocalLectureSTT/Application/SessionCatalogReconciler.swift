@@ -4,6 +4,9 @@ actor SessionCatalogReconciler: SessionCataloging {
     private let scanner: any SessionFileScanning
     private let store: any SessionCatalogStore
     private let now: @Sendable () -> AbsoluteTime
+    private var mutationGeneration: UInt64 = 0
+    private var publishing = false
+    private var publicationWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(scanner: any SessionFileScanning, store: any SessionCatalogStore, now: @escaping @Sendable () -> AbsoluteTime = { AbsoluteTime(Date()) }) {
         self.scanner = scanner
@@ -12,6 +15,7 @@ actor SessionCatalogReconciler: SessionCataloging {
     }
 
     func reconcile() async throws -> CatalogReconciliationReport {
+        let generation = mutationGeneration
         let scanned: [RootScanResult]
         do {
             scanned = try await scanner.scan()
@@ -26,11 +30,37 @@ actor SessionCatalogReconciler: SessionCataloging {
         let results = try await withConflictIssues(scanned)
         let issues = results.flatMap(\.issues)
         let recovered = await store.recoveredFromCorruption()
-        try await store.apply(results, catalogUpdatedAt: now())
+        await acquirePublication()
+        guard generation == mutationGeneration else {
+            releasePublication()
+            return try await reconcile()
+        }
+        // Every publication supersedes older scans, including scans of a title
+        // from before an edit. Serialize the store await with explicit deletion.
+        mutationGeneration &+= 1
+        do { try await store.apply(results, catalogUpdatedAt: now()) }
+        catch { releasePublication(); throw error }
+        releasePublication()
         return CatalogReconciliationReport(rootResults: results, issues: issues, recoveredFromCorruption: recovered)
     }
 
     func orderedItems() async throws -> [SessionCatalogItem] { try await store.orderedItems() }
+
+    func removeTrashedSession(at location: SessionLocation) async throws {
+        mutationGeneration &+= 1
+        await acquirePublication()
+        defer { mutationGeneration &+= 1; releasePublication() }
+        try await store.removeTrashedSession(at: location)
+    }
+
+    private func acquirePublication() async {
+        if publishing { await withCheckedContinuation { publicationWaiters.append($0) } }
+        else { publishing = true }
+    }
+    private func releasePublication() {
+        if publicationWaiters.isEmpty { publishing = false }
+        else { publicationWaiters.removeFirst().resume() }
+    }
 
     /// A file catalog is authoritative only when a single scan gives each session one
     /// unambiguous location.  Keep prior catalog rows unreadable rather than replacing

@@ -864,7 +864,7 @@ Use a new result-bundle name for each run. T20 artifacts are under `/private/tmp
 
 For the repetition command, append those `-only-testing:` arguments and `-test-iterations 20` to the Debug test command. The startup recovery matrix recreates the repository and recovery coordinator after failures at five publication boundaries; the write-fault matrix covers every `TranscriptWritePoint`. Assertions check preserved recovery/journal/canonical bytes, read-back content, outcome, ordered checkpoints, scope release and retry results.
 
-Manual/Pending: record a short real lecture offline, stop and inspect the three transcript files; close/reopen the app after moving between rooms; confirm a derived-write failure is visible and explicit quit leaves the session recoverable. Exercise the text-edit API through the future T23 UI when that task is implemented. G1's physical microphone/TCC, signed Sandbox, lid/process-kill/power-loss and long-recording checks remain unverified. Recovery audio is retained; T20 supplies the verifier for the existing explicit T08 cleanup API but does not invoke deletion automatically.
+Manual/Pending: record a short real lecture offline, stop and inspect the three transcript files; close/reopen the app after moving between rooms; confirm a derived-write failure is visible and explicit quit leaves the session recoverable. Exercise the text-edit API through the T23 detail UI using the procedure below. G1's physical microphone/TCC, signed Sandbox, lid/process-kill/power-loss and long-recording checks remain unverified. Recovery audio is retained; T20 supplies the verifier for the existing explicit T08 cleanup API but does not invoke deletion automatically.
 
 T20 review repair artifacts are in `/private/tmp/stt-t20-repair`. The same Debug command above uses `-resultBundlePath /private/tmp/stt-t20-repair/Full.xcresult`; the focused run uses `Focused2.xcresult` and these selectors:
 
@@ -902,7 +902,7 @@ Manual/Pending (G1 remains unverified):
 3. In **모델 관리**, explicitly download large-v3 or use **파일 폴더 선택** for the folder containing `ggml-large-v3.bin`. Generic import expects an installation manifest. Verify progress, pause/resume, validation and ready state; close/reopen during download. Never commit weights.
 4. Start a short offline recording with empty/manual title and each language mode. Verify selected-model metadata, no model-change controls during capture, and list update after stop/finalization. Compare to the existing T17/T19 recording checks.
 5. Cancel model deletion; then inspect reference and incomplete-root warnings using disposable data before confirming deletion. Existing audio/transcripts must remain untouched.
-6. Change/reauthorize the session root from the main form/settings and verify previous sessions remain listed. Inspect the UI at the minimum window size and with long titles; previous-session playback and edits arrive in T23.
+6. Change/reauthorize the session root from the main form/settings and verify previous sessions remain listed. Inspect the UI at the minimum window size and with long titles; previous-session playback and edits use the T23 detail view.
 
 ## T22 active recording and transcript verification
 
@@ -930,3 +930,30 @@ Manual/Pending (G1 remains unverified):
 4. Use the existing STT fault procedures/test doubles to inspect delay, failure and journal warnings. Stop must remain usable; warnings must not open a blocking alert. Compare recovered audio with the existing recorder tests; this does not pass G1.
 5. Stop and observe **필수 저장**, remaining STT and background finalization. With more than one pending/failed session, verify each status and retry control is present. A completed session must no longer claim that finalization is pending. Close/reopen the window; app-owned capture/STT/finalization should continue per the existing lifecycle policy.
 6. Check minimum window size, long titles, large text/VoiceOver, and a long recording. Confirm the stop button remains accessible and the transcript can scroll. Actual native gesture behavior, visual layout, sustained FPS and real lecture performance remain manual; automated publisher assertions do not claim those outcomes.
+
+
+## T23 session detail verification
+
+```sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/stt-t15-validation.Uth8xp/DerivedData \
+  -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+  -resultBundlePath /private/tmp/stt-t23-work/FinalFull.xcresult \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
+  CODE_SIGNING_ALLOWED=NO build test
+swift build --scratch-path /private/tmp/stt-t15-validation.Uth8xp/CLI --disable-automatic-resolution
+python3 -B -m unittest discover -s tools/t16 -v
+```
+
+Use a fresh result-bundle path each time. The focused command adds `-only-testing:LocalLectureSTTTests/SessionDetailTests -only-testing:LocalLectureSTTTests/SessionDetailInteractionTests`; `-test-iterations 10` repeats these tests. Release validation uses the same project, destination and DerivedData with `-configuration Release ... build`, then `python3 -B tools/verify_product_engine.py /private/tmp/stt-t15-validation.Uth8xp/DerivedData/Build/Products/Release/LocalLectureSTT.app`. Do not run Debug and Release concurrently in the same DerivedData.
+
+Manual/Pending (use disposable sessions; G1 remains unverified):
+
+1. In a separately signed sandbox build, open a completed session from the sidebar with networking disabled. Play/pause/stop, drag the slider and use keyboard controls; click several transcript timestamps. Check audible output, position, end-of-file and navigation/window-close cleanup. Reopen and repeat with a read-only root; viewing and playback should work without changing files.
+2. Edit one segment and save; confirm originalText, IDs, order and timestamps remain unchanged in JSON while TXT/MD reflect new text. Rename the title; the session folder stays unchanged. A pending draft prevents navigating away; Cancel leaves the saved files unchanged. Repeat at minimum window size, with a long title/transcript and VoiceOver.
+3. Request app quit with an unsaved draft; successful saving should finish before quit. Use a disposable unwritable root to provoke save failure: the draft and warning remain and the app must stay open. Restore access and retry. Close/reopen the window to confirm in-memory draft retention. Process kill is not a promise of unsaved-draft durability.
+4. Use each **파일 위치** button to select audio.m4a, transcript.json and transcript.md in Finder. Delete only a disposable session: Cancel preserves it; Confirm moves the entire folder into the macOS Trash. Use Finder's Put Back (or restore to the original root), reopen/rescan and confirm the session reappears with all files. Do not empty the Trash. If the volume cannot trash an item, the app must show an error without a permanent-delete fallback.
+5. Move or corrupt copies of individual files outside the app and reopen/refresh the session. Missing audio disables seeking; invalid audio fails without deleting it; corrupt JSON disables editing while other files stay accessible. Reauthorize an unavailable root using existing settings and retry. Exercise restoration/read-only behavior on the actual storage volume as filesystem permissions and Sandbox behavior are not proved by the unsigned tests.
+
+[Acceptance matrix](T23_ACCEPTANCE.md) distinguishes real media/filesystem tests from controlled driver/Trash adapters and manual platform checks.

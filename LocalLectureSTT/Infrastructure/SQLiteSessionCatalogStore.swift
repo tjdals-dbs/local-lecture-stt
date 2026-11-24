@@ -72,6 +72,15 @@ actor SQLiteSessionCatalogStore: SessionCatalogStore {
 
     func recoveredFromCorruption() -> Bool { didRecoverFromCorruption }
 
+    func removeTrashedSession(at location: SessionLocation) throws {
+        let statement = try prepare("DELETE FROM sessions WHERE session_id=? AND root_id=? AND folder_name=?")
+        defer { sqlite3_finalize(statement) }
+        try bindText(location.sessionID.rawValue.uuidString.lowercased(), to: statement, index: 1)
+        try bindText(location.rootID.rawValue.uuidString.lowercased(), to: statement, index: 2)
+        try bindText(location.folderName.rawValue, to: statement, index: 3)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw CatalogError(.stepFailed) }
+    }
+
     func sessionID(at rootID: StorageRootID, folderName: SessionFolderName) throws -> SessionID? {
         let statement = try prepare("SELECT session_id FROM sessions WHERE root_id=? AND folder_name=?")
         defer { sqlite3_finalize(statement) }
@@ -365,4 +374,5 @@ actor DeferredSessionCatalog: SessionCataloging {
     }
     func reconcile() async throws -> CatalogReconciliationReport { try await resolved().reconcile() }
     func orderedItems() async throws -> [SessionCatalogItem] { try await resolved().orderedItems() }
+    func removeTrashedSession(at location: SessionLocation) async throws { try await resolved().removeTrashedSession(at: location) }
 }

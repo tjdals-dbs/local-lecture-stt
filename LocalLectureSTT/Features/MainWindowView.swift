@@ -4,15 +4,18 @@ struct MainWindowView: View {
     @ObservedObject private var storageRoots: StorageRootViewModel
     @ObservedObject private var catalogStartup: CatalogStartupCoordinator
     @ObservedObject private var recording: RecordingSessionViewModel
+    @ObservedObject private var detail: SessionDetailViewModel
 
     init(
         storageRoots: StorageRootViewModel = .preview,
         catalogStartup: CatalogStartupCoordinator = CatalogStartupCoordinator(catalog: UnavailableSessionCatalog(error: .openFailed)),
-        recording: RecordingSessionViewModel = .preview
+        recording: RecordingSessionViewModel = .preview,
+        detail: SessionDetailViewModel = .preview
     ) {
         self.storageRoots = storageRoots
         self.catalogStartup = catalogStartup
         self.recording = recording
+        self.detail = detail
     }
 
     @State private var destination = "recording"
@@ -26,17 +29,22 @@ struct MainWindowView: View {
                         destination = "recording"; selectedSession = nil
                         if recording.actions.canReset { Task { await recording.beginAnotherRecording() } }
                     }.accessibilityIdentifier("show-recording")
+                        .disabled(detail.busy || detail.hasDraft)
                     if recording.models?.recordingLocked != true, recording.models != nil {
                         Button("모델 관리") { destination = "models"; selectedSession = nil }
+                            .disabled(detail.busy || detail.hasDraft)
                             .accessibilityIdentifier("show-model-management")
                     }
                     Section("녹음 세션") {
                         if catalogStartup.items.isEmpty { Text("저장된 세션이 없습니다").foregroundStyle(.secondary) }
                         ForEach(catalogStartup.items) { item in
                             Button {
-                                selectedSession = item.sessionID; destination = "session"
+                                Task {
+                                    if await detail.select(item) { selectedSession = item.sessionID; destination = "session" }
+                                }
                             } label: { SessionListRow(item: item) }
                             .buttonStyle(.plain)
+                            .disabled(detail.busy || detail.hasDraft || recording.models?.recordingLocked == true)
                             .listRowBackground(selectedSession == item.sessionID ? Color.accentColor.opacity(0.15) : Color.clear)
                         }
                     }
@@ -55,6 +63,7 @@ struct MainWindowView: View {
                         Label(activity, systemImage: "waveform.badge.magnifyingglass").font(.caption)
                     }
                     .padding(.horizontal, 12).padding(.bottom, 12)
+                    .disabled(detail.busy || detail.hasDraft)
                     .accessibilityIdentifier("background-work-status")
                 }
             }.navigationSplitViewColumnWidth(min: 230, ideal: 260, max: 360)
@@ -76,14 +85,15 @@ struct MainWindowView: View {
                     RecordingSessionView(viewModel: recording, activityOnly: true)
                 } else if destination == "models", let models = recording.models {
                     ModelManagementView(models: models)
-                } else if destination == "session", let item = catalogStartup.items.first(where: { $0.sessionID == selectedSession }) {
-                    SessionSummaryView(item: item)
+                } else if destination == "session" {
+                    SessionDetailView(model: detail)
                 } else {
                     recordingStart
                 }
             }.frame(minWidth: 460, minHeight: 440)
         }
         .accessibilityIdentifier("initial-project-shell")
+        .onDisappear { Task { await detail.stopPlayback() } }
         .task {
             recording.startObserving()
             recording.models?.loadIfNeeded()
@@ -159,22 +169,6 @@ struct SessionListRow: View {
         case .error: "오류"
         case .missing: "파일 없음"
         }
-    }
-}
-
-private struct SessionSummaryView: View {
-    let item: SessionCatalogItem
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text(item.title).font(.largeTitle.bold()).textSelection(.enabled)
-            LabeledContent("녹음 날짜") { Text(item.createdAt.value, format: .dateTime.year().month().day().hour().minute()) }
-            LabeledContent("길이", value: SessionListRow.duration(item.activeDuration.rawValue))
-            LabeledContent("상태", value: SessionListRow.status(item.displayStatus))
-            if item.presence != .present {
-                Text("세션 파일을 읽을 수 없습니다. 저장 폴더의 연결과 접근 권한을 확인하세요.").foregroundStyle(.orange)
-            }
-            Spacer()
-        }.padding(28).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 

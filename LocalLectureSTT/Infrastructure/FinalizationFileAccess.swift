@@ -19,7 +19,7 @@ final class FinalizationFileAccess: @unchecked Sendable {
     static let checkpoint = "recovery/finalization.checkpoint.json"
     static let bufferSize = 65_536
 
-    init(root: URL, location: SessionLocation) throws {
+    init(root: URL, location: SessionLocation, allowMissingRecovery: Bool = false) throws {
         guard location.folderName.matches(location.sessionID) else { throw AudioFinalizationCode.invalidRequest }
         self.location = location
         self.root = root
@@ -29,14 +29,14 @@ final class FinalizationFileAccess: @unchecked Sendable {
         let sessionFD = openat(rootFD, location.folderName.rawValue, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
         guard sessionFD >= 0 else { Darwin.close(rootFD); throw AudioFinalizationCode.unsafeLayout }
         let recoveryFD = openat(sessionFD, "recovery", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-        guard recoveryFD >= 0 else {
+        guard recoveryFD >= 0 || (allowMissingRecovery && errno == ENOENT) else {
             Darwin.close(sessionFD); Darwin.close(rootFD); throw AudioFinalizationCode.unsafeLayout
         }
         self.rootFD = rootFD
         self.sessionFD = sessionFD
         self.recoveryFD = recoveryFD
         var identities: [(URL, Int64, UInt64)] = []
-        for (url, fd) in [(root, rootFD), (directory, sessionFD), (directory.appendingPathComponent("recovery"), recoveryFD)] {
+        for (url, fd) in [(root, rootFD), (directory, sessionFD), (directory.appendingPathComponent("recovery"), recoveryFD)] where fd >= 0 {
             var info = stat()
             fstat(fd, &info)
             identities.append((url, Int64(info.st_dev), UInt64(info.st_ino)))
@@ -45,7 +45,7 @@ final class FinalizationFileAccess: @unchecked Sendable {
         try validateDirectories()
     }
 
-    deinit { Darwin.close(recoveryFD); Darwin.close(sessionFD); Darwin.close(rootFD) }
+    deinit { if recoveryFD >= 0 { Darwin.close(recoveryFD) }; Darwin.close(sessionFD); Darwin.close(rootFD) }
 
     func validateDirectories() throws {
         for (url, device, inode) in directoryIdentities {
@@ -70,7 +70,10 @@ final class FinalizationFileAccess: @unchecked Sendable {
             throw AudioFinalizationCode.unsafeLayout
         }
         if parts.count == 1 { return (sessionFD, String(parts[0])) }
-        if parts.count == 2, parts[0] == "recovery" { return (recoveryFD, String(parts[1])) }
+        if parts.count == 2, parts[0] == "recovery" {
+            guard recoveryFD >= 0 else { throw AudioFinalizationCode.sourceMissing }
+            return (recoveryFD, String(parts[1]))
+        }
         throw AudioFinalizationCode.unsafeLayout
     }
 

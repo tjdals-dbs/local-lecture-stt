@@ -38,11 +38,13 @@ final class RecordingSessionViewModel: ObservableObject {
     private let timeZone: @MainActor @Sendable () -> TimeZone
     private var observationTask: Task<Void, Never>?
     private let finalization: AudioFinalizationCoordinator?
+    private let sessionActivity: SessionActivityRegistry?
     private var finalizationObservation: Task<Void, Never>?
 
     init(
         coordinator: any RecordingSessionCoordinating,
         finalization: AudioFinalizationCoordinator? = nil,
+        sessionActivity: SessionActivityRegistry? = nil,
         modelName: String? = nil,
         models: ModelManagementViewModel? = nil,
         microphonePreview: MicrophonePreviewViewModel? = nil,
@@ -53,6 +55,7 @@ final class RecordingSessionViewModel: ObservableObject {
         self.microphonePreview = microphonePreview
         self.coordinator = coordinator
         self.finalization = finalization
+        self.sessionActivity = sessionActivity
         self.timeZone = timeZone
         modelObservation = models?.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
     }
@@ -91,7 +94,14 @@ final class RecordingSessionViewModel: ObservableObject {
 
     func retryFinalization(_ value: AudioFinalizationSnapshot) async {
         guard value.result?.canRetry == true else { return }
+        let claim: SessionActivityReservation?
+        if let sessionActivity {
+            guard let reserved = await sessionActivity.claimRecovery(at: value.location) else { return }
+            claim = reserved
+        } else { claim = nil }
         await finalization?.enqueue(.init(location: value.location, operation: value.operation), retry: true)
+        _ = await finalization?.waitForResult(at: value.location, operation: value.operation)
+        if let claim { await sessionActivity?.release(claim) }
     }
 
     static func finalizationText(_ phase: AudioFinalizationPhase) -> String {
