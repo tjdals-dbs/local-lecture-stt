@@ -146,7 +146,7 @@ The committed project intentionally has no development team. Unsigned build/test
 
 The app links macOS system `libsqlite3`; no package installation is required. Runtime catalog data is at `Application Support/LocalLectureSTT/Catalog/session-catalog.sqlite3`; damaged copies are retained under `Catalog/Corrupt/` and all of these runtime paths are ignored by Git.
 
-For a manual check, use disposable roots and synthetic metadata only. Close the app before moving/deleting a catalog DB and its `-wal`, `-shm`, and `-journal` sidecars, then restart to rebuild from accessible session folders. T21 has not added a catalog list UI yet, so automated tests are the acceptance evidence for catalog rows and statuses.
+For a manual check, use disposable roots and synthetic metadata only. Close the app before moving/deleting a catalog DB and its `-wal`, `-shm`, and `-journal` sidecars, then restart to rebuild from accessible session folders. T21 now displays these catalog rows and statuses in the main-window sidebar.
 
 ## T05 microphone capture manual verification
 
@@ -705,7 +705,7 @@ xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT -configura
 python3 -B tools/verify_product_engine.py "$t17_build/Build/Products/Release/LocalLectureSTT.app"
 ```
 
-For a local installed-model recording test, set `T17_STORE` to a verified T12 model store containing the G2 native installation. The developer CLI's explicit `import tools/t15/candidate.json "$MODEL_SOURCE" "$T17_STORE"` command can populate that store from a local model folder. Use the app's sandbox Application Support directory under `LocalLectureSTT/Models` when testing the GUI. Model management UI is scheduled for T21. Recording start reports a model error if the selected installation cannot load.
+For a local installed-model recording test, set `T17_STORE` to a verified T12 model store containing the G2 native installation. The developer CLI's explicit `import tools/t15/candidate.json "$MODEL_SOURCE" "$T17_STORE"` command can populate that store from a local model folder. Use the app's sandbox Application Support directory under `LocalLectureSTT/Models` when testing the GUI. The T21 model-management screen can download or import and validate the installation. Recording start reports a model error if the selected installation cannot load.
 
 ```sh
 TEST_RUNNER_LLSTT_T17_TEST_MODEL_STORE="$T17_STORE" xcodebuild \
@@ -876,3 +876,30 @@ T20 review repair artifacts are in `/private/tmp/stt-t20-repair`. The same Debug
 ```
 
 The three `testReviewT20*` selectors reproduced the independent findings before repair (`Red.xcresult`). The repaired focused suite passed 54 tests. Timing regressions go through real T18 reconciliation, 21-second synthetic media, journal compaction, TXT/MD and reopening. Read-only tests use filesystem permissions, check file identities as well as bytes, and cover missing/stale exports and permission-restored recovery. [Acceptance](T20_ACCEPTANCE.md#same-task-review-repair-overlap-timing-and-read-only-completion) records the exact test names. These filesystem checks do not replace signed Sandbox or physical G1 verification.
+
+## T21 UI and start-readiness verification
+
+`SessionModelUITests` covers model readiness, explicit-only download actions, retained-journal presentation, cancellation/retry/deletion, catalog ordering under racing reads, finite microphone preview and app-lifecycle ownership. Three `RecordingSessionCoordinatorTests/testT21*` cases cover UI admission, owned preview cleanup and exact selected-model metadata. T12/T13 retain real repository and URLSession fault coverage. Tests generate their own payloads and never download model weights.
+
+```sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/stt-t15-validation.Uth8xp/DerivedData \
+  -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+  -resultBundlePath /private/tmp/stt-t21-work/ReviewedFinal.xcresult \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
+  CODE_SIGNING_ALLOWED=NO build test
+swift build --scratch-path /private/tmp/stt-t15-validation.Uth8xp/CLI --disable-automatic-resolution
+python3 -B -m unittest discover -s tools/t16 -v
+```
+
+Use a fresh result-bundle path on each run. Focus with `-only-testing:LocalLectureSTTTests/SessionModelUITests`, the three T21 coordinator selectors, or `AppLifecycleTests`. Release validation uses the same Xcode project and destination with `-configuration Release`, followed by `python3 -B tools/verify_product_engine.py <DerivedData>/Build/Products/Release/LocalLectureSTT.app`.
+
+Manual/Pending (G1 remains unverified):
+
+1. Launch a separately signed sandbox build with no root/model. Confirm the storage-folder explanation and model-management entry; no network download starts automatically.
+2. Select a disposable root. Use **마이크 입력 확인**; verify microphone name, level, no-input warning and automatic stop after 30 seconds. Starting recording must stop preview before capturing the session.
+3. In **모델 관리**, explicitly download large-v3 or use **파일 폴더 선택** for the folder containing `ggml-large-v3.bin`. Generic import expects an installation manifest. Verify progress, pause/resume, validation and ready state; close/reopen during download. Never commit weights.
+4. Start a short offline recording with empty/manual title and each language mode. Verify selected-model metadata, no model-change controls during capture, and list update after stop/finalization. Compare to the existing T17/T19 recording checks.
+5. Cancel model deletion; then inspect reference and incomplete-root warnings using disposable data before confirming deletion. Existing audio/transcripts must remain untouched.
+6. Change/reauthorize the session root from the main form/settings and verify previous sessions remain listed. Inspect the UI at the minimum window size and with long titles; previous-session playback and edits arrive in T23.

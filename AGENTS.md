@@ -24,6 +24,10 @@ If these disagree, do not silently choose one. Preserve data, stop at a safe poi
 
 ## 3. Session scope
 
+### Explicit continuous-work authorization
+
+On 2026-11-25 the user authorized T21 in this coordinator session from implementation through review, same-Task fixes, task CI, dev integration and branch cleanup without another permission round. For this authorization, the separate integration-prompt requirements below are replaced by a separate read-only review pass against the acceptance matrix and final diff. All other verification, scope and Git gates remain mandatory. Record review evidence before integration; do not mark completion before integration. Stop only for an unresolved product decision or a required check that cannot be completed. G1 remains unverified and main is unchanged. This does not authorize T22 or later Tasks.
+
 - A planning or review request does not authorize implementation.
 - An implementation session is assigned exactly one `TNN` Task unless the user explicitly expands it.
 - Finish implementation, same-Task fixes, tests, task-branch commit/push/CI, and any later authorized `dev` integration for that Task in the same session.

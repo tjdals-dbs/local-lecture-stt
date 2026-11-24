@@ -170,7 +170,8 @@ final class MacLifecycleDelegate: NSObject, NSApplicationDelegate {
 
     func configure(recording: any RecordingSessionCoordinating,
                    finalization: any LifecycleFinalizationCoordinating,
-                   recovery: any LifecycleRecoveryCoordinating, authority: LifecycleWorkAuthority? = nil) {
+                   recovery: any LifecycleRecoveryCoordinating, authority: LifecycleWorkAuthority? = nil,
+                   auxiliary: (any LifecycleAuxiliaryWorking)? = nil) {
         guard lifecycle == nil else { return }
         self.authority = authority
         terminationReadiness.authority = authority
@@ -185,7 +186,7 @@ final class MacLifecycleDelegate: NSObject, NSApplicationDelegate {
         }
         lifecycle = AppLifecycleCoordinator(recording: recording, finalization: finalization, recovery: recovery,
                                             activity: activity, termination: automaticTermination,
-                                            terminationReadiness: terminationReadiness, authority: authority)
+                                            terminationReadiness: terminationReadiness, authority: authority, auxiliary: auxiliary)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {

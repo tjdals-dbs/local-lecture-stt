@@ -5,6 +5,78 @@ import AppKit
 @testable import LocalLectureSTT
 
 final class RecordingSessionCoordinatorTests: XCTestCase {
+    @MainActor
+    func testT21StartUIRequiresValidatedSelectionAndHidesChangesWhileRecording() async throws {
+        let repo = try UIModelRepository(); let models = ModelManagementViewModel(repository: repo, downloader: UIDownloader(), supports: { _ in true })
+        let coordinator = ViewModelRecordingCoordinator()
+        let view = RecordingSessionViewModel(coordinator: coordinator, models: models)
+        await view.startRecording()
+        XCTAssertEqual(coordinator.counts().start, 0)
+        await models.refresh(); XCTAssertFalse(view.actions.canStart)
+        await repo.setState(.usable); await models.refresh()
+        XCTAssertTrue(view.actions.canStart)
+        view.title = "UI model"; view.languageMode = .english
+        await view.startRecording()
+        XCTAssertEqual(coordinator.lastConfiguration()?.modelDescriptor, models.selectedDescriptor)
+        XCTAssertEqual(coordinator.lastConfiguration()?.languageMode, .english)
+        view.startObserving()
+        coordinator.emit(snapshotForView(phase: .recording, sessionID: SessionID(), canStart: false, canStop: true, canReset: false))
+        await waitUntil { await MainActor.run { models.recordingLocked } }
+        XCTAssertFalse(view.actions.canStart); XCTAssertFalse(view.actions.canEditConfiguration)
+        await models.refresh(); XCTAssertNil(models.operation)
+        view.stopObserving()
+    }
+
+    func testT21PreviewCleanupHoldsStartOwnershipBeforeCapture() async throws {
+        let fixture = CoordinatorFixture()
+        let gate = ControlledTestGate()
+        let authority = LifecycleWorkAuthority()
+        let coordinator = fixture.makeCoordinator(authority: authority, prepareCapture: { await gate.arriveAndWait() })
+        let start = Task { await startFailure(coordinator) }
+        await gate.waitForArrival()
+        XCTAssertTrue(authority.state().active)
+        let count = await fixture.repository.createCount(); XCTAssertEqual(count, 0)
+        let captures = await fixture.capture.counts(); XCTAssertEqual(captures.start, 0)
+        let concurrent = await startFailure(coordinator); XCTAssertEqual(concurrent, .busy)
+        await gate.release()
+        let failure = await start.value; XCTAssertNil(failure)
+        let started = await fixture.capture.counts(); XCTAssertEqual(started.start, 1)
+        _ = await coordinator.interrupt(.systemSleep)
+        XCTAssertFalse(authority.state().active)
+    }
+
+    func testT21SelectedModelIsPinnedAndPersistedWithoutFallingBackToDefault() async throws {
+        let fixture = CoordinatorFixture()
+        let store = try T14Fixture()
+        let descriptor = try BundledModelCatalogLoader().load().entries[0]
+        let product = try ProductionSpeechModel.make(repository: store.repository, descriptor: descriptor)
+        let fake = try FakeSTTEngine(engine: product.configuration.engine, capabilities: product.engine.capabilities)
+        let coordinator = fixture.makeCoordinator(makeSpeechModel: { throw STTEngineError(.unsupportedModel) },
+            makeSelectedSpeechModel: { selected in
+                guard selected == descriptor else { throw STTEngineError(.unsupportedModel) }
+                return RecordingSpeechModel(engine: fake, configuration: product.configuration, settings: product.settings)
+            })
+        let started = try await coordinator.start(.init(title: "", languageMode: .automatic, timeZone: .gmt, modelDescriptor: descriptor))
+        XCTAssertEqual(started.phase, .recording)
+        XCTAssertFalse(started.title?.isEmpty ?? true)
+        _ = await coordinator.stop()
+        let documents = await fixture.repository.metadataDocuments()
+        XCTAssertFalse(documents.isEmpty)
+        for document in documents {
+            XCTAssertEqual(document.model, descriptor.model)
+            XCTAssertEqual(document.engine, descriptor.engine)
+            XCTAssertEqual(document.modelSettings, product.settings)
+            XCTAssertEqual(document.languageMode, .automatic)
+        }
+        let unavailable = CoordinatorFixture()
+        let missingFactory = unavailable.makeCoordinator(makeSpeechModel: {
+            RecordingSpeechModel(engine: fake, configuration: product.configuration, settings: product.settings)
+        })
+        let failure = await startFailure(missingFactory, configuration: .init(title: "", timeZone: .gmt, modelDescriptor: descriptor))
+        XCTAssertEqual(failure, .speechModel(.unsupportedModel), "selected model cannot silently fall back")
+        let count = await unavailable.repository.createCount(); XCTAssertEqual(count, 0)
+    }
+
     func testT17PinnedModelLoadsBeforeCaptureAndSurvivesStopInMetadata() async throws {
         let fixture = CoordinatorFixture()
         let store = try T14Fixture()
@@ -1329,6 +1401,8 @@ private final class CoordinatorFixture: @unchecked Sendable {
 
     func makeCoordinator(authority: LifecycleWorkAuthority? = nil,
                          makeSpeechModel: (@Sendable () throws -> RecordingSpeechModel)? = nil,
+                         makeSelectedSpeechModel: (@Sendable (ModelPackageDescriptor) throws -> RecordingSpeechModel)? = nil,
+                         prepareCapture: @escaping @Sendable () async -> Void = {},
                          onSettlementJoin: @escaping @Sendable () -> Void = {}) -> RecordingSessionCoordinator {
         RecordingSessionCoordinator(
             roots: roots,
@@ -1341,6 +1415,8 @@ private final class CoordinatorFixture: @unchecked Sendable {
             ticker: ticker,
             environment: RecordingSessionEnvironment(appVersion: "7.0-test", osVersion: "testOS"),
             makeSpeechModel: makeSpeechModel,
+            makeSelectedSpeechModel: makeSelectedSpeechModel,
+            prepareCapture: prepareCapture,
             identifiers: RecordingSessionIdentifiers(
                 sessionID: { SessionID(UUID()) },
                 eventID: { SessionEventID(UUID()) }

@@ -90,12 +90,17 @@ struct RecordingSessionView: View {
             .disabled(!viewModel.actions.canEditConfiguration)
             .accessibilityIdentifier("recording-language")
 
-            if let modelName = viewModel.modelName {
+            if let models = viewModel.models {
+                ModelSelectionView(models: models)
+            } else if let modelName = viewModel.modelName {
                 LabeledContent("기본 STT 모델", value: modelName)
                     .accessibilityIdentifier("recording-model")
             }
             LabeledContent("마이크 권한", value: viewModel.permissionText)
                 .accessibilityIdentifier("microphone-permission-status")
+            if let preview = viewModel.microphonePreview {
+                MicrophonePreviewView(preview: preview, toggle: { await viewModel.toggleMicrophonePreview() })
+            }
 
             if let failure = viewModel.snapshot.failure {
                 if case .speechModel = failure {
@@ -230,5 +235,19 @@ struct RecordingSessionView: View {
             .disabled(!viewModel.actions.canReset)
             .accessibilityIdentifier("recording-reset")
         }
+    }
+}
+
+private struct MicrophonePreviewView: View {
+    @ObservedObject var preview: MicrophonePreviewViewModel
+    let toggle: () async -> Void
+    var body: some View {
+        LabeledContent("마이크", value: preview.name)
+        ProgressView(value: preview.level, total: 1).accessibilityLabel("시작 전 마이크 입력 레벨")
+        Text(preview.noInput ? "마이크 입력이 감지되지 않습니다. 연결과 음소거 상태를 확인하세요." : preview.status)
+            .font(.caption).foregroundStyle(preview.noInput ? .orange : .secondary)
+        Button(preview.active ? "입력 확인 중지" : "마이크 입력 확인") {
+            Task { await toggle() }
+        }.accessibilityIdentifier("microphone-preview")
     }
 }

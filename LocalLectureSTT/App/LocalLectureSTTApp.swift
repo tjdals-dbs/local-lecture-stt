@@ -6,22 +6,35 @@ struct LocalLectureSTTApp: App {
     @StateObject private var storageRoots: StorageRootViewModel
     @StateObject private var catalogStartup: CatalogStartupCoordinator
     @StateObject private var recording: RecordingSessionViewModel
+    @StateObject private var modelManagement: ModelManagementViewModel
 
     init() {
         let roots = StorageRootManager.live()
         let catalog = Self.makeCatalog(roots: roots)
         let repository = FileSessionRepository(roots: roots)
-        let models = FileModelRepository(sources: ModelImportSources(), validator: WhisperCppModelValidator(),
+        let sources = ModelImportSources()
+        let models = FileModelRepository(sources: sources, validator: WhisperCppModelValidator(),
                                          references: SessionModelReferenceChecker(roots: roots))
         let activity = SessionActivityRegistry()
         let processActivity = ProcessInfoLifecycleActivityAdapter()
         let authority = LifecycleWorkAuthority(activity: { processActivity.update($0) })
+        let modelManagement = ModelManagementViewModel(repository: models, downloader: ModelDownloadService(repository: models), authority: authority,
+            supports: { ProductionSpeechModel.supports($0) }, importFolder: { descriptor in
+                guard let url = OpenPanelDirectorySelector().chooseDirectory() else { return nil }
+                let source = await sources.registerSelectedDirectory(url)
+                do {
+                    let result = try await models.importPackage(from: source, descriptor: descriptor, origin: .suppliedLocal)
+                    await sources.unregister(source); return result
+                } catch { await sources.unregister(source); throw error }
+            })
+        _modelManagement = StateObject(wrappedValue: modelManagement)
         let permission = AVFoundationMicrophonePermissionAuthorizer()
         let capture = MicrophoneCaptureController(
             permission: permission,
             driver: AVAudioEngineMicrophoneDriver(),
             monitor: InputSignalMonitor()
         )
+        let microphonePreview = MicrophonePreviewViewModel(permission: permission, capture: capture, authority: authority)
         let recordingCoordinator = RecordingSessionCoordinator(
             roots: roots,
             permission: permission,
@@ -34,6 +47,8 @@ struct LocalLectureSTTApp: App {
                 osVersion: ProcessInfo.processInfo.operatingSystemVersionString
             ),
             makeSpeechModel: { try ProductionSpeechModel.make(repository: models) },
+            makeSelectedSpeechModel: { try ProductionSpeechModel.make(repository: models, descriptor: $0) },
+            prepareCapture: { await microphonePreview.stop() },
             makeSpeechConverter: { SpeechPCMConverter() },
             activity: activity, authority: authority
         )
@@ -55,21 +70,23 @@ struct LocalLectureSTTApp: App {
                                                         startupRecovery: recovery, activity: activity, authority: authority)
         _catalogStartup = StateObject(wrappedValue: coordinator)
         _recording = StateObject(wrappedValue: RecordingSessionViewModel(
-            coordinator: lifetime, finalization: finalization, modelName: ProductionSpeechModel.displayName
+            coordinator: lifetime, finalization: finalization, modelName: ProductionSpeechModel.displayName, models: modelManagement,
+            microphonePreview: microphonePreview
         ))
         _storageRoots = StateObject(wrappedValue: StorageRootViewModel(
             controller: roots,
             directorySelector: OpenPanelDirectorySelector(),
             onRootChanged: { coordinator.refreshAfterRootChange() }
         ))
-        lifecycleDelegate.configure(recording: lifetime, finalization: finalization, recovery: recovery, authority: authority)
+        lifecycleDelegate.configure(recording: lifetime, finalization: finalization, recovery: recovery, authority: authority,
+                                    auxiliary: LifecycleAuxiliaryGroup([modelManagement, microphonePreview]))
     }
 
     var body: some Scene {
         Window("Local Lecture STT", id: "main") {
             MainWindowView(storageRoots: storageRoots, catalogStartup: catalogStartup, recording: recording)
         }
-        .defaultSize(width: 720, height: 480)
+        .defaultSize(width: 1000, height: 680)
 
         Settings {
             SettingsView(storageRoots: storageRoots)

@@ -93,6 +93,9 @@ final class CatalogStartupCoordinator: ObservableObject {
 
     @Published private(set) var state: State = .idle
     @Published private(set) var recoverySnapshot: SessionRecoverySnapshot?
+    @Published private(set) var items: [SessionCatalogItem] = []
+    @Published private(set) var listFailure: CatalogErrorCode?
+    private var listGeneration = 0
     private let catalog: any SessionCataloging
     private let recovery: SessionRecoveryCoordinator?
     private var startupTask: Task<Void, Never>?
@@ -150,6 +153,7 @@ final class CatalogStartupCoordinator: ObservableObject {
             do {
                 let report = try await self.catalog.reconcile()
                 self.state = .ready(report)
+                await self.refreshItems()
             } catch let error as CatalogError {
                 self.state = .failed(error.code)
             } catch {
@@ -170,7 +174,22 @@ final class CatalogStartupCoordinator: ObservableObject {
             for await value in stream {
                 guard let self, !Task.isCancelled else { return }
                 self.recoverySnapshot = value
+                if value.phase == .ready { await self.refreshItems() }
             }
+        }
+    }
+
+    /// Read the projection after its writer publishes. No filesystem recovery is
+    /// triggered by a recording UI refresh, and late reads cannot replace newer ones.
+    func refreshItems() async {
+        listGeneration += 1; let generation = listGeneration
+        do {
+            let values = try await catalog.orderedItems()
+            guard generation == listGeneration else { return }
+            items = values; listFailure = nil
+        } catch {
+            guard generation == listGeneration else { return }
+            listFailure = (error as? CatalogError)?.code ?? .stepFailed
         }
     }
 }

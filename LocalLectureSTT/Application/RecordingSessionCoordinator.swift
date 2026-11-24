@@ -92,11 +92,14 @@ struct RecordingStartConfiguration: Sendable, Equatable {
     let title: String
     let languageMode: LanguageMode
     let timeZone: TimeZone
+    let modelDescriptor: ModelPackageDescriptor?
 
-    init(title: String, languageMode: LanguageMode = .korean, timeZone: TimeZone) {
+    init(title: String, languageMode: LanguageMode = .korean, timeZone: TimeZone,
+         modelDescriptor: ModelPackageDescriptor? = nil) {
         self.title = title
         self.languageMode = languageMode
         self.timeZone = timeZone
+        self.modelDescriptor = modelDescriptor
     }
 }
 
@@ -293,6 +296,8 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     private let clock: RecordingSessionClock
     private let ticker: any RecordingTicking
     private let makeSpeechModel: (@Sendable () throws -> RecordingSpeechModel)?
+    private let makeSelectedSpeechModel: (@Sendable (ModelPackageDescriptor) throws -> RecordingSpeechModel)?
+    private let prepareCapture: @Sendable () async -> Void
     private var speechModel: RecordingSpeechModel?
     private let makeSpeechConverter: (@Sendable () -> any SpeechPCMConverting)?
     private var speechOwnsModel = false
@@ -336,6 +341,8 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         ticker: any RecordingTicking = SystemRecordingTicker(),
         environment: RecordingSessionEnvironment,
         makeSpeechModel: (@Sendable () throws -> RecordingSpeechModel)? = nil,
+        makeSelectedSpeechModel: (@Sendable (ModelPackageDescriptor) throws -> RecordingSpeechModel)? = nil,
+        prepareCapture: @escaping @Sendable () async -> Void = {},
         makeSpeechConverter: (@Sendable () -> any SpeechPCMConverting)? = nil,
         identifiers: RecordingSessionIdentifiers = .live,
         activity: SessionActivityRegistry? = nil,
@@ -351,6 +358,8 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         self.clock = clock
         self.ticker = ticker
         self.makeSpeechModel = makeSpeechModel
+        self.makeSelectedSpeechModel = makeSelectedSpeechModel
+        self.prepareCapture = prepareCapture
         self.makeSpeechConverter = makeSpeechConverter
         self.environment = environment
         self.identifiers = identifiers
@@ -519,6 +528,10 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     ) async -> Result<RecordingSessionSnapshot, RecordingSessionFailure> {
         var reservation: SessionActivityReservation?
         do {
+            // Preview cleanup is inside the owned start operation. Sleep/quit
+            // can invalidate this admission while cleanup suspends.
+            await prepareCapture()
+            try ensureStartMayContinue(token)
             for job in Array(speechJobs.values) { await job.waitUntilSettled() }
             try ensureStartMayContinue(token)
             let availableRoot: StorageRootSummary
@@ -543,9 +556,16 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
                 throw RecordingSessionFailure.permission(permissionStatus)
             }
 
-            if let makeSpeechModel {
+            if makeSpeechModel != nil || configuration.modelDescriptor != nil {
                 do {
-                    let model = try makeSpeechModel()
+                    let model: RecordingSpeechModel
+                    if let selected = configuration.modelDescriptor {
+                        guard let makeSelectedSpeechModel else { throw STTEngineError(.unsupportedModel) }
+                        model = try makeSelectedSpeechModel(selected)
+                    } else {
+                        guard let makeSpeechModel else { throw STTEngineError(.unsupportedModel) }
+                        model = try makeSpeechModel()
+                    }
                     speechModel = model
                     let load = Task { try await model.engine.load(model.configuration) }
                     modelLoad = load

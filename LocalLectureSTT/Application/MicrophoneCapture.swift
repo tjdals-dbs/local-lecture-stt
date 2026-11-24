@@ -327,7 +327,7 @@ actor MicrophoneCaptureController {
     }
 }
 
-private extension CaptureError {
+extension CaptureError {
     static func permissionError(for status: MicrophonePermissionStatus) -> CaptureError {
         switch status {
         case .notDetermined: CaptureError(.permissionNotDetermined)

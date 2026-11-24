@@ -15,62 +15,156 @@ struct MainWindowView: View {
         self.recording = recording
     }
 
+    @State private var destination = "recording"
+    @State private var selectedSession: SessionID?
+
     var body: some View {
-        Group {
-            switch storageRoots.state {
-            case .loading:
-                ProgressView("저장 폴더 상태를 확인하는 중…")
-            case .noRoot:
-                ContentUnavailableView {
-                    Label("저장 폴더가 필요합니다", systemImage: "folder.badge.plus")
-                } description: {
-                    Text("세션 파일을 저장할 폴더를 선택하세요.")
-                } actions: {
-                    Button("저장 폴더 선택") { Task { await storageRoots.chooseActiveRoot() } }
-                }
-            case let .available(root, refreshedBookmark):
-                VStack(spacing: 0) {
-                    HStack {
-                        Label(root.displayName, systemImage: "folder.fill")
-                        Spacer()
-                        if refreshedBookmark { Text("접근 권한 갱신됨").foregroundStyle(.secondary) }
+        NavigationSplitView {
+            VStack(spacing: 0) {
+                List {
+                    Button(recording.models?.recordingLocked == true ? "현재 녹음" : "새 녹음") {
+                        destination = "recording"; selectedSession = nil
+                        if recording.actions.canReset { Task { await recording.beginAnotherRecording() } }
+                    }.accessibilityIdentifier("show-recording")
+                    if recording.models?.recordingLocked != true, recording.models != nil {
+                        Button("모델 관리") { destination = "models"; selectedSession = nil }
+                            .accessibilityIdentifier("show-model-management")
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
-                    Divider()
-                    if let recovery = catalogStartup.recoverySnapshot {
+                    Section("녹음 세션") {
+                        if catalogStartup.items.isEmpty { Text("저장된 세션이 없습니다").foregroundStyle(.secondary) }
+                        ForEach(catalogStartup.items) { item in
+                            Button {
+                                selectedSession = item.sessionID; destination = "session"
+                            } label: { SessionListRow(item: item) }
+                            .buttonStyle(.plain)
+                            .listRowBackground(selectedSession == item.sessionID ? Color.accentColor.opacity(0.15) : Color.clear)
+                        }
+                    }
+                }.listStyle(.sidebar)
+                if case let .failed(code) = catalogStartup.state {
+                    Text("세션 검색 실패: \(code.rawValue)").font(.caption).foregroundStyle(.orange)
+                    Button("세션 다시 검색") { catalogStartup.start() }
+                }
+                if let code = catalogStartup.listFailure {
+                    Text("목록 갱신 실패: \(code.rawValue)").font(.caption).foregroundStyle(.orange)
+                }
+                Button("목록 새로고침") { Task { await catalogStartup.refreshItems() } }
+                    .padding(12)
+            }.navigationSplitViewColumnWidth(min: 230, ideal: 260, max: 360)
+        } detail: {
+            VStack(spacing: 0) {
+                if let recovery = catalogStartup.recoverySnapshot {
+                    ScrollView {
                         RecoveryStatusView(snapshot: recovery, retry: { catalogStartup.retryRecovery() },
-                                           historicalReauthorizationErrors: storageRoots.historicalReauthorizationErrors,
-                                           reauthorize: { rootID in await storageRoots.reauthorize(rootID: rootID) })
-                        Divider()
-                    }
+                            historicalReauthorizationErrors: storageRoots.historicalReauthorizationErrors,
+                            reauthorize: { rootID in await storageRoots.reauthorize(rootID: rootID) })
+                    }.frame(maxHeight: 140)
+                    Divider()
+                }
+                if recording.models?.recordingLocked == true {
+                    // Root failures or navigation never hide the stop/save controls.
                     RecordingSessionView(viewModel: recording)
+                } else if destination == "models", let models = recording.models {
+                    ModelManagementView(models: models)
+                } else if destination == "session", let item = catalogStartup.items.first(where: { $0.sessionID == selectedSession }) {
+                    SessionSummaryView(item: item)
+                } else {
+                    recordingStart
                 }
-            case .reauthorizationRequired:
-                ContentUnavailableView {
-                    Label("재승인이 필요합니다", systemImage: "folder.badge.questionmark")
-                } description: {
-                    Text("저장 폴더에 다시 접근할 수 있도록 선택하세요.")
-                } actions: {
-                    Button("저장 폴더 재승인") { Task { await storageRoots.reauthorize() } }
-                }
-            case let .failed(code):
-                ContentUnavailableView {
-                    Label("저장 폴더 오류", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(code.rawValue)
-                } actions: {
-                    Button("다시 선택") { Task { await storageRoots.chooseActiveRoot() } }
-                }
-            }
+            }.frame(minWidth: 460, minHeight: 440)
         }
         .accessibilityIdentifier("initial-project-shell")
         .task {
             recording.startObserving()
+            recording.models?.loadIfNeeded()
             await storageRoots.restore()
             await recording.refreshPermissionStatus()
             catalogStartup.start()
         }
+        .onChange(of: recording.snapshot.phase) { _, _ in
+            Task { await catalogStartup.refreshItems() }
+        }
+        .onChange(of: recording.finalizations) { _, values in
+            if values.contains(where: { $0.result != nil }) { Task { await catalogStartup.refreshItems() } }
+        }
+    }
+
+    @ViewBuilder private var recordingStart: some View {
+        switch storageRoots.state {
+        case .loading: ProgressView("저장 폴더 상태를 확인하는 중…")
+        case .noRoot:
+            ContentUnavailableView {
+                Label("저장 폴더가 필요합니다", systemImage: "folder.badge.plus")
+            } description: { Text("녹음과 기록을 보관할 폴더를 선택하세요. 모델은 모델 관리에서 준비할 수 있습니다.") }
+              actions: { Button("저장 폴더 선택") { Task { await storageRoots.chooseActiveRoot() } } }
+        case let .available(root, refreshed):
+            VStack(spacing: 0) {
+                HStack {
+                    Label(root.displayName, systemImage: "folder.fill")
+                    if refreshed { Text("접근 권한 갱신됨").font(.caption) }
+                    Spacer()
+                    Button("폴더 변경") { Task { await storageRoots.chooseActiveRoot() } }
+                        .disabled(storageRoots.isSavingSelection || storageRoots.isPresentingPicker)
+                }.padding(16)
+                Divider()
+                RecordingSessionView(viewModel: recording)
+            }
+        case .reauthorizationRequired:
+            ContentUnavailableView {
+                Label("저장 폴더 재승인이 필요합니다", systemImage: "folder.badge.questionmark")
+            } description: { Text("저장 폴더를 다시 선택해 접근 권한을 허용하세요.") }
+              actions: { Button("저장 폴더 재승인") { Task { await storageRoots.reauthorize() } } }
+        case let .failed(code):
+            ContentUnavailableView {
+                Label("저장 폴더 오류", systemImage: "exclamationmark.triangle")
+            } description: { Text("저장 폴더에 접근할 수 없습니다. (\(code.rawValue))") }
+              actions: { Button("다시 선택") { Task { await storageRoots.chooseActiveRoot() } } }
+        }
+    }
+}
+
+struct SessionListRow: View {
+    let item: SessionCatalogItem
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(item.title).font(.headline).lineLimit(2)
+            Text(item.createdAt.value, format: .dateTime.year().month().day().hour().minute()).font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Text(Self.duration(item.activeDuration.rawValue)).monospacedDigit()
+                Spacer()
+                Text(Self.status(item.displayStatus))
+            }.font(.caption)
+        }.padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+    }
+    static func duration(_ ms: Int64) -> String { RecordingSessionViewModel.formatElapsed(UInt64(max(0, ms))) }
+    static func status(_ value: SessionStatus) -> String {
+        switch value {
+        case .preparing: "준비 중"
+        case .recording: "녹음 중"
+        case .paused: "일시정지"
+        case .securing: "저장 중"
+        case .finalizing: "마무리 중"
+        case .completed: "완료"
+        case .interrupted: "중단됨"
+        case .error: "오류"
+        case .missing: "파일 없음"
+        }
+    }
+}
+
+private struct SessionSummaryView: View {
+    let item: SessionCatalogItem
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text(item.title).font(.largeTitle.bold()).textSelection(.enabled)
+            LabeledContent("녹음 날짜") { Text(item.createdAt.value, format: .dateTime.year().month().day().hour().minute()) }
+            LabeledContent("길이", value: SessionListRow.duration(item.activeDuration.rawValue))
+            LabeledContent("상태", value: SessionListRow.status(item.displayStatus))
+            if item.presence != .present {
+                Text("세션 파일을 읽을 수 없습니다. 저장 폴더의 연결과 접근 권한을 확인하세요.").foregroundStyle(.orange)
+            }
+            Spacer()
+        }.padding(28).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Combine
 
 enum RecordingSessionViewDisplayState: Sendable, Equatable {
     case configuration
@@ -26,6 +27,10 @@ final class RecordingSessionViewModel: ObservableObject {
     @Published private(set) var finalizations: [AudioFinalizationSnapshot] = []
 
     let modelName: String?
+    let models: ModelManagementViewModel?
+    let microphonePreview: MicrophonePreviewViewModel?
+    private var modelObservation: AnyCancellable?
+    private var startInFlight = false
     private let coordinator: any RecordingSessionCoordinating
     private let timeZone: @MainActor @Sendable () -> TimeZone
     private var observationTask: Task<Void, Never>?
@@ -36,12 +41,17 @@ final class RecordingSessionViewModel: ObservableObject {
         coordinator: any RecordingSessionCoordinating,
         finalization: AudioFinalizationCoordinator? = nil,
         modelName: String? = nil,
+        models: ModelManagementViewModel? = nil,
+        microphonePreview: MicrophonePreviewViewModel? = nil,
         timeZone: @escaping @MainActor @Sendable () -> TimeZone = { .current }
     ) {
         self.modelName = modelName
+        self.models = models
+        self.microphonePreview = microphonePreview
         self.coordinator = coordinator
         self.finalization = finalization
         self.timeZone = timeZone
+        modelObservation = models?.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
     }
 
     static var preview: RecordingSessionViewModel {
@@ -64,6 +74,7 @@ final class RecordingSessionViewModel: ObservableObject {
             for await value in stream {
                 guard let self, !Task.isCancelled else { return }
                 self.snapshot = value
+                self.models?.recordingLocked = self.startInFlight || (!value.canStart && !value.canReset)
             }
         }
     }
@@ -103,16 +114,31 @@ final class RecordingSessionViewModel: ObservableObject {
         await coordinator.refreshPermissionStatus()
     }
 
+    func toggleMicrophonePreview() async {
+        guard !startInFlight, snapshot.canStart, models?.recordingLocked != true, let microphonePreview else { return }
+        if microphonePreview.active { await microphonePreview.stop() }
+        else { await microphonePreview.start() }
+        await refreshPermissionStatus()
+    }
+
     func startRecording() async {
+        guard actions.canStart else { return }
+        let descriptor = models?.selectedDescriptor
+        startInFlight = true
+        models?.recordingLocked = true
         do {
             _ = try await coordinator.start(RecordingStartConfiguration(
                 title: title,
                 languageMode: languageMode,
-                timeZone: timeZone()
+                timeZone: timeZone(),
+                modelDescriptor: descriptor
             ))
         } catch {
             snapshot = await coordinator.currentSnapshot()
         }
+        snapshot = await coordinator.currentSnapshot()
+        startInFlight = false
+        models?.recordingLocked = !snapshot.canStart && !snapshot.canReset
     }
 
     func stopRecording() async {
@@ -149,7 +175,8 @@ final class RecordingSessionViewModel: ObservableObject {
     var elapsedText: String { Self.formatElapsed(snapshot.elapsedMilliseconds) }
 
     var displayState: RecordingSessionViewDisplayState {
-        switch snapshot.phase {
+        if startInFlight && snapshot.canStart { return .preparing }
+        return switch snapshot.phase {
         case .idle: .configuration
         case .preparing: .preparing
         case .recording: .recording
@@ -162,8 +189,8 @@ final class RecordingSessionViewModel: ObservableObject {
 
     var actions: RecordingSessionViewActions {
         RecordingSessionViewActions(
-            canEditConfiguration: snapshot.canStart,
-            canStart: snapshot.canStart,
+            canEditConfiguration: !startInFlight && snapshot.canStart,
+            canStart: !startInFlight && snapshot.canStart && (models?.readyToRecord ?? true),
             canStop: snapshot.canStop,
             canReset: snapshot.canReset
         )

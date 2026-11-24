@@ -97,6 +97,17 @@ extension LifecycleRecoveryCoordinating {
 extension AudioFinalizationCoordinator: LifecycleFinalizationCoordinating {}
 extension SessionRecoveryCoordinator: LifecycleRecoveryCoordinating {}
 
+struct LifecycleAuxiliarySnapshot: Sendable, Equatable {
+    let active: Bool
+    let requiresAttention: Bool
+}
+protocol LifecycleAuxiliaryWorking: Sendable {
+    func workSnapshots() async -> AsyncStream<LifecycleAuxiliarySnapshot>
+    func currentWork() async -> LifecycleAuxiliarySnapshot
+    /// Pause network work and cancel/await local installer resource cleanup.
+    func quiesce() async
+}
+
 struct AppLifecycleSnapshot: Sendable, Equatable {
     let generation: UInt64
     let visibleUserWindowCount: Int
@@ -121,6 +132,8 @@ actor AppLifecycleCoordinator {
     private let recording: any RecordingSessionCoordinating
     private let finalization: any LifecycleFinalizationCoordinating
     private let recovery: any LifecycleRecoveryCoordinating
+    private let auxiliary: (any LifecycleAuxiliaryWorking)?
+    private var auxiliaryTask: Task<Void, Never>?
     private let activity: any LifecycleActivityControlling
     private let termination: any LifecycleTerminationRequesting
     private weak var terminationReadiness: (any LifecycleTerminationReadinessUpdating)?
@@ -153,9 +166,11 @@ actor AppLifecycleCoordinator {
          termination: any LifecycleTerminationRequesting,
          terminationReadiness: (any LifecycleTerminationReadinessUpdating)? = nil,
          authority: LifecycleWorkAuthority? = nil,
+         auxiliary: (any LifecycleAuxiliaryWorking)? = nil,
          onWakeJoining: @escaping @Sendable (UInt64) -> Void = { _ in }) {
         self.onWakeJoining = onWakeJoining
         self.authority = authority
+        self.auxiliary = auxiliary
         self.recording = recording; self.finalization = finalization; self.recovery = recovery
         self.activity = activity; self.termination = termination
         self.terminationReadiness = terminationReadiness
@@ -163,6 +178,11 @@ actor AppLifecycleCoordinator {
 
     func start() async {
         guard recordingTask == nil else { return }
+        if let auxiliary {
+            auxiliaryTask = Task { [weak self] in
+                for await _ in await auxiliary.workSnapshots() { await self?.refreshWorkState() }
+            }
+        }
         recordingTask = Task { [weak self, recording] in
             let stream = await recording.snapshots()
             for await value in stream { await self?.recordingChanged(value) }
@@ -224,7 +244,7 @@ actor AppLifecycleCoordinator {
             wakeAwaitingCleanupGeneration = nil
             let reason: RecordingInterruptionReason = event == .willPowerOff ? .systemPowerOff : .systemSleep
             let admission = authority?.state().generation
-            let recording = recording; let finalization = finalization; let recovery = recovery
+            let recording = recording; let finalization = finalization; let recovery = recovery; let auxiliary = auxiliary
             let previousCleanup = activeSleepCycle?.cleanup
             let cleanupLease = authority?.admit(invalidating: false)
             let authority = authority
@@ -232,6 +252,7 @@ actor AppLifecycleCoordinator {
                 defer { if let cleanupLease { authority?.release(cleanupLease) } }
                 await recording.invalidatePendingStart(reason, admission: admission)
                 await previousCleanup?.value
+                await auxiliary?.quiesce()
                 let before = await recording.currentSnapshot()
                 // A normal Stop already owns `.securing`; sleep/power-off joins
                 // its resource settlement below and must not rewrite that
@@ -332,6 +353,7 @@ actor AppLifecycleCoordinator {
         await recovery.quiesceOwnedRecovery()
         guard admission == authority?.state().generation else { return supersededSave(evidence) }
         await finalization.quiesceOwnedWork()
+        await auxiliary?.quiesce()
         guard admission == authority?.state().generation else { return supersededSave(evidence) }
         await recording.settleFinalizationHandoffs()
         guard activeQuitAttempt?.id == attemptID else {
@@ -342,12 +364,13 @@ actor AppLifecycleCoordinator {
         let finalRecording = await recording.currentSnapshot()
         let finalizations = await finalization.allSnapshots()
         let recoverySnapshot = await recovery.currentSnapshot()
+        let auxiliarySnapshot = await auxiliary?.currentWork()
         let latestRecording = await recording.currentSnapshot()
         let unchanged = latestRecording == finalRecording && (admission == authority?.state().generation)
         let recordingSafe = unchanged && (finalRecording.phase == .idle || finalRecording.phase == .interrupted ||
             finalRecording.phase == .securedAwaitingFinalization)
         let cleanupSettled = (evidence?.cleanupSettled ?? (initial.phase == .idle)) && !finalizations.contains { $0.result == nil } &&
-            recoverySnapshot.phase != .discovering && recoverySnapshot.phase != .recovering
+            recoverySnapshot.phase != .discovering && recoverySnapshot.phase != .recovering && auxiliarySnapshot?.active != true
         firstFailure = evidence?.firstFailure ?? firstFailure
         let durable = recordingSafe && firstFailure == nil && (evidence?.durableRecoveryState ?? (initial.phase == .idle))
         return .init(durableRecoveryState: durable, cleanupSettled: cleanupSettled, firstFailure: firstFailure,
@@ -447,11 +470,13 @@ actor AppLifecycleCoordinator {
         // settlement during that gap instead of skipping it and having the
         // final synchronous authority reject the AppKit reply.
         let ownedWork = authority?.state().active == true
+        let auxiliaryValue = await auxiliary?.currentWork()
+        guard workRefreshGeneration == refreshGeneration, admission == authority?.state().generation else { return }
         snapshotAdmission = admission
         snapshot = AppLifecycleSnapshot(generation: snapshot.generation &+ 1,
                                         visibleUserWindowCount: snapshot.visibleUserWindowCount,
-                                        hasRelevantWork: recordingWork || finalizationWork || recoveryWork || speechWork || ownedWork,
-                                        requiresUserAttention: safetyAttention || speechAttention || transcriptAttention,
+                                        hasRelevantWork: recordingWork || finalizationWork || recoveryWork || speechWork || ownedWork || auxiliaryValue?.active == true,
+                                        requiresUserAttention: safetyAttention || speechAttention || transcriptAttention || auxiliaryValue?.requiresAttention == true,
                                         blocksExplicitTermination: safetyAttention,
                                         autoExitReserved: snapshot.autoExitReserved)
         let readiness: AppTerminationDecision

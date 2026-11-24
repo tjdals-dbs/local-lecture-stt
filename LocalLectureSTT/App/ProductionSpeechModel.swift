@@ -12,6 +12,15 @@ enum ProductionSpeechModel {
             (try? WhisperCppModelValidator.variant($0)) == .large
         }) else { throw STTEngineError(.unsupportedModel) }
 
+        return try make(repository: repository, descriptor: descriptor)
+    }
+
+    static func supports(_ descriptor: ModelPackageDescriptor) -> Bool {
+        (try? WhisperCppModelValidator.variant(descriptor)) != nil
+    }
+
+    static func make(repository: FileModelRepository, descriptor: ModelPackageDescriptor) throws -> RecordingSpeechModel {
+        guard supports(descriptor) else { throw STTEngineError(.unsupportedModel) }
         let options = try STTInferenceOptions(computeMode: descriptor.compute)
         return try RecordingSpeechModel(
             engine: WhisperCppSTTEngine(repository: repository),
