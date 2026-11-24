@@ -26,6 +26,8 @@ If these disagree, do not silently choose one. Preserve data, stop at a safe poi
 
 ### Explicit continuous-work authorization
 
+On 2026-11-25 the user separately authorized the same continuous cycle for T22: implementation, separate read-only review, same-Task repairs, full tests and exact-commit task CI, then dev integration, full integration validation/CI and branch cleanup. No further integration prompt is required for T22 after those checks pass. Completion/checklist updates still wait until integration. G1 remains unverified, main unchanged, and T23 or later Tasks are not authorized.
+
 On 2026-11-25 the user authorized T21 in this coordinator session from implementation through review, same-Task fixes, task CI, dev integration and branch cleanup without another permission round. For this authorization, the separate integration-prompt requirements below are replaced by a separate read-only review pass against the acceptance matrix and final diff. All other verification, scope and Git gates remain mandatory. Record review evidence before integration; do not mark completion before integration. Stop only for an unresolved product decision or a required check that cannot be completed. G1 remains unverified and main is unchanged. This does not authorize T22 or later Tasks.
 
 - A planning or review request does not authorize implementation.

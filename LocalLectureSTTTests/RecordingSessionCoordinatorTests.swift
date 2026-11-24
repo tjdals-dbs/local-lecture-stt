@@ -238,7 +238,7 @@ final class RecordingSessionCoordinatorTests: XCTestCase {
             "recording-title", "recording-language", "microphone-permission-status", "recording-start",
             "recording-preparing", "active-recording-title", "recording-elapsed", "recording-input-level",
             "recording-no-input-warning", "recording-stop", "recording-securing", "recording-reset",
-            "복구 오디오 저장 완료 · 마무리 대기"
+            "녹음 종료 · 필수 저장 완료"
         ] {
             XCTAssertTrue(recordingView.contains(required), "Missing minimal UI state/action: \(required)")
         }

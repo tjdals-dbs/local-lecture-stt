@@ -8,23 +8,23 @@
 ## Current position
 
 - Current milestone: M4 product UI. M3 real-time STT and canonical transcript tasks are complete.
-- Next Task: T22 active recording and real-time transcript UI.
-- Latest completed Task: T21 session list, new recording and model management UI, reviewed and squash-integrated into dev under the continuous-work authorization.
+- Next Task: T23 session detail, playback, text editing and file management.
+- Latest completed Task: T22 active recording and live transcript UI, reviewed and squash-integrated into dev under the continuous-work authorization.
 - Latest passed gate: G2 engine and model selection, approved on 2026-11-15 at dev `f6ba18d`
-- The recording app uses pinned whisper.cpp with verified non-quantized large-v3. After capture and speech settlement, it compacts the journal to canonical JSON, generates TXT/Markdown, and completes metadata/catalog publication. T18 segment order and times are preserved; healthy completed sessions verify on read-only roots, while missing/stale exports require repair. The single window now provides session rows, root selection, a validated model picker and model download/import/deletion management. Text-only editing is available through the repository API; active-screen refinement is T22 and playback/editing UI is T23. [Architecture](docs/ARCHITECTURE.md#t20-canonical-transcript-and-derived-files) · [Engine and model decision](docs/T16_ENGINE_MODEL_DECISION.md)
+- The recording app uses pinned whisper.cpp with verified non-quantized large-v3. After capture and speech settlement, it compacts the journal to canonical JSON, generates TXT/Markdown, and completes metadata/catalog publication. T18 segment order and times are preserved; healthy completed sessions verify on read-only roots, while missing/stale exports require repair. The single window now provides session rows, root selection, a validated model picker and model download/import/deletion management. Text-only editing is available through the repository API; active recording now has stable final/partial transcript presentation, scroll-follow controls and background progress; playback/editing UI remains T23. [Architecture](docs/ARCHITECTURE.md#t20-canonical-transcript-and-derived-files) · [Engine and model decision](docs/T16_ENGINE_MODEL_DECISION.md)
 
 ## Repository state at this handoff
 
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
-- Approved T21 source on `task/t21-session-model-ui`: `bc2ed27e0fd2220cec3e8f85ba7729b2f7554be0`. The user authorized the implementation/review/integration cycle on 2026-11-25. Review and same-Task repairs passed before integration; G1 remains unverified.
-- `dev` integration base: `0b45dc7e4543544e4b73094f5ae542c5f6af45ed` (T20). The delivery handoff identifies the resulting T21 integration commit, its local validation, its exact-commit CI and branch cleanup.
+- Approved T22 source on `task/t22-active-recording-transcript-ui`: `c3d7da78be0263802c342573bd4b0ce192d80165`. The user authorized the implementation/review/integration cycle on 2026-11-25. Separate review, full local checks and exact-source CI passed; G1 remains unverified.
+- `dev` integration base: `198d1ef501da79af9109c27e82e111a4afc8a7e1` (T21). The delivery handoff identifies the resulting T22 integration commit, its local validation, exact-commit CI and branch cleanup.
 - `main` and `origin/main`: preserved at the verified T01 baseline `38e126f92ac823d29306ea8c1f7703f7060a5818`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
 - Task policy: one fresh implementation session and one `task/tNN-*` branch per Task; the same session handles review fixes and later authorized integration
-- Review policy: a task-branch CI-backed candidate must pass a separate acceptance/diff/test review before any completion status or dev integration; T21 has explicit advance authorization to continue after that review.
-- Pull Request policy: no PR for normal Tasks; reviewed work is locally squash merged into dev only with user authorization (a separate prompt by default, or an explicitly authorized continuous cycle such as T21).
+- Review policy: a task-branch CI-backed candidate must pass a separate acceptance/diff/test review before any completion status or dev integration; T22 has explicit advance authorization to continue after that review.
+- Pull Request policy: no PR for normal Tasks; reviewed work is locally squash merged into dev only with user authorization (a separate prompt by default, or an explicitly authorized continuous cycle such as T21 or T22).
 
 The actual Git status and remote state must be rechecked at the start of every task. This snapshot is informational and must not override Git.
 
@@ -57,11 +57,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T19 real-time STT coordinator and backpressure | Complete on dev through independently reviewed, separately authorized squash integration. | Approved source/re-review passed 497 tests and three independent persistence/termination probes. Bounded inference, durable journal publication, recording isolation and safe quit/automatic-exit policy are verified. [Acceptance](docs/T19_ACCEPTANCE.md) |
 | T20 canonical transcript and derived text/Markdown files | Complete on dev through independently reviewed, separately authorized squash integration. | Approved source and independent re-review passed 519 tests, two additional permission-acquisition probes and exact-source CI. Strict journal replay, preserved overlap times/text edits, read-only verification and repair-required recovery are verified. [Acceptance](docs/T20_ACCEPTANCE.md) |
 | T21 session list, new recording and model management UI | Complete on dev through the authorized continuous implementation/review/integration cycle. | Approved source passed 538 XCTest, initial 170 repeated UI checks, 40 repeated review-repair checks and exact-source CI. Local-only startup, model readiness/provenance, reference-confirmed deletion, finite mic preview and safe close/quit are covered. [Acceptance](docs/T21_ACCEPTANCE.md) |
+| T22 active recording and real-time transcript UI | Complete on dev through the authorized continuous implementation/review/integration cycle. | Approved source passed 548 XCTest, 100 repeated T22 executions, SwiftPM/Python/Release checks and exact-source CI. Stable paged finals, independent partial/notices, scroll-follow policy, Stop during STT failure and operation-preserving finalization retry are covered. [Acceptance](docs/T22_ACCEPTANCE.md) |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T21. T22 is next. G1 remains **Unverified**. G2 passed on 2026-11-15.
+Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T22. T23 is next. G1 remains **Unverified**. G2 passed on 2026-11-15.
 
 ## Gate status
 
@@ -74,6 +75,8 @@ Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T21. T22 is nex
 | G4 MVP complete | Pending | `v0.1.0` |
 
 ## Confirmed workflow decisions
+
+- T22 authorization (2026-11-25): the user has now authorized T22 implementation through a separate read-only review, repairs, full tests/task CI, dev integration/full validation/CI and branch cleanup in this session. This supersedes the earlier T21-only scope restriction for T22, not for later Tasks. Completion/checklist updates wait until integration; G1 remains unverified and main unchanged.
 
 - User authorization, 2026-11-25: T21 runs continuously in this coordinator session through implementation, a separate read-only review, same-Task fixes, task CI, dev integration and verified branch cleanup. A new integration prompt is not required for T21. Review and exact-commit validation gates remain mandatory; completion/checklist updates wait until integration. G1 stays unverified, main stays unchanged, and T22 is not authorized by this decision.
 
@@ -93,7 +96,7 @@ Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T21. T22 is nex
 
 - No current blocker.
 - The app is intentionally unsigned for local and CI verification; a developer signing identity is required only for separately installed signed builds.
-- G1 hardware/long-recording validation remains deferred and unverified. The user authorized T21 integration as part of the continuous cycle on 2026-11-25 without changing that gate. Real lecture accuracy and sustained live-STT performance remain later validation work.
+- G1 hardware/long-recording validation remains deferred and unverified. The user authorized T21 and T22 integration as part of the continuous cycle on 2026-11-25 without changing that gate. Real lecture accuracy and sustained live-STT performance remain later validation work.
 
 ## T08 handoff
 
@@ -209,3 +212,11 @@ Only after independent review approval, when a Task is successfully integrated i
 - Gate readiness
 
 Keep this file concise. Detailed product requirements belong in `MVP_SPEC.md`, Task scope belongs in `IMPLEMENTATION_PLAN.md`, and implemented structure belongs in `docs/ARCHITECTURE.md`.
+
+## T22 handoff
+
+- Reviewed source: `c3d7da78be0263802c342573bd4b0ce192d80165`; latest dev base `198d1ef501da79af9109c27e82e111a4afc8a7e1`. The 2026-11-25 continuous-work authorization permits integration after separate read-only review and exact-source validation. [Source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/45452433075) passed.
+- Active recording retains elapsed/input/state/Stop controls while final transcript pages, partial text and warnings update independently. Finals preserve T18/T19 sequence, text and timestamps. Manual-scroll policy, Latest action, multiple background jobs and retry diagnostics are provided. Retry retains read-only verification operation and job identities do not collide across operations.
+- Initial CI caught local Swift 6.3 versus CI Swift 6.1 syntax incompatibility; immutable nonisolated identity/value equality repaired it without changing CI or deployment requirements. Repaired source passed 548 XCTest (529 unit + 19 integration, no failures/skips), 100 repeated T22 executions, SwiftPM build, four Python tests and Release product-engine verification. [Acceptance](docs/T22_ACCEPTANCE.md) and [manual procedure](docs/DEVELOPMENT.md#t22-active-recording-and-transcript-verification).
+- Integration preserves the approved production/test/project tree. Only status, the T22 checklist and integration evidence change. Committed dev build/tests, exact-commit CI and safe task-branch cleanup are checked before final delivery; this document does not claim future CI success or a self-referential integration SHA.
+- Native scroll/visual interaction, signed Sandbox/TCC, physical microphone and long-recording checks remain manual. G1 stays unverified, main unchanged. T23 is next; no T23/T24 implementation is included.

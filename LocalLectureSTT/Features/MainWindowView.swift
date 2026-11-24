@@ -50,6 +50,13 @@ struct MainWindowView: View {
                 }
                 Button("목록 새로고침") { Task { await catalogStartup.refreshItems() } }
                     .padding(12)
+                if let activity = recording.backgroundWorkText {
+                    Button { destination = "activity"; selectedSession = nil } label: {
+                        Label(activity, systemImage: "waveform.badge.magnifyingglass").font(.caption)
+                    }
+                    .padding(.horizontal, 12).padding(.bottom, 12)
+                    .accessibilityIdentifier("background-work-status")
+                }
             }.navigationSplitViewColumnWidth(min: 230, ideal: 260, max: 360)
         } detail: {
             VStack(spacing: 0) {
@@ -64,6 +71,9 @@ struct MainWindowView: View {
                 if recording.models?.recordingLocked == true {
                     // Root failures or navigation never hide the stop/save controls.
                     RecordingSessionView(viewModel: recording)
+                } else if destination == "activity" {
+                    // Background progress remains reachable even if the storage root needs reauthorization.
+                    RecordingSessionView(viewModel: recording, activityOnly: true)
                 } else if destination == "models", let models = recording.models {
                     ModelManagementView(models: models)
                 } else if destination == "session", let item = catalogStartup.items.first(where: { $0.sessionID == selectedSession }) {

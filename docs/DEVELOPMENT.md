@@ -903,3 +903,30 @@ Manual/Pending (G1 remains unverified):
 4. Start a short offline recording with empty/manual title and each language mode. Verify selected-model metadata, no model-change controls during capture, and list update after stop/finalization. Compare to the existing T17/T19 recording checks.
 5. Cancel model deletion; then inspect reference and incomplete-root warnings using disposable data before confirming deletion. Existing audio/transcripts must remain untouched.
 6. Change/reauthorize the session root from the main form/settings and verify previous sessions remain listed. Inspect the UI at the minimum window size and with long titles; previous-session playback and edits arrive in T23.
+
+## T22 active recording and transcript verification
+
+`ActiveRecordingUITests` checks 10,000 final segments against 1,000 partial replacements, bounded page updates, segment/time/order preservation, empty-partial normalization, new-session reset, follow-scroll policy, isolated notices and real view-model observation/Stop routing with simultaneous no-input/STT/journal failures. Fixtures are synthetic and no model or network is needed. This is not an FPS benchmark or a physical microphone check.
+
+```sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/stt-t15-validation.Uth8xp/DerivedData \
+  -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+  -resultBundlePath /private/tmp/stt-t22-work/FullFinal.xcresult \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
+  CODE_SIGNING_ALLOWED=NO build test
+swift build --scratch-path /private/tmp/stt-t15-validation.Uth8xp/CLI --disable-automatic-resolution
+python3 -B -m unittest discover -s tools/t16 -v
+```
+
+Use a fresh result bundle for each run. Focus with `-only-testing:LocalLectureSTTTests/ActiveRecordingUITests`; repeat with `-test-iterations 10`. Release product-engine verification is the same as T21. Do not build Debug and Release concurrently in the same DerivedData directory.
+
+Manual/Pending (G1 remains unverified):
+
+1. Using a signed sandbox build and an installed model, start an offline disposable recording. Confirm title, elapsed time, microphone level, no-input warning, and a persistent enabled **녹음 종료** button. Neither silence nor a slow STT backlog should stop capture.
+2. Speak several sentences. Confirm **확정** rows retain their text and timestamps while the separately shaded **임시** row changes. Text selection/copy is allowed; no transcript editor is present.
+3. During incoming partial/final updates, scroll upward with trackpad, mouse wheel, scrollbar and keyboard. The reading position should stay put. **최신 내용으로** resumes following; scrolling manually back to the bottom also resumes. Start a new session and verify no old text or detached-scroll state remains. Repeat with enough content to span many pages.
+4. Use the existing STT fault procedures/test doubles to inspect delay, failure and journal warnings. Stop must remain usable; warnings must not open a blocking alert. Compare recovered audio with the existing recorder tests; this does not pass G1.
+5. Stop and observe **필수 저장**, remaining STT and background finalization. With more than one pending/failed session, verify each status and retry control is present. A completed session must no longer claim that finalization is pending. Close/reopen the window; app-owned capture/STT/finalization should continue per the existing lifecycle policy.
+6. Check minimum window size, long titles, large text/VoiceOver, and a long recording. Confirm the stop button remains accessible and the transcript can scroll. Actual native gesture behavior, visual layout, sustained FPS and real lecture performance remain manual; automated publisher assertions do not claim those outcomes.

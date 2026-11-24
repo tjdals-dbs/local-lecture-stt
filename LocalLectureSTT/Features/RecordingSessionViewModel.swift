@@ -23,8 +23,11 @@ struct RecordingSessionViewActions: Sendable, Equatable {
 final class RecordingSessionViewModel: ObservableObject {
     @Published var title = ""
     @Published var languageMode: LanguageMode = .korean
-    @Published private(set) var snapshot: RecordingSessionSnapshot = .idle()
+    @Published private(set) var snapshot: RecordingSessionSnapshot = .idle() {
+        didSet { transcript.update(sessionID: snapshot.sessionID, speech: snapshot.speech) }
+    }
     @Published private(set) var finalizations: [AudioFinalizationSnapshot] = []
+    let transcript = LiveTranscriptPresentation()
 
     let modelName: String?
     let models: ModelManagementViewModel?
@@ -88,7 +91,7 @@ final class RecordingSessionViewModel: ObservableObject {
 
     func retryFinalization(_ value: AudioFinalizationSnapshot) async {
         guard value.result?.canRetry == true else { return }
-        await finalization?.enqueue(.init(location: value.location), retry: true)
+        await finalization?.enqueue(.init(location: value.location, operation: value.operation), retry: true)
     }
 
     static func finalizationText(_ phase: AudioFinalizationPhase) -> String {
@@ -173,6 +176,20 @@ final class RecordingSessionViewModel: ObservableObject {
     }
 
     var elapsedText: String { Self.formatElapsed(snapshot.elapsedMilliseconds) }
+
+    var backgroundWorkText: String? {
+        Self.backgroundWorkText(finalizations, speech: snapshot.speech.phase)
+    }
+
+    static func backgroundWorkText(_ values: [AudioFinalizationSnapshot], speech: LiveSTTPhase) -> String? {
+        let pending = values.filter { $0.result == nil }.count
+        let failed = values.filter { $0.result?.failure != nil || $0.result?.transcriptFailure != nil }.count
+        var parts: [String] = []
+        if speech == .finishing { parts.append("남은 전사 처리 중") }
+        if pending > 0 { parts.append("마무리 작업 \(pending)개") }
+        if failed > 0 { parts.append("마무리 확인 필요 \(failed)개") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
 
     var displayState: RecordingSessionViewDisplayState {
         if startInFlight && snapshot.canStart { return .preparing }

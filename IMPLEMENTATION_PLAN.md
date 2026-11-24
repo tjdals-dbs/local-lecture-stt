@@ -767,6 +767,8 @@ fix(transcript): prevent overlap duplication (T18)
 
 ### T22. 활성 녹음 및 실시간 transcript UI
 
+2026-11-25 사용자 승인: T22도 현재 세션에서 구현 → 별도 읽기 전용 검토 → 보완 → 전체 테스트·task CI → dev 통합·전체 테스트·CI → 브랜치 정리까지 연속 수행한다. 별도 통합 프롬프트만 사전 조건부 승인으로 대체하며, 완료 표시는 통합 시 갱신한다. G1 미검증과 main은 유지하고 T23 이후는 포함하지 않는다.
+
 - 우선순위: `P1`
 - 선행 작업: T07, T19, T21
 - 관련 명세: 3.1절, 4.3절, 5.2절
@@ -996,7 +998,7 @@ fix(transcript): prevent overlap duplication (T18)
 - [x] T19 실시간 STT coordinator
 - [x] T20 canonical 및 파생 transcript
 - [x] T21 세션·시작·모델 UI
-- [ ] T22 활성 녹음 UI
+- [x] T22 활성 녹음 UI
 - [ ] T23 재생·편집·파일 관리
 - [ ] T24 일시정지·재개
 - [ ] T25 오류와 진단 로그
