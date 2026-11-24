@@ -990,7 +990,7 @@ fix(transcript): prevent overlap duplication (T18)
 - [x] T15 whisper.cpp 어댑터
 - [x] T16 비교 및 사용자 결정
 - [x] T17 제품 엔진 고정
-- [ ] T18 VAD와 reconciler
+- [x] T18 VAD와 reconciler
 - [ ] T19 실시간 STT coordinator
 - [ ] T20 canonical 및 파생 transcript
 - [ ] T21 세션·시작·모델 UI

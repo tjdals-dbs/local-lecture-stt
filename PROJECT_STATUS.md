@@ -1,15 +1,15 @@
 # Local Lecture STT Project Status
 
 - Status document version: 1.0
-- Last updated: 2026-11-15
+- Last updated: 2026-11-24
 - Specification baseline: `MVP_SPEC.md` 1.0, confirmed
 - Implementation plan: `IMPLEMENTATION_PLAN.md` 1.4
 
 ## Current position
 
 - Current milestone: M3 real-time STT. M2 model and engine tasks are complete.
-- Next Task: T18 voice activity detection, utterance segmentation and transcript reconciliation.
-- Latest completed Task: T17 product engine selection and session metadata, reviewed and squash-integrated into dev.
+- Next Task: T19 real-time STT coordinator and backpressure.
+- Latest completed Task: T18 voice activity detection, utterance segmentation and transcript reconciliation, reviewed and squash-integrated into dev.
 - Latest passed gate: G2 engine and model selection, approved on 2026-11-15 at dev `f6ba18d`
 - The recording app loads the pinned whisper.cpp engine and verified non-quantized large-v3 before capture. Session metadata preserves the engine and model revisions, checksums and inference settings through finalization and recovery. Both comparison engines are available in developer tooling. Live capture-to-STT processing, canonical transcript finalization and model management UI are scheduled for T19, T20 and T21 respectively. [Engine and model decision](docs/T16_ENGINE_MODEL_DECISION.md)
 
@@ -17,8 +17,8 @@
 
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
-- Approved T17 source on `task/t17-product-engine`: `05a6e5b2b99514a0778b6571634270e305feedb0`. The user accepted the review and authorized Phase 2 integration on 2026-11-15.
-- `dev` integration base: `f6ba18dcf155715e2a4042101df0fd494566564c` (T16). The delivery handoff identifies the resulting commit, its local validation, its CI run and branch cleanup.
+- Approved T18 source on `task/t18-vad-transcript-reconciliation`: `d0d9df64dc908ba3655b1ce3e0b9378f2ff8cb79`. The user accepted the independent review and authorized Phase 2 integration on 2026-11-24 with G1 unverified.
+- `dev` integration base: `df50d9ad68c991c670c7ccf55277b5dbb06c5cbe` (T17). The delivery handoff identifies the resulting commit, its local validation, its CI run and branch cleanup.
 - `main` and `origin/main`: preserved at the verified T01 baseline `38e126f92ac823d29306ea8c1f7703f7060a5818`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -53,11 +53,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T15 experimental whisper.cpp adapter | Complete on dev through independently reviewed, separately authorized squash integration | Approved source passed 432 tests and task CI. The coordinator reproduced installed large-v3 automatic transcription and active cancellation/reuse under OS network denial. [Integration evidence](docs/T15_ACCEPTANCE.md#phase-2-dev-integration) |
 | T16 lecture comparison and user decision | Complete on dev. The user selected whisper.cpp with non-quantized large-v3. | Independent review reproduced three 10-minute excerpts and verified 360 window identities across four candidates. The selected pair returned 90 nonempty finals in 90 windows. [Decision and measurements](docs/T16_ENGINE_MODEL_DECISION.md) |
 | T17 product engine and session metadata | Complete on dev. The Release app ships whisper.cpp and the recording path persists the selected model and settings. | Candidate review verified the Release bundle, an installed large-v3 recording, recovery and older metadata. [Validation procedure](docs/DEVELOPMENT.md#t17-product-engine-verification) |
+| T18 VAD, utterance segmentation and transcript reconciliation | Complete on dev through independently reviewed, separately authorized squash integration. | Candidate review passed 469 XCTest, four Python tests and 526 additional text/timing combinations. VAD fixtures and recovery-audio decoding verify segmentation and recording independence. [Implementation and checks](docs/DEVELOPMENT.md#t18-segmentation-and-overlap-checks) |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T17. T18 is next. G1 remains **Unverified**. G2 passed on 2026-11-15.
+Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T18. T19 is next. G1 remains **Unverified**. G2 passed on 2026-11-15.
 
 ## Gate status
 
@@ -71,7 +72,7 @@ Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T17. T18 is nex
 
 ## Confirmed workflow decisions
 
-- The coordinator manages specifications, plans, prompts and gate decisions. For T17 the user assigned implementation to the coordinator session and separately authorized dev integration after review.
+- The coordinator manages specifications, plans, prompts and gate decisions. For T17 and T18 the user assigned implementation to the coordinator session and separately authorized dev integration after review.
 - Each Task uses a fresh implementation session and stays in that session through implementation, review fixes, and any later authorized integration, or until safely blocked.
 - The initial implementation prompt ends after task-branch commit/push/CI with `review ready`; it does not authorize official completion, status/checklist updates, `dev` integration, or branch deletion.
 - This coordinator independently verifies the acceptance matrix, diff, tests, and CI. A completion message or green CI by itself is not sufficient.
@@ -160,6 +161,12 @@ Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T17. T18 is nex
 
 - Review of `05a6e5b` passed 426 unit tests, 10 integration tests and four Python comparison tests. A network-denied probe using the product factory and installed large-v3 produced a nonempty final transcript from synthetic speech. Review also verified the fixed default with a reordered catalog and decoded older session metadata. [Source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/43711967320)
 - Phase 2 validates the committed dev build with the full unsigned arm64 suite using the installed model, the SwiftPM benchmark build, the Python tests and the Release bundle inspection. The G1 physical microphone, lifecycle and long-recording checks remain unverified. [Commands](docs/DEVELOPMENT.md#t17-product-engine-verification) · [Architecture](docs/ARCHITECTURE.md#t17-product-engine-and-session-provenance)
+
+## T18 handoff
+
+- The approved source `d0d9df6` implements the replaceable VAD, 300 ms prefix, 800 ms silence boundary, 20-second windows and one-second copied overlap. Reconciliation uses matched-word time coverage, preserves weakly overlapping and later repeated speech, handles detached/leading punctuation and preserves dotted terms. [Architecture](docs/ARCHITECTURE.md#t18-speech-segmentation-and-transcript-reconciliation)
+- Independent review on 2026-11-24 passed 458 unit and 11 integration tests in the CI configuration, four Python tests and 526 additional combinations checking text, timing, sequence, retry and replay IDs. [Approved source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/44094277667)
+- The prior temporary installed-model directory is empty. The optional installed-model check reported `loadFailed`; ordinary CI configuration passed. The integration validates the committed dev SHA with Debug build/test, Release product-engine inspection, the SwiftPM benchmark build and Python tests. G1 physical microphone, lifecycle and long-recording verification remains unverified. T19 will connect capture to inference and transcript updates. [Commands](docs/DEVELOPMENT.md#t18-segmentation-and-overlap-checks)
 
 ## Status update rules
 

@@ -716,3 +716,42 @@ TEST_RUNNER_LLSTT_T17_TEST_MODEL_STORE="$T17_STORE" xcodebuild \
 ```
 
 Check the test log for `T17 integration exercising the installed whisper.cpp model`. The test uses synthetic microphone input and reads the saved metadata and recovery audio. Ordinary CI exercises the same recording path with a deterministic engine and requires no weights. The T16 comparison CLI and both candidate families remain available for reproducing the comparison.
+
+## T18 segmentation and overlap checks
+
+Run the synthetic VAD, media-time, reconciliation and recovery-audio tests on macOS:
+
+```sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -only-testing:LocalLectureSTTTests/SpeechSegmentationTests \
+  -only-testing:LocalLectureSTTIntegrationTests/RecordingSessionFileIntegrationTests/testT18SpeechSilenceBoundaryLeavesEntireCaptureInRecoveryAudio \
+  CODE_SIGNING_ALLOWED=NO test
+```
+
+The recording test feeds one second of tone and one second of silence to the capture streams. The VAD window closes at 1.8 seconds. The independent writer produces a decodable two-second MOV. The unit fixtures exercise the 20-second split, exact overlap samples, noisy consonants followed by quieter vowels, and mixed Korean/English hypotheses with repeated words at distinct times.
+
+The focused suite above also runs the T18 review regressions:
+
+- `testTenMillisecondsOfSharedAudioPreservesRepeatedUtterance` keeps both utterances of `다시` when their timestamps overlap by 10 ms.
+- `testTimedDuplicateBetweenNovelSegmentsKeepsBothNeighbors` suppresses a repeated `기울기` at the same timestamp and keeps the new segments on either side.
+- `testKoreanParticleAttachedToLatinTermAndDetachedPunctuation` matches `API를` with `API 를`, consumes a detached period, and preserves distinct technical terms.
+- `testPersistentLowPassNoiseAndQuietSpeechOnTheSameBackground` expects zero windows for 32 seconds of seeded, low-pass noise at 0.025 RMS. Adding a 600 ms vowel to that same signal must yield one window containing the whole vowel.
+- `testIsolatedPeriodInBackgroundNoiseDoesNotStartAnUtterance` uses another seed with a single frame of correlated noise during startup.
+- `testTimingEvidenceAcrossSplitOrMergedHypothesesIsConsumedOnce` covers an engine changing its segment boundaries and one old occurrence followed by two incoming occurrences.
+- `testSameSentenceWithAWordMovedAcrossSegmentBoundariesIsEmittedOnce` checks `선형 대수 | 입니다` against `선형 | 대수 입니다`, including shifted timestamps and new words at the edges.
+- `testResegmentedRepeatedWordsAreConsumedOnceInEitherDirection` checks all 16 partitions of a five-word phrase on each side at two start times, preserving a later repetition in all 512 cases.
+- `testTrimmingAPrefixRequiresTimingEvidenceEvenWithFollowingWords` keeps `다시 확인합니다` with 50 ms of shared audio and removes the duplicated `다시` with 800 ms of support.
+- `testAdjacentOldSegmentsJointlySupportAMergedIncomingPrefix` starts the first old segment at 18.930 s and 18.940 s. In both cases 120 ms and 730 ms support the same prefix, leaving only `다음` and preserving a later repetition.
+- `testBlankAndCommaIntervalsCannotSupplyMissingWordCoverage` checks that a 650 ms whitespace or comma interval between two words leaves their total shared audio at 50 ms. Both the incoming phrase and its later repetition survive.
+- `testDetachedCommaCannotInvalidateMatchedWordCoverage` checks a separately timestamped comma, including a zero-duration comma on either side of the comparison. The overlapping phrase is removed and the novel suffix and later repetition retain their timestamps.
+- `testPointCommaInsideMatchedPhraseFollowsTheWordMatch` expects a single `다음` with its original time bounds and sequence 3, both after a space and comma at 19.180 s and when the preceding word ends at 19.170 s.
+- `testPointCommaAndLeadingCommaAreInterchangeableInEitherWindow` checks all nine pairings of a point comma, `, 대수` and `,대수`. Only `다음` is added at the incoming segment’s original time bounds.
+- `testLeadingCommaPreservesWeaklyOverlappingSpeechAndLaterRepeat` checks that 50 ms of matching speech preserves the entire incoming text, including its leading comma and spacing, and the repetition at 20.110 s.
+- `testCommaBeforeFirstMatchedWordAcrossWindows` checks all nine comma groupings at window onset, including preservation of a later repetition and leading marks with insufficient timing or text evidence.
+- `testDottedTermsKeepTheirMeaningAfterLeadingPunctuation` checks both directions for `.NET` and `.5`, verifies that `NET` and `5` stay distinct from them, and covers an ellipsis before a Korean word.
+- `testTrailingCommaAfterPointSpaceBelongsToTheMatchedWord` and `testTrailingMarkAcrossAGapRequiresTheSameOldMarkAndTime` cover punctuation at the end of a match, punctuation belonging to novel speech, and the exclusive end of the copied audio.
+
+After T19 connects the microphone to inference, use a brief recording from the intended lecture room to check the start and end of quiet phrases, long continuous speech, and audible repetitions at a split. Listen to the saved audio at each transcript timestamp. The synthetic fixtures verify timing and text rules. G1 hardware validation remains pending.
+
+In a local network-denied check, the installed large-v3 processed four consecutive copies of the T14 7.04-second synthetic speech fixture. The VAD sent all 450,560 input frames in windows spanning 0–20 and 19–28.16 seconds. The first native final rendered the repeated passage once within its 20-second window. Model omissions can therefore occur even with full audio coverage, before overlap reconciliation.

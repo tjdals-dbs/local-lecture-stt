@@ -295,6 +295,41 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
         try await store.close()
     }
 
+    func testT18SpeechSilenceBoundaryLeavesEntireCaptureInRecoveryAudio() async throws {
+        let fixture = try RecordingFileIntegrationFixture()
+        defer { fixture.cleanup() }
+        let roots = StorageRootManager(applicationSupportDirectory: fixture.applicationSupport, bookmarkCodec: fixture.bookmarks)
+        _ = try await roots.registerSelectedDirectory(fixture.root)
+        let location = try await FileSessionRepository(roots: roots).createSession(sessionID: SessionID(),
+            createdAt: AbsoluteTime(Date()), timeZone: .gmt)
+        // Both consumers get the same 16 kHz input: one second of tone followed by one second of silence.
+        let capture = MicrophoneCaptureController(permission: AuthorizedIntegrationPermission(),
+            driver: SyntheticIntegrationCaptureDriver(chunkCount: 20, framesPerChunk: 1_600, endFrequency: 0, sampleRate: 16_000),
+            buffers: CaptureBufferConfiguration(recordingCapacity: 24, speechCapacity: 24),
+            monitor: InputSignalMonitor(clock: FixedIntegrationMonotonicClock(), scheduler: NoopIntegrationSignalScheduler()))
+        let handle = try await capture.start()
+        await capture.stop()
+        var segmenter = UtteranceSegmenter()
+        var finals: [SpeechWindow] = []
+        for try await chunk in handle.speechPCM {
+            finals += try segmenter.append(chunk.samples, at: chunk.sourceSampleTime)
+        }
+        finals += try segmenter.flush()
+        XCTAssertEqual(finals.map(\.boundary), [.silence])
+        XCTAssertEqual(finals.map(\.endFrame), [28_800])
+
+        let writer = AVFoundationAudioRecorder(roots: roots)
+        try await writer.start(at: location, expectedCaptureGeneration: handle.generation)
+        for try await chunk in handle.recordingPCM { try await writer.append(chunk) }
+        let saved = try await writer.stop()
+        XCTAssertEqual(saved.mediaDurationMilliseconds, 2_000)
+        let url = fixture.root.appendingPathComponent(location.folderName.rawValue)
+            .appendingPathComponent(SessionArtifact.recoveryAudio.relativePath)
+        let decoded = try await decodeIntegrationAsset(at: url)
+        XCTAssertGreaterThanOrEqual(decoded.decodedBytes, 96_000 * MemoryLayout<Float>.size)
+        XCTAssertEqual(decoded.durationSeconds, 2, accuracy: 0.05)
+    }
+
     func testProductionCaptureRepositoryRootRecorderAndCatalogPersistDecodableRecoveryAudio() async throws {
         let fixture = try RecordingFileIntegrationFixture()
         defer { fixture.cleanup() }
@@ -545,8 +580,10 @@ private actor SyntheticIntegrationCaptureDriver: MicrophoneCaptureDriving {
     private var value = IntegrationDriverCounts(prepare: 0, start: 0, stop: 0)
 
     let endFrequency: Double
+    let sampleRate: Double
 
-    init(chunkCount: Int, framesPerChunk: Int, endFrequency: Double = 440) {
+    init(chunkCount: Int, framesPerChunk: Int, endFrequency: Double = 440, sampleRate: Double = 48_000) {
+        self.sampleRate = sampleRate
         self.endFrequency = endFrequency
         self.chunkCount = chunkCount
         self.framesPerChunk = framesPerChunk
@@ -566,12 +603,12 @@ private actor SyntheticIntegrationCaptureDriver: MicrophoneCaptureDriving {
     func start() async throws {
         value.start += 1
         guard let generation, let chunkCallback else { throw CaptureError(.engineStartFailed) }
-        let format = try PCMFormatDescription(sampleRate: 48_000, channelCount: 1)
+        let format = try PCMFormatDescription(sampleRate: sampleRate, channelCount: 1)
         for sequence in 0 ..< chunkCount {
             let sampleOffset = sequence * framesPerChunk
             let samples = (0 ..< framesPerChunk).map { frame -> Float in
                 let frequency = sequence < chunkCount / 2 ? 440 : endFrequency
-                let phase = Double(sampleOffset + frame) * 2 * Double.pi * frequency / 48_000
+                let phase = Double(sampleOffset + frame) * 2 * Double.pi * frequency / sampleRate
                 return Float(sin(phase) * 0.2)
             }
             let chunk = try PCMChunk(
