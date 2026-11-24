@@ -223,6 +223,7 @@ actor RecordingFinalizationCoordinator: RecordingSessionCoordinating {
             let handoffID = UUID()
             handoffTasks[handoffID] = Task {
                 _ = await finalization.waitForResult(at: secured.location)
+                await recording.waitForSpeech(at: secured.location)
                 await activity?.releaseRecordingOrFinalization(at: secured.location)
                 if let lease { authority?.release(lease) }
                 self.handoffTasks[handoffID] = nil
@@ -259,6 +260,7 @@ actor RecordingFinalizationCoordinator: RecordingSessionCoordinating {
             await withCheckedContinuation { pendingStartWaiters.append($0) }
         }
         if let stopTask { _ = await stopTask.value }
+        await recording.settleFinalizationHandoffs()
         let tasks = handoffTasks
         for (_, task) in tasks { await task.value }
     }

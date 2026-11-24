@@ -143,7 +143,7 @@ actor AVAudioPCMConverter: RecoveryAudioPCMConverting {
     private let sourceDescription: PCMFormatDescription
     private var drained = false
 
-    init(source: PCMFormatDescription) throws {
+    init(source: PCMFormatDescription, outputSampleRate: Double = 48_000) throws {
         guard source.layout == .float32Interleaved, source.channelCount <= 32 else {
             throw AudioRecorderError(.inputFormatUnsupported)
         }
@@ -154,7 +154,7 @@ actor AVAudioPCMConverter: RecoveryAudioPCMConverting {
             interleaved: true
         ), let outputFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: 48_000,
+            sampleRate: outputSampleRate,
             channels: 1,
             interleaved: true
         ), let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
@@ -188,7 +188,7 @@ actor AVAudioPCMConverter: RecoveryAudioPCMConverting {
             mono[frame] = sum / Float(channelCount)
         }
 
-        let estimatedFrames = (Double(chunk.frameCount) * 48_000 / chunk.format.sampleRate).rounded(.up)
+        let estimatedFrames = (Double(chunk.frameCount) * converter.outputFormat.sampleRate / chunk.format.sampleRate).rounded(.up)
         let capacity = estimatedFrames + 4_096
         guard capacity.isFinite, capacity > 0, capacity <= Double(UInt32.max),
               let output = AVAudioPCMBuffer(

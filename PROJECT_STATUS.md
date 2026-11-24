@@ -8,17 +8,17 @@
 ## Current position
 
 - Current milestone: M3 real-time STT. M2 model and engine tasks are complete.
-- Next Task: T19 real-time STT coordinator and backpressure.
-- Latest completed Task: T18 voice activity detection, utterance segmentation and transcript reconciliation, reviewed and squash-integrated into dev.
+- Next Task: T20 canonical transcript and derived text/Markdown files.
+- Latest completed Task: T19 real-time STT coordinator and backpressure, independently reviewed and squash-integrated into dev.
 - Latest passed gate: G2 engine and model selection, approved on 2026-11-15 at dev `f6ba18d`
-- The recording app loads the pinned whisper.cpp engine and verified non-quantized large-v3 before capture. Session metadata preserves the engine and model revisions, checksums and inference settings through finalization and recovery. Both comparison engines are available in developer tooling. Live capture-to-STT processing, canonical transcript finalization and model management UI are scheduled for T19, T20 and T21 respectively. [Engine and model decision](docs/T16_ENGINE_MODEL_DECISION.md)
+- The recording app loads the pinned whisper.cpp engine and verified non-quantized large-v3 before capture. Live microphone audio now feeds bounded STT inference and read-only provisional/final transcript UI; final segments are synced to the session journal before publication. STT failures preserve recording and inhibit automatic exit while safe explicit quit remains available. Canonical transcript/export and model management UI remain T20 and T21. [Architecture](docs/ARCHITECTURE.md#t19-live-speech-coordination-and-backpressure) · [Engine and model decision](docs/T16_ENGINE_MODEL_DECISION.md)
 
 ## Repository state at this handoff
 
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
-- Approved T18 source on `task/t18-vad-transcript-reconciliation`: `d0d9df64dc908ba3655b1ce3e0b9378f2ff8cb79`. The user accepted the independent review and authorized Phase 2 integration on 2026-11-24 with G1 unverified.
-- `dev` integration base: `df50d9ad68c991c670c7ccf55277b5dbb06c5cbe` (T17). The delivery handoff identifies the resulting commit, its local validation, its CI run and branch cleanup.
+- Approved T19 source on `task/t19-live-stt-backpressure`: `ab0e902baa70b4243b57fd2c1d2ad6354700d950`. The user accepted the independent review and authorized Phase 2 integration on 2026-11-24 with G1 unverified.
+- `dev` integration base: `63d7dc5806051845242ca53559525ab040244154` (T18). The delivery handoff identifies the resulting T19 integration commit, its local validation, its exact-commit CI and branch cleanup.
 - `main` and `origin/main`: preserved at the verified T01 baseline `38e126f92ac823d29306ea8c1f7703f7060a5818`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -54,11 +54,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T16 lecture comparison and user decision | Complete on dev. The user selected whisper.cpp with non-quantized large-v3. | Independent review reproduced three 10-minute excerpts and verified 360 window identities across four candidates. The selected pair returned 90 nonempty finals in 90 windows. [Decision and measurements](docs/T16_ENGINE_MODEL_DECISION.md) |
 | T17 product engine and session metadata | Complete on dev. The Release app ships whisper.cpp and the recording path persists the selected model and settings. | Candidate review verified the Release bundle, an installed large-v3 recording, recovery and older metadata. [Validation procedure](docs/DEVELOPMENT.md#t17-product-engine-verification) |
 | T18 VAD, utterance segmentation and transcript reconciliation | Complete on dev through independently reviewed, separately authorized squash integration. | Candidate review passed 469 XCTest, four Python tests and 526 additional text/timing combinations. VAD fixtures and recovery-audio decoding verify segmentation and recording independence. [Implementation and checks](docs/DEVELOPMENT.md#t18-segmentation-and-overlap-checks) |
+| T19 real-time STT coordinator and backpressure | Complete on dev through independently reviewed, separately authorized squash integration. | Approved source/re-review passed 497 tests and three independent persistence/termination probes. Bounded inference, durable journal publication, recording isolation and safe quit/automatic-exit policy are verified. [Acceptance](docs/T19_ACCEPTANCE.md) |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T18. T19 is next. G1 remains **Unverified**. G2 passed on 2026-11-15.
+Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T19. T20 is next. G1 remains **Unverified**. G2 passed on 2026-11-15.
 
 ## Gate status
 
@@ -72,7 +73,7 @@ Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T18. T19 is nex
 
 ## Confirmed workflow decisions
 
-- The coordinator manages specifications, plans, prompts and gate decisions. For T17 and T18 the user assigned implementation to the coordinator session and separately authorized dev integration after review.
+- The coordinator manages specifications, plans, prompts and gate decisions. For T17 through T19 the user assigned implementation to the coordinator session and separately authorized dev integration after review.
 - Each Task uses a fresh implementation session and stays in that session through implementation, review fixes, and any later authorized integration, or until safely blocked.
 - The initial implementation prompt ends after task-branch commit/push/CI with `review ready`; it does not authorize official completion, status/checklist updates, `dev` integration, or branch deletion.
 - This coordinator independently verifies the acceptance matrix, diff, tests, and CI. A completion message or green CI by itself is not sufficient.
@@ -88,7 +89,7 @@ Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T18. T19 is nex
 
 - No current blocker.
 - The app is intentionally unsigned for local and CI verification; a developer signing identity is required only for separately installed signed builds.
-- G1 hardware/long-recording validation is deferred and remains an explicit verification gap, not a known passing result or a T11 blocker under the user's 2026-11-13 scheduling decision.
+- G1 hardware/long-recording validation remains deferred and unverified. The user separately authorized T19 integration on 2026-11-24 without changing that gate. Real lecture accuracy and sustained live-STT performance remain later validation work.
 
 ## T08 handoff
 
@@ -167,6 +168,13 @@ Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T18. T19 is nex
 - The approved source `d0d9df6` implements the replaceable VAD, 300 ms prefix, 800 ms silence boundary, 20-second windows and one-second copied overlap. Reconciliation uses matched-word time coverage, preserves weakly overlapping and later repeated speech, handles detached/leading punctuation and preserves dotted terms. [Architecture](docs/ARCHITECTURE.md#t18-speech-segmentation-and-transcript-reconciliation)
 - Independent review on 2026-11-24 passed 458 unit and 11 integration tests in the CI configuration, four Python tests and 526 additional combinations checking text, timing, sequence, retry and replay IDs. [Approved source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/44094277667)
 - The prior temporary installed-model directory is empty. The optional installed-model check reported `loadFailed`; ordinary CI configuration passed. The integration validates the committed dev SHA with Debug build/test, Release product-engine inspection, the SwiftPM benchmark build and Python tests. G1 physical microphone, lifecycle and long-recording verification remains unverified. T19 will connect capture to inference and transcript updates. [Commands](docs/DEVELOPMENT.md#t18-segmentation-and-overlap-checks)
+
+## T19 handoff
+
+- Approved source `ab0e902` connects capture to 16 kHz mono STT, bounded partial/final scheduling, session-pinned language/model, journal persistence and live transcript UI. The two lifecycle repairs preserve essential-save quit and inhibit automatic exit on speech/storage errors while allowing normal cancellation and delay. [Architecture](docs/ARCHITECTURE.md#t19-live-speech-coordination-and-backpressure)
+- Independent review on 2026-11-24 passed 497 tests (480 unit, 17 integration; zero failures/skips), plus three disposable probes for journal/metadata writes during quit and STT-failure automatic exit. [Approved source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/45385706671) · [Acceptance](docs/T19_ACCEPTANCE.md)
+- Phase 2 preserves the reviewed executable/test inputs and validates the committed dev SHA with the full unsigned arm64 Debug build/test, Release product-engine inspection, SwiftPM benchmark build and Python tests. The final handoff records the integration SHA, exact-commit CI and branch cleanup; candidate results do not replace integration validation. [Commands](docs/DEVELOPMENT.md#t19-live-stt-verification)
+- G1 remains unverified. Canonical transcript assembly, transcript completion metadata and derived TXT/MD files remain T20; T19 retains the journal and recoverable audio for that work. T20 implementation has not started.
 
 ## Status update rules
 

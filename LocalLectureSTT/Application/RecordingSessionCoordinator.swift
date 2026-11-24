@@ -169,6 +169,7 @@ struct RecordingSessionSnapshot: Sendable, Equatable {
     let canStart: Bool
     let canStop: Bool
     let canReset: Bool
+    var speech: LiveSTTSnapshot = .idle
 
     static func idle(permissionStatus: MicrophonePermissionStatus? = nil) -> RecordingSessionSnapshot {
         RecordingSessionSnapshot(
@@ -218,6 +219,7 @@ protocol RecordingSessionCoordinating: Sendable {
     func interruptForLifecycle(_ reason: RecordingInterruptionReason, admission: UInt64?) async -> RecordingSessionResult
     func invalidatePendingStart(_ reason: RecordingInterruptionReason, admission: UInt64?) async
     func settleFinalizationHandoffs() async
+    func waitForSpeech(at location: SessionLocation) async
 }
 
 extension RecordingSessionCoordinating {
@@ -225,6 +227,7 @@ extension RecordingSessionCoordinating {
     func interruptForLifecycle(_ reason: RecordingInterruptionReason, admission: UInt64?) async -> RecordingSessionResult { await interrupt(reason) }
     func invalidatePendingStart(_ reason: RecordingInterruptionReason, admission: UInt64?) async {}
     func settleFinalizationHandoffs() async {}
+    func waitForSpeech(at location: SessionLocation) async {}
 }
 
 actor RecordingSessionCoordinator: RecordingSessionCoordinating {
@@ -291,6 +294,11 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     private let ticker: any RecordingTicking
     private let makeSpeechModel: (@Sendable () throws -> RecordingSpeechModel)?
     private var speechModel: RecordingSpeechModel?
+    private let makeSpeechConverter: (@Sendable () -> any SpeechPCMConverting)?
+    private var speechOwnsModel = false
+    private var speechJobs: [SessionID: LiveSTTCoordinator] = [:]
+    private var speechSettlements: [SessionID: Task<Void, Never>] = [:]
+    private var speechSnapshot = LiveSTTSnapshot.idle
     private var modelLoad: Task<Void, Error>?
     private let environment: RecordingSessionEnvironment
     private let identifiers: RecordingSessionIdentifiers
@@ -328,6 +336,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         ticker: any RecordingTicking = SystemRecordingTicker(),
         environment: RecordingSessionEnvironment,
         makeSpeechModel: (@Sendable () throws -> RecordingSpeechModel)? = nil,
+        makeSpeechConverter: (@Sendable () -> any SpeechPCMConverting)? = nil,
         identifiers: RecordingSessionIdentifiers = .live,
         activity: SessionActivityRegistry? = nil,
         authority: LifecycleWorkAuthority? = nil,
@@ -342,6 +351,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         self.clock = clock
         self.ticker = ticker
         self.makeSpeechModel = makeSpeechModel
+        self.makeSpeechConverter = makeSpeechConverter
         self.environment = environment
         self.identifiers = identifiers
         self.activity = activity
@@ -372,12 +382,14 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     }
 
     func start(_ configuration: RecordingStartConfiguration) async throws -> RecordingSessionSnapshot {
-        guard startOperation == nil, settlementOperation == nil, active == nil else {
+        guard startOperation == nil, settlementOperation == nil, active == nil,
+              speechSnapshot.phase == .idle || speechSnapshot.cleanupComplete else {
             throw RecordingSessionFailure.busy
         }
         let incremented = nextToken.addingReportingOverflow(1)
         guard !incremented.overflow else { throw RecordingSessionFailure.busy }
         workLease = authority?.admit()
+        speechSnapshot = .idle
         saveEvidence = nil
         nextToken = incremented.partialValue
         let token = nextToken
@@ -488,8 +500,14 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     }
 
     func reset() async {
+        guard startOperation == nil, settlementOperation == nil, active == nil,
+              speechSnapshot.phase == .idle || speechSnapshot.cleanupComplete else { return }
+        // A new recording must not load another large model while old speech
+        // inference is still active. Ordinary reset never discards pending finals.
+        for job in Array(speechJobs.values) { await job.waitUntilSettled() }
         guard startOperation == nil, settlementOperation == nil, active == nil else { return }
         let permissionStatus = snapshot.permissionStatus
+        speechSnapshot = .idle
         snapshot = .idle(permissionStatus: permissionStatus)
         lastResult = nil
         publishSnapshot()
@@ -501,6 +519,8 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     ) async -> Result<RecordingSessionSnapshot, RecordingSessionFailure> {
         var reservation: SessionActivityReservation?
         do {
+            for job in Array(speechJobs.values) { await job.waitUntilSettled() }
+            try ensureStartMayContinue(token)
             let availableRoot: StorageRootSummary
             switch await roots.availability() {
             case let .available(summary, _): availableRoot = summary
@@ -683,6 +703,8 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
             // following first-failure check.
             active?.startedDurably = true
             try ensureStartMayContinue(token)
+            await startSpeech(handle: handle, location: location, language: configuration.languageMode)
+            try ensureStartMayContinue(token)
             snapshot = RecordingSessionSnapshot(
                 phase: .recording,
                 permissionStatus: permissionStatus,
@@ -750,7 +772,72 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     private func unloadSpeechModel() async {
         let model = speechModel
         speechModel = nil
-        await model?.engine.unload()
+        if !speechOwnsModel { await model?.engine.unload() }
+        speechOwnsModel = false
+    }
+
+    private func startSpeech(handle: CaptureHandle, location: SessionLocation, language: LanguageMode) async {
+        guard let model = speechModel, let makeSpeechConverter else { return }
+        let session = STTSessionConfiguration(sessionID: location.sessionID, operationID: .init(UUID()),
+            model: model.configuration, languageMode: language)
+        let job = LiveSTTCoordinator(engine: model.engine, session: session, repository: repository,
+            location: location, converter: makeSpeechConverter()) { [weak self] value in
+                await self?.receiveSpeech(value, sessionID: location.sessionID)
+            }
+        speechOwnsModel = true
+        speechSnapshot = .idle
+        speechJobs[location.sessionID] = job
+        let lease = authority?.admit(invalidating: false)
+        let authority = authority
+        await job.start(handle)
+        Task {
+            await job.waitUntilSettled()
+            if let lease { authority?.release(lease) }
+        }
+    }
+
+    private func receiveSpeech(_ value: LiveSTTSnapshot, sessionID: SessionID) {
+        guard snapshot.sessionID == sessionID else { return }
+        speechSnapshot = value
+        publishSnapshot()
+    }
+
+    func settleFinalizationHandoffs() async {
+        // The wrapper invokes this before joining its T08/STT handoff tasks.
+        for job in Array(speechJobs.values) { await job.cancel() }
+    }
+
+    func waitForSpeech(at location: SessionLocation) async {
+        if let pending = speechSettlements[location.sessionID] { await pending.value; return }
+        guard let job = speechJobs[location.sessionID] else { return }
+        let task = Task { await self.persistSettledSpeech(job, at: location) }
+        speechSettlements[location.sessionID] = task
+        await task.value
+        speechSettlements[location.sessionID] = nil
+    }
+
+    private func persistSettledSpeech(_ job: LiveSTTCoordinator, at location: SessionLocation) async {
+        await job.waitUntilSettled()
+        let value = await job.currentSnapshot()
+        // Called after T08 is settled while the shared activity reservation is
+        // still held. No read-modify-write races with audio finalization/recovery.
+        do {
+            let old = try await repository.readMetadata(at: location)
+            let updated = try SessionMetadataDocument(schemaVersion: old.schemaVersion, sessionId: old.sessionId,
+                title: old.title, status: old.status, captureOutcome: old.captureOutcome, createdAt: old.createdAt,
+                recordingStartedAt: old.recordingStartedAt, recordingEndedAt: old.recordingEndedAt,
+                activeDurationMs: old.activeDurationMs, languageMode: old.languageMode,
+                detectedLanguage: value.language, engine: old.engine, model: old.model,
+                modelSettings: old.modelSettings, audio: old.audio, transcript: old.transcript,
+                appVersion: old.appVersion, osVersion: old.osVersion, lastUpdatedAt: clock.wallNow())
+            try await repository.writeMetadata(updated, at: location)
+        } catch {
+            if snapshot.sessionID == location.sessionID {
+                speechSnapshot.storageWarning = "speechMetadataWriteFailed"
+                publishSnapshot()
+            }
+        }
+        speechJobs[location.sessionID] = nil
     }
 
     private func cancelStartAttempt(token: UInt64, allowsEstablishedRecordingStop: Bool) async {
@@ -875,11 +962,19 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
             registerFailure(.invalidRecorderSummary, token: token)
         }
 
+        if active?.firstFailure != nil, let id = active?.location.sessionID, let job = speechJobs[id] {
+            await job.cancel()
+            speechJobs[id] = nil
+        }
         let result: RecordingSessionResult
         if active?.firstFailure == nil, let summary {
             result = await finishNormally(token: token, summary: summary)
         } else {
             result = await finishAbnormally(token: token, summary: summary)
+        }
+        if case .secured = result {} else if let id = active?.location.sessionID, let job = speechJobs[id] {
+            await job.cancel()
+            speechJobs[id] = nil
         }
         if case .secured = result, let reservation = active?.activityReservation {
             _ = await activity?.promoteToFinalization(reservation)
@@ -1371,7 +1466,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
             recordingEndedAt: endedAt,
             activeDurationMs: MediaMilliseconds(Int64(clamping: durationMilliseconds)),
             languageMode: languageMode,
-            detectedLanguage: nil,
+            detectedLanguage: speechSnapshot.language,
             engine: speechModel?.configuration.engine,
             model: speechModel?.configuration.model,
             modelSettings: speechModel?.settings,
@@ -1439,6 +1534,10 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     }
 
     private func publishSnapshot() {
+        if snapshot.sessionID != nil, [.securedAwaitingFinalization, .interrupted, .error].contains(snapshot.phase) {
+            snapshot = replacingSnapshot(canReset: speechSnapshot.phase == .idle || speechSnapshot.cleanupComplete)
+        }
+        snapshot.speech = speechSnapshot
         snapshotContinuations.values.forEach { $0.yield(snapshot) }
     }
 

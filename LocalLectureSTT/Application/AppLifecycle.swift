@@ -102,10 +102,14 @@ struct AppLifecycleSnapshot: Sendable, Equatable {
     let visibleUserWindowCount: Int
     let hasRelevantWork: Bool
     let requiresUserAttention: Bool
+    /// Unsafe essential-save/recovery state also prevents explicit quit.
+    /// Speech availability errors only suppress unattended automatic exit.
+    let blocksExplicitTermination: Bool
     let autoExitReserved: Bool
 
     static let initial = AppLifecycleSnapshot(generation: 0, visibleUserWindowCount: 0,
                                               hasRelevantWork: false, requiresUserAttention: false,
+                                              blocksExplicitTermination: false,
                                               autoExitReserved: false)
 }
 
@@ -189,6 +193,7 @@ actor AppLifecycleCoordinator {
         snapshot = AppLifecycleSnapshot(generation: snapshot.generation &+ 1, visibleUserWindowCount: count,
                                         hasRelevantWork: snapshot.hasRelevantWork,
                                         requiresUserAttention: snapshot.requiresUserAttention,
+                                        blocksExplicitTermination: snapshot.blocksExplicitTermination,
                                         autoExitReserved: autoExitReservation != nil)
         await refreshWorkState()
     }
@@ -197,6 +202,7 @@ actor AppLifecycleCoordinator {
         snapshot = AppLifecycleSnapshot(generation: snapshot.generation &+ 1, visibleUserWindowCount: snapshot.visibleUserWindowCount,
                                         hasRelevantWork: snapshot.hasRelevantWork,
                                         requiresUserAttention: snapshot.requiresUserAttention,
+                                        blocksExplicitTermination: snapshot.blocksExplicitTermination,
                                         autoExitReserved: false)
         autoExitReservation = nil
         autoExitRequestReservation = nil
@@ -271,9 +277,9 @@ actor AppLifecycleCoordinator {
         switch recordingSnapshot.phase {
         case .preparing, .recording: decision = .needsRecordingChoice
         case .securing: decision = .terminateLater
-        case .error, .interrupted: decision = evidence?.mayTerminate == true && !snapshot.hasRelevantWork && !snapshot.requiresUserAttention ? .terminateNow : .terminateCancel
+        case .error, .interrupted: decision = evidence?.mayTerminate == true && !snapshot.hasRelevantWork && !snapshot.blocksExplicitTermination ? .terminateNow : .terminateCancel
         case .idle, .securedAwaitingFinalization:
-            decision = snapshot.hasRelevantWork ? .terminateLater : (snapshot.requiresUserAttention ? .terminateCancel : .terminateNow)
+            decision = snapshot.hasRelevantWork ? .terminateLater : (snapshot.blocksExplicitTermination ? .terminateCancel : .terminateNow)
         }
         await terminationReadiness?.updateSynchronousTerminationDecision(decision, generation: admission)
         return decision
@@ -345,7 +351,7 @@ actor AppLifecycleCoordinator {
         firstFailure = evidence?.firstFailure ?? firstFailure
         let durable = recordingSafe && firstFailure == nil && (evidence?.durableRecoveryState ?? (initial.phase == .idle))
         return .init(durableRecoveryState: durable, cleanupSettled: cleanupSettled, firstFailure: firstFailure,
-                     warnings: evidence?.warnings ?? [], requiresUserAttention: snapshot.requiresUserAttention || evidence?.requiresUserAttention == true)
+                     warnings: evidence?.warnings ?? [], requiresUserAttention: snapshot.blocksExplicitTermination || evidence?.requiresUserAttention == true)
     }
 
     private func supersededSave(_ evidence: EssentialTerminationSaveResult?) -> EssentialTerminationSaveResult {
@@ -403,8 +409,21 @@ actor AppLifecycleCoordinator {
         }
         let finalizationWork = finalizationValues.contains { $0.result == nil }
         let recoveryWork = recoveryValue.phase == .discovering || recoveryValue.phase == .recovering
+        // Audio finalization can finish before speech. A terminal inference
+        // phase still owns journal/native cleanup until cleanupComplete.
+        let speechWork = recordingValue.speech.phase != .idle && !recordingValue.speech.cleanupComplete
+        // A failed transcript remains a reason to keep the app available for
+        // inspection even after speech cleanup releases its work leases. Normal
+        // cancellation and transient backlog are not errors. Storage warnings
+        // count independently, including late metadata/diagnostic write failures.
+        // A backend cancellation reported as a failed inference is not the
+        // coordinator's normal cancellation and must still remain visible.
+        let speechAttention = (recordingValue.speech.failure.map {
+            $0 != .cancelled || recordingValue.speech.phase != .cancelled
+        } ?? false) ||
+            recordingValue.speech.storageWarning != nil
         let saveEvidence = await recording.essentialSaveEvidence()
-        let attention = (recordingValue.phase == .error && saveEvidence?.mayTerminate != true) || saveEvidence?.requiresUserAttention == true ||
+        let safetyAttention = (recordingValue.phase == .error && saveEvidence?.mayTerminate != true) || saveEvidence?.requiresUserAttention == true ||
             finalizationValues.contains { snapshot in
                 guard let result = snapshot.result else { return false }
                 // Intentional cancellation is safe only after successful resource
@@ -421,19 +440,25 @@ actor AppLifecycleCoordinator {
             }) == true ||
             (recoveryValue.report?.discoveryWarning.map { !$0.hasPrefix("catalog.") } ?? false)
         guard workRefreshGeneration == refreshGeneration, admission == authority?.state().generation else { return }
+        // The shared leases also cover the metadata/resource handoff after a
+        // speech snapshot reports cleanupComplete. Route quit through essential
+        // settlement during that gap instead of skipping it and having the
+        // final synchronous authority reject the AppKit reply.
+        let ownedWork = authority?.state().active == true
         snapshotAdmission = admission
         snapshot = AppLifecycleSnapshot(generation: snapshot.generation &+ 1,
                                         visibleUserWindowCount: snapshot.visibleUserWindowCount,
-                                        hasRelevantWork: recordingWork || finalizationWork || recoveryWork,
-                                        requiresUserAttention: attention,
+                                        hasRelevantWork: recordingWork || finalizationWork || recoveryWork || speechWork || ownedWork,
+                                        requiresUserAttention: safetyAttention || speechAttention,
+                                        blocksExplicitTermination: safetyAttention,
                                         autoExitReserved: snapshot.autoExitReserved)
         let readiness: AppTerminationDecision
         switch recordingValue.phase {
         case .preparing, .recording: readiness = .needsRecordingChoice
         case .securing: readiness = .terminateLater
-        case .error, .interrupted: readiness = saveEvidence?.mayTerminate == true && !snapshot.hasRelevantWork && !snapshot.requiresUserAttention ? .terminateNow : .terminateCancel
+        case .error, .interrupted: readiness = saveEvidence?.mayTerminate == true && !snapshot.hasRelevantWork && !snapshot.blocksExplicitTermination ? .terminateNow : .terminateCancel
         case .idle, .securedAwaitingFinalization:
-            readiness = snapshot.hasRelevantWork ? .terminateLater : (attention ? .terminateCancel : .terminateNow)
+            readiness = snapshot.hasRelevantWork ? .terminateLater : (snapshot.blocksExplicitTermination ? .terminateCancel : .terminateNow)
         }
         await terminationReadiness?.updateSynchronousTerminationDecision(readiness, generation: admission)
         let active = snapshot.hasRelevantWork

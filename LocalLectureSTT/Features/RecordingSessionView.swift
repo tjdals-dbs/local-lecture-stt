@@ -40,6 +40,9 @@ struct RecordingSessionView: View {
             if let message = viewModel.lifecycleMessage {
                 Text(message).accessibilityIdentifier("lifecycle-save-state")
             }
+            if viewModel.snapshot.speech.phase != .idle {
+                speechView
+            }
             if let value = viewModel.finalizations.last {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("세션 \(value.location.folderName.rawValue)").font(.caption)
@@ -105,6 +108,52 @@ struct RecordingSessionView: View {
             .accessibilityIdentifier("recording-start")
         }
         .formStyle(.grouped)
+    }
+
+    private var speechView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("실시간 전사").font(.headline)
+            if viewModel.snapshot.speech.phase == .finishing {
+                ProgressView("남은 발화를 전사하는 중…")
+            }
+            if let code = viewModel.snapshot.speech.failure {
+                Text("전사가 중단되었습니다 (\(code.rawValue)). 녹음 오디오는 계속 보존됩니다.")
+                    .foregroundStyle(.orange)
+            }
+            if let warning = viewModel.snapshot.speech.storageWarning {
+                Text("전사 저장 경고: \(warning)").foregroundStyle(.orange)
+            }
+            if viewModel.snapshot.speech.degraded {
+                Text("전사가 밀려 임시 갱신을 줄였습니다 · 대기 \(viewModel.snapshot.speech.pendingFinals)구간")
+                    .foregroundStyle(.secondary)
+            }
+            if viewModel.snapshot.speech.inputDiscontinuities > 0 {
+                Text("일부 전사 입력이 누락되었습니다. 녹음 파일은 별도로 저장됩니다.")
+                    .foregroundStyle(.orange)
+            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(viewModel.snapshot.speech.finals, id: \.id) { segment in
+                        HStack(alignment: .top) {
+                            Text(Self.speechTimestamp(segment.startMs.rawValue)).monospacedDigit()
+                                .foregroundStyle(.secondary)
+                            Text(segment.text).textSelection(.enabled)
+                        }
+                    }
+                    if let partial = viewModel.snapshot.speech.partial, !partial.isEmpty {
+                        Text(partial).italic().foregroundStyle(.secondary)
+                            .accessibilityLabel("임시 전사: \(partial)")
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(minHeight: 100, maxHeight: 260)
+        }
+        .accessibilityIdentifier("live-transcript")
+    }
+
+    private static func speechTimestamp(_ ms: Int64) -> String {
+        String(format: "%02lld:%02lld:%02lld", ms / 3_600_000, (ms / 60_000) % 60, (ms / 1_000) % 60)
     }
 
     private var activeRecordingView: some View {

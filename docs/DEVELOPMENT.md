@@ -752,6 +752,86 @@ The focused suite above also runs the T18 review regressions:
 - `testDottedTermsKeepTheirMeaningAfterLeadingPunctuation` checks both directions for `.NET` and `.5`, verifies that `NET` and `5` stay distinct from them, and covers an ellipsis before a Korean word.
 - `testTrailingCommaAfterPointSpaceBelongsToTheMatchedWord` and `testTrailingMarkAcrossAGapRequiresTheSameOldMarkAndTime` cover punctuation at the end of a match, punctuation belonging to novel speech, and the exclusive end of the copied audio.
 
-After T19 connects the microphone to inference, use a brief recording from the intended lecture room to check the start and end of quiet phrases, long continuous speech, and audible repetitions at a split. Listen to the saved audio at each transcript timestamp. The synthetic fixtures verify timing and text rules. G1 hardware validation remains pending.
+With T19's microphone-to-inference path, use a brief recording from the intended lecture room to check the start and end of quiet phrases, long continuous speech, and audible repetitions at a split. Listen to the saved audio at each transcript timestamp. The synthetic fixtures verify timing and text rules. G1 hardware validation remains pending.
 
 In a local network-denied check, the installed large-v3 processed four consecutive copies of the T14 7.04-second synthetic speech fixture. The VAD sent all 450,560 input frames in windows spanning 0–20 and 19–28.16 seconds. The first native final rendered the repeated passage once within its 20-second window. Model omissions can therefore occur even with full audio coverage, before overlap reconciliation.
+
+
+## T19 live STT verification
+
+The normal suite uses synthetic PCM and a controlled engine; no model download or microphone access is required:
+
+~~~sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/stt-t15-validation.Uth8xp/DerivedData \
+  -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
+  CODE_SIGNING_ALLOWED=NO build test
+swift build --scratch-path /private/tmp/stt-t15-validation.Uth8xp/CLI --disable-automatic-resolution
+python3 -B -m unittest discover -s tools/t16 -v
+~~~
+
+Use a fresh result-bundle path when adding -resultBundlePath. Focused selectors are LocalLectureSTTTests/LiveSTTCoordinatorTests and the six RecordingSessionFileIntegrationTests/testT19 methods in [acceptance](T19_ACCEPTANCE.md). The named DerivedData/CLI directories reuse local dependency caches; replace them with another resolved build directory if absent.
+
+An explicit actual-engine run requires a verified large-v3 installation and a little-endian Float32, 16 kHz mono synthetic speech file longer than three seconds. The probe used say -v Samantha -r 155 with “This local lecture explains how neural networks learn from examples and why careful validation matters in practical applications.” Convert its AIFF using afconvert -f WAVE -d LEF32@16000 -c 1, then extract the RIFF data chunk (not the header) as .f32. All generated assets remain outside the repository. Import with the existing CLI:
+
+~~~sh
+/private/tmp/stt-t15-validation.Uth8xp/CLI/debug/stt-benchmark \
+  import tools/t15/candidate.json /private/tmp/stt-t19-model/source /private/tmp/stt-t19-model/store
+
+TEST_RUNNER_LLSTT_T19_MODEL_STORE=/private/tmp/stt-t19-model/store \
+TEST_RUNNER_LLSTT_T19_SPEECH_F32=/private/tmp/stt-t19-work/speech.f32 \
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/stt-t15-validation.Uth8xp/DerivedData \
+  -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+  -only-testing:LocalLectureSTTIntegrationTests/RecordingSessionFileIntegrationTests/testT19LiveSpeechReachesUIAndJournalWhileAudioIsPreserved \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 180 \
+  CODE_SIGNING_ALLOWED=NO test
+~~~
+
+The TEST_RUNNER_ prefix passes these values into the test host. Omit both variables for ordinary CI. The installed-model probe loads the real product engine; it must not be reported as a model run when these variables are absent. This procedure does not change system networking and does not establish OS-enforced offline or G1 hardware evidence.
+
+
+### T19 speech-only quit regression
+
+Run the full Debug build/test command above first. The following command reuses that build and repeats the three lifecycle regression methods plus the file-backed delegate integration 20 times each (80 executions). It deliberately keeps final inference pending instead of advancing the fake engine clock. The delegate must cancel speech, join essential storage/resource settlement, then issue one successful AppKit reply. The unit matrix also holds cleanup at a gate and covers finished/cancelled/failed inference and a metadata-only handoff.
+
+~~~sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/stt-t15-validation.Uth8xp/DerivedData \
+  -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+  -only-testing:LocalLectureSTTTests/AppLifecycleTests/testT19SpeechOnlyQuitJoinsCleanupAndRepliesExactlyOnce \
+  -only-testing:LocalLectureSTTTests/AppLifecycleTests/testT19SpeechOnlyDecisionWithoutSharedAuthorityStillRequiresCleanup \
+  -only-testing:LocalLectureSTTTests/AppLifecycleTests/testT19ClosedWindowWaitsForSpeechAndMetadataHandoffThenExitsOnce \
+  -only-testing:LocalLectureSTTIntegrationTests/RecordingSessionFileIntegrationTests/testT19DelegateQuitsAfterAudioFinalizationWithoutDrainingSpeechBacklog \
+  -test-iterations 20 -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
+  CODE_SIGNING_ALLOWED=NO test-without-building
+~~~
+
+The 2026-11-24 repair run added `-resultBundlePath /private/tmp/stt-t19-quit-fix/Repeated.xcresult`. Full Debug and installed-model runs used the commands above with `Full.xcresult` and `Native.xcresult` in that directory. Use new result paths on rerun. These automated checks do not change G1's unverified status.
+
+
+### T19 automatic-exit error policy regression
+
+After the full Debug build/test command, repeat the four error-policy unit methods, the earlier gated quit test, and the two real capture/file integration methods (seven selectors, 20 iterations each). The journal-failure integration creates a directory at the unused synthetic journal path; the production FileSessionRepository/JSONLWriter then fails the append while metadata and audio remain writable. No real recordings or system permissions are altered.
+
+~~~sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/stt-t15-validation.Uth8xp/DerivedData \
+  -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+  -only-testing:LocalLectureSTTTests/AppLifecycleTests/testT19SpeechProblemsBlockAutoExitButAllowSafeExplicitQuit \
+  -only-testing:LocalLectureSTTTests/AppLifecycleTests/testT19CancellationAndDelayDoNotBecomeAutomaticExitErrors \
+  -only-testing:LocalLectureSTTTests/AppLifecycleTests/testT19SpeechWarningDoesNotBypassUnsafeEssentialSave \
+  -only-testing:LocalLectureSTTTests/AppLifecycleTests/testT19LateSpeechErrorInvalidatesPendingAutomaticExit \
+  -only-testing:LocalLectureSTTTests/AppLifecycleTests/testT19SpeechOnlyQuitJoinsCleanupAndRepliesExactlyOnce \
+  -only-testing:LocalLectureSTTIntegrationTests/RecordingSessionFileIntegrationTests/testT19SpeechFailureBlocksAutoExitButAllowsExplicitQuit \
+  -only-testing:LocalLectureSTTIntegrationTests/RecordingSessionFileIntegrationTests/testT19TranscriptWriteFailureBlocksAutoExitButAllowsExplicitQuit \
+  -test-iterations 20 -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
+  CODE_SIGNING_ALLOWED=NO test-without-building
+~~~
+
+Use a fresh `-resultBundlePath` on each run. The repair's artifacts are under `/private/tmp/stt-t19-attention-fix`; completed runs and results are recorded in [acceptance](T19_ACCEPTANCE.md). G1 remains unverified.

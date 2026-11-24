@@ -43,6 +43,7 @@ struct LocalLectureSTTApp: App {
                 osVersion: ProcessInfo.processInfo.operatingSystemVersionString
             ),
             makeSpeechModel: { try ProductionSpeechModel.make(repository: models) },
+            makeSpeechConverter: { SpeechPCMConverter() },
             activity: activity, authority: authority
         )
         let lifetime = RecordingFinalizationCoordinator(recording: recordingCoordinator, finalization: finalization,

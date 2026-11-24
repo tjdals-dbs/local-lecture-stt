@@ -731,3 +731,238 @@ private final class AuditDelayedAutomaticGateway: LifecycleTerminationRequesting
         }
     }
 }
+
+extension AppLifecycleTests {
+    @MainActor
+    func testT19SpeechOnlyQuitJoinsCleanupAndRepliesExactlyOnce() async {
+        // A terminal inference phase is not proof of completed journal/native
+        // cleanup. Even cleanupComplete can precede the metadata handoff.
+        for (phase, cleaned) in [(LiveSTTPhase.finishing, false), (.finished, false),
+                                  (.cancelled, false), (.failed, false), (.finished, true)] {
+            let authority = LifecycleWorkAuthority()
+            let gate = LifecycleGate()
+            let entered = expectation(description: "speech settlement entered: \(phase)/\(cleaned)")
+            let recording = T19LifecycleSpeechStub(phase: phase, cleaned: cleaned, authority: authority,
+                gate: gate, onCleanup: { entered.fulfill() }, failure: phase == .failed ? .inferenceFailed : nil)
+            let audio = LifecycleFinalizationStub(values: [recording.finishedAudio])
+            let lifecycle = AppLifecycleCoordinator(recording: recording, finalization: audio,
+                recovery: LifecycleRecoveryStub(), activity: LifecycleActivitySpy(),
+                termination: LifecycleTerminationSpy(), authority: authority)
+            let decision = await lifecycle.terminationDecision()
+            XCTAssertEqual(decision, .terminateLater, "STT or its handoff still owns work")
+            // Fail promptly against the old implementation instead of leaving
+            // a test waiting forever for a cleanup path it never entered.
+            guard decision == .terminateLater else {
+                entered.fulfill()
+                await fulfillment(of: [entered], timeout: 3)
+                await recording.finishHandoff()
+                continue
+            }
+            let reply = LifecycleTerminationReplySpy(), presenter = LifecycleQuitPresenterSpy()
+            let delegate = MacLifecycleDelegate(activity: LifecycleActivitySpy(), automaticTermination: LifecycleTerminationSpy(),
+                presenter: presenter, terminationReply: reply, windowClassifier: LifecycleWindowClassifierSpy())
+            delegate.configure(recording: recording, finalization: audio, recovery: LifecycleRecoveryStub(), authority: authority)
+            XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+            await fulfillment(of: [entered], timeout: 3)
+            XCTAssertTrue(reply.values.isEmpty, "journal/native cleanup must finish before the AppKit reply")
+            XCTAssertTrue(authority.state().active)
+            XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+            await gate.release()
+            await delegate.waitForPendingTermination()
+            let calls = await recording.cleanupCalls
+            XCTAssertEqual(calls, 1)
+            XCTAssertEqual(presenter.calls, 0, "capture has already stopped")
+            XCTAssertEqual(reply.values, [true])
+            XCTAssertFalse(authority.state().active)
+        }
+    }
+
+    func testT19SpeechOnlyDecisionWithoutSharedAuthorityStillRequiresCleanup() async {
+        let recording = T19LifecycleSpeechStub()
+        let lifecycle = AppLifecycleCoordinator(recording: recording,
+            finalization: LifecycleFinalizationStub(values: [recording.finishedAudio]), recovery: LifecycleRecoveryStub(),
+            activity: LifecycleActivitySpy(), termination: LifecycleTerminationSpy())
+        let decision = await lifecycle.terminationDecision()
+        XCTAssertEqual(decision, .terminateLater)
+        let allowed = await lifecycle.resolveTermination(.essentialSaveAndQuit)
+        XCTAssertTrue(allowed)
+        let calls = await recording.cleanupCalls
+        XCTAssertEqual(calls, 1)
+    }
+
+    func testT19ClosedWindowWaitsForSpeechAndMetadataHandoffThenExitsOnce() async {
+        let authority = LifecycleWorkAuthority()
+        let recording = T19LifecycleSpeechStub(authority: authority)
+        let termination = LifecycleTerminationSpy()
+        let lifecycle = AppLifecycleCoordinator(recording: recording,
+            finalization: LifecycleFinalizationStub(values: [recording.finishedAudio]), recovery: LifecycleRecoveryStub(),
+            activity: LifecycleActivitySpy(), termination: termination, authority: authority)
+        await lifecycle.userWindowCountChanged(0)
+        let before = await termination.count()
+        XCTAssertEqual(before, 0)
+        await recording.finishSpeech()
+        let pendingHandoff = await lifecycle.terminationDecision()
+        XCTAssertEqual(pendingHandoff, .terminateLater)
+        let during = await termination.count()
+        XCTAssertEqual(during, 0)
+        await recording.finishHandoff()
+        // Production T08 emits handoffResourcesSettled after releasing its
+        // lease. Refresh the same policy after that owner transition.
+        _ = await lifecycle.terminationDecision()
+        _ = await lifecycle.terminationDecision()
+        let after = await termination.count(), calls = await recording.cleanupCalls
+        XCTAssertEqual(after, 1)
+        XCTAssertEqual(calls, 0, "closing a window must let STT finish normally")
+    }
+
+    @MainActor
+    func testT19SpeechProblemsBlockAutoExitButAllowSafeExplicitQuit() async {
+        let problems: [(STTErrorCode?, String?)] = [(.inferenceFailed, nil), (.backlogFull, nil), (.cancelled, nil),
+            (nil, "jsonlAppendFailed"), (nil, "jsonlFlushFailed"), (nil, "speechMetadataWriteFailed"),
+            (.cancelled, "jsonlAppendFailed")]
+        for (failure, warning) in problems {
+            let authority = LifecycleWorkAuthority()
+            let recording = T19LifecycleSpeechStub(phase: failure == nil ? .finished : .failed,
+                authority: authority, failure: failure, storageWarning: warning)
+            let audio = LifecycleFinalizationStub(values: [recording.finishedAudio])
+            let automatic = LifecycleTerminationSpy()
+            let lifecycle = AppLifecycleCoordinator(recording: recording, finalization: audio,
+                recovery: LifecycleRecoveryStub(), activity: LifecycleActivitySpy(), termination: automatic, authority: authority)
+            await lifecycle.userWindowCountChanged(0)
+            await recording.finishHandoff()
+            let decision = await lifecycle.terminationDecision()
+            let state = await lifecycle.currentSnapshot(), exits = await automatic.count()
+            XCTAssertTrue(state.requiresUserAttention, "speech failure/storage warning must remain visible")
+            XCTAssertEqual(exits, 0)
+            XCTAssertEqual(decision, .terminateNow, "safe explicit quit must not be blocked by transcript availability")
+            let allowed = await lifecycle.resolveTermination(.essentialSaveAndQuit)
+            XCTAssertTrue(allowed)
+            let afterCleanup = await automatic.count()
+            XCTAssertEqual(afterCleanup, 0, "settlement must not erase an unresolved speech problem")
+            let replies = LifecycleTerminationReplySpy()
+            let delegate = MacLifecycleDelegate(activity: LifecycleActivitySpy(), automaticTermination: LifecycleTerminationSpy(),
+                presenter: LifecycleQuitPresenterSpy(), terminationReply: replies, windowClassifier: LifecycleWindowClassifierSpy())
+            delegate.configure(recording: recording, finalization: audio, recovery: LifecycleRecoveryStub(), authority: authority)
+            XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+            await delegate.waitForPendingTermination()
+            XCTAssertEqual(replies.values, [true])
+        }
+    }
+
+    func testT19CancellationAndDelayDoNotBecomeAutomaticExitErrors() async {
+        for (phase, failure, degraded) in [(LiveSTTPhase.cancelled, Optional<STTErrorCode>.none, false),
+                                          (.cancelled, .cancelled, false), (.finishing, nil, true)] {
+            let authority = LifecycleWorkAuthority()
+            let recording = T19LifecycleSpeechStub(phase: phase, authority: authority, failure: failure, degraded: degraded)
+            let automatic = LifecycleTerminationSpy()
+            let lifecycle = AppLifecycleCoordinator(recording: recording,
+                finalization: LifecycleFinalizationStub(values: [recording.finishedAudio]), recovery: LifecycleRecoveryStub(),
+                activity: LifecycleActivitySpy(), termination: automatic, authority: authority)
+            await lifecycle.userWindowCountChanged(0)
+            let pending = await lifecycle.currentSnapshot(), before = await automatic.count()
+            XCTAssertFalse(pending.requiresUserAttention)
+            XCTAssertTrue(pending.hasRelevantWork)
+            XCTAssertEqual(before, 0)
+            await recording.finishHandoff()
+            _ = await lifecycle.terminationDecision()
+            _ = await lifecycle.terminationDecision()
+            let settled = await lifecycle.currentSnapshot(), after = await automatic.count()
+            XCTAssertFalse(settled.requiresUserAttention)
+            XCTAssertEqual(after, 1)
+        }
+    }
+
+    func testT19SpeechWarningDoesNotBypassUnsafeEssentialSave() async {
+        let recording = T19LifecycleSpeechStub(storageWarning: "jsonlAppendFailed", saveIsSafe: false)
+        await recording.finishHandoff()
+        let automatic = LifecycleTerminationSpy()
+        let lifecycle = AppLifecycleCoordinator(recording: recording,
+            finalization: LifecycleFinalizationStub(values: [recording.finishedAudio]), recovery: LifecycleRecoveryStub(),
+            activity: LifecycleActivitySpy(), termination: automatic)
+        await lifecycle.userWindowCountChanged(0)
+        let decision = await lifecycle.terminationDecision()
+        XCTAssertEqual(decision, .terminateCancel)
+        let allowed = await lifecycle.resolveTermination(.essentialSaveAndQuit), exits = await automatic.count()
+        XCTAssertFalse(allowed)
+        XCTAssertEqual(exits, 0)
+    }
+
+    func testT19LateSpeechErrorInvalidatesPendingAutomaticExit() async {
+        let recording = T19LifecycleSpeechStub()
+        await recording.finishHandoff()
+        let automatic = DeferredTerminationSpy()
+        let lifecycle = AppLifecycleCoordinator(recording: recording,
+            finalization: LifecycleFinalizationStub(values: [recording.finishedAudio]), recovery: LifecycleRecoveryStub(),
+            activity: LifecycleActivitySpy(), termination: automatic)
+        let closing = Task { await lifecycle.userWindowCountChanged(0) }
+        await automatic.waitUntilEntered()
+        // E.g. detected-language metadata reports a failure after inference
+        // completed, while the main-actor automatic gateway is suspended.
+        await recording.setStorageWarning("speechMetadataWriteFailed")
+        _ = await lifecycle.terminationDecision()
+        await automatic.release()
+        await closing.value
+        let exits = await automatic.count()
+        XCTAssertEqual(exits, 0)
+    }
+}
+
+private actor T19LifecycleSpeechStub: RecordingSessionCoordinating {
+    nonisolated let finishedAudio: AudioFinalizationSnapshot
+    private var value: RecordingSessionSnapshot
+    private let authority: LifecycleWorkAuthority?
+    private let lease: UUID?
+    private let gate: LifecycleGate?
+    private let onCleanup: @Sendable () -> Void
+    private let saveIsSafe: Bool
+    private(set) var cleanupCalls = 0
+
+    init(phase: LiveSTTPhase = .finishing, cleaned: Bool = false, authority: LifecycleWorkAuthority? = nil,
+         gate: LifecycleGate? = nil, onCleanup: @escaping @Sendable () -> Void = {},
+         failure: STTErrorCode? = nil, storageWarning: String? = nil, degraded: Bool = false, saveIsSafe: Bool = true) {
+        self.authority = authority; self.lease = authority?.admit(invalidating: false)
+        self.gate = gate; self.onCleanup = onCleanup
+        self.saveIsSafe = saveIsSafe
+        let sessionID = SessionID()
+        let location = SessionLocation(rootID: StorageRootID(), sessionID: sessionID,
+            folderName: SessionFolderName(sessionID: sessionID, createdAt: AbsoluteTime(Date()), timeZone: .gmt))
+        var speech = LiveSTTSnapshot()
+        speech.phase = phase; speech.cleanupComplete = cleaned; speech.pendingFinals = cleaned ? 0 : 2
+        speech.failure = failure; speech.storageWarning = storageWarning; speech.degraded = degraded
+        value = RecordingSessionSnapshot(phase: .securedAwaitingFinalization, permissionStatus: .authorized,
+            sessionID: sessionID, title: "speech still owned", languageMode: .korean, persistedStatus: .finalizing,
+            recordingStartedAt: nil, elapsedMilliseconds: 20_000, microphoneDisplayName: nil,
+            normalizedInputLevel: 0, noInputWarning: false, failure: nil, persistenceWarningCode: nil,
+            catalogWarningCode: nil, canStart: false, canStop: false, canReset: false, speech: speech)
+        let result = AudioFinalizationResult(location: location, phase: .audioReadyAwaitingRemainingFinalization,
+            failure: nil, warnings: [], media: nil, source: nil, final: nil, completedSteps: [],
+            retainedPaths: [], presentPaths: [], recoveryWasRemoved: false)
+        finishedAudio = .init(location: location, generation: 1, operation: .resume, phase: result.phase, result: result)
+    }
+    func snapshots() -> AsyncStream<RecordingSessionSnapshot> { let value = value; return AsyncStream { $0.yield(value); $0.finish() } }
+    func currentSnapshot() -> RecordingSessionSnapshot { value }
+    func refreshPermissionStatus() {}
+    func start(_ configuration: RecordingStartConfiguration) throws -> RecordingSessionSnapshot { throw RecordingSessionFailure.busy }
+    func stop() -> RecordingSessionResult { .error(.busy) }
+    func interrupt(_ reason: RecordingInterruptionReason) -> RecordingSessionResult { .interrupted(.interrupted(reason)) }
+    func recordSystemWakeIfApplicable() {}
+    func reset() {}
+    func essentialSaveEvidence() -> EssentialTerminationSaveResult? {
+        .init(durableRecoveryState: saveIsSafe, cleanupSettled: true, firstFailure: nil, warnings: [], requiresUserAttention: !saveIsSafe)
+    }
+    func settleFinalizationHandoffs() async {
+        cleanupCalls += 1
+        onCleanup()
+        await gate?.enterAndWait()
+        finishHandoff()
+    }
+    func finishSpeech() {
+        if value.speech.phase == .finishing || value.speech.phase == .listening { value.speech.phase = .finished }
+        value.speech.cleanupComplete = true
+    }
+    func setStorageWarning(_ warning: String) { value.speech.storageWarning = warning }
+    func finishHandoff() {
+        finishSpeech()
+        if let lease { authority?.release(lease) }
+    }
+}

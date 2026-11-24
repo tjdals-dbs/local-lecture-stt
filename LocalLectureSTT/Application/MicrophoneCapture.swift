@@ -134,6 +134,17 @@ struct CaptureBufferConfiguration: Sendable, Equatable {
     }
 }
 
+/// Established by fan-out before either consumer sees PCM. A delayed speech
+/// consumer must use the recording origin even if its first chunks were dropped.
+final class CaptureTimeline: @unchecked Sendable {
+    private let lock = NSLock()
+    private var origin: Int64?
+    func recordOrigin(_ sampleTime: Int64) {
+        lock.withLock { if origin == nil { origin = sampleTime } }
+    }
+    func sourceOrigin() -> Int64? { lock.withLock { origin } }
+}
+
 struct CaptureHandle: Sendable {
     let generation: UInt64
     let device: InputDeviceSnapshot
@@ -141,6 +152,7 @@ struct CaptureHandle: Sendable {
     let speechPCM: AsyncThrowingStream<PCMChunk, Error>
     let events: AsyncStream<CaptureEvent>
     let inputSignalStates: AsyncStream<InputSignalSample>
+    var timeline = CaptureTimeline()
 }
 
 protocol MicrophoneCaptureDriving: Sendable {
@@ -234,7 +246,8 @@ actor MicrophoneCaptureController {
                 recordingPCM: distributor.recordingStream,
                 speechPCM: distributor.speechStream,
                 events: distributor.eventStream,
-                inputSignalStates: signalStates
+                inputSignalStates: signalStates,
+                timeline: distributor.timeline
             )
         } catch let error as CaptureError {
             if error.code == .startInterrupted { throw error }
@@ -340,6 +353,7 @@ private final class PCMDistributor: @unchecked Sendable {
     private var acceptsInput = true
     private var finished = false
     private var speechDropped: UInt64 = 0
+    let timeline = CaptureTimeline()
     private let terminal: @Sendable (CaptureError) -> Void
 
     init(configuration: CaptureBufferConfiguration, terminal: @escaping @Sendable (CaptureError) -> Void) {
@@ -367,6 +381,7 @@ private final class PCMDistributor: @unchecked Sendable {
         var terminalError: CaptureError?
         lock.lock()
         guard acceptsInput, !finished else { lock.unlock(); return false }
+        timeline.recordOrigin(chunk.sourceSampleTime)
         switch recording.yield(chunk) {
         case .enqueued: break
         case .dropped:

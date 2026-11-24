@@ -1,9 +1,224 @@
 import AVFoundation
+import AppKit
 import Foundation
 import XCTest
 @testable import LocalLectureSTT
 
 final class RecordingSessionFileIntegrationTests: XCTestCase {
+    @MainActor func testT19LiveSpeechReachesUIAndJournalWhileAudioIsPreserved() async throws {
+        try await runT19Integration(failSpeech: false)
+    }
+
+    @MainActor func testT19SpeechFailureDoesNotStopCaptureOrAudioWriter() async throws {
+        try await runT19Integration(failSpeech: true)
+    }
+
+    @MainActor func testT19LifecycleCancelsPendingSpeechAndJoinsHandoff() async throws {
+        try await runT19Integration(failSpeech: false, cancelAtEnd: true)
+    }
+
+    @MainActor func testT19DelegateQuitsAfterAudioFinalizationWithoutDrainingSpeechBacklog() async throws {
+        try await runT19Integration(failSpeech: false, cancelAtEnd: true, quitUsingDelegate: true)
+    }
+
+    @MainActor func testT19SpeechFailureBlocksAutoExitButAllowsExplicitQuit() async throws {
+        try await runT19Integration(failSpeech: true, verifyExitPolicy: true)
+    }
+
+    @MainActor func testT19TranscriptWriteFailureBlocksAutoExitButAllowsExplicitQuit() async throws {
+        try await runT19Integration(failSpeech: false, failJournal: true, verifyExitPolicy: true)
+    }
+
+    @MainActor private func runT19Integration(failSpeech: Bool, cancelAtEnd: Bool = false,
+                                             quitUsingDelegate: Bool = false, failJournal: Bool = false,
+                                             verifyExitPolicy: Bool = false) async throws {
+        let fixture = try RecordingFileIntegrationFixture()
+        defer { fixture.cleanup() }
+        let roots = StorageRootManager(applicationSupportDirectory: fixture.applicationSupport, bookmarkCodec: fixture.bookmarks)
+        _ = try await roots.registerSelectedDirectory(fixture.root)
+        let permission = AuthorizedIntegrationPermission()
+        let driver = T19IntegrationDriver()
+        let capture = MicrophoneCaptureController(permission: permission, driver: driver,
+            monitor: InputSignalMonitor(clock: FixedIntegrationMonotonicClock(), scheduler: NoopIntegrationSignalScheduler()))
+        let repository = FileSessionRepository(roots: roots)
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: fixture.applicationSupport)
+        let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: store)
+        let localStore = failSpeech || cancelAtEnd || failJournal ? nil : ProcessInfo.processInfo.environment["LLSTT_T19_MODEL_STORE"]
+        let models = FileModelRepository(
+            storeURL: { localStore.map { URL(fileURLWithPath: $0) } ?? fixture.applicationSupport.appendingPathComponent("Models") },
+            sources: ModelImportSources(), validator: WhisperCppModelValidator(),
+            references: SessionModelReferenceChecker(roots: roots))
+        let selected = try ProductionSpeechModel.make(repository: models)
+        let speech: RecordingSpeechModel
+        let fake: FakeSTTEngine?
+        if localStore != nil { speech = selected; fake = nil }
+        else {
+            let scenario = FakeSTTScenario(requests: failSpeech
+                ? [[.init(after: 0, kind: .failed, failure: .init(.inferenceFailed))]]
+                : [[.init(after: 0, kind: .final, text: "live provisional")],
+                   [.init(after: 1_000, kind: .final, text: "durable lecture", detectedLanguage: try LanguageCode("en"))]])
+            let engine = try FakeSTTEngine(engine: selected.configuration.engine, capabilities: selected.engine.capabilities,
+                                          scenario: scenario)
+            fake = engine
+            speech = .init(engine: engine, configuration: selected.configuration, settings: selected.settings)
+        }
+        let activity = SessionActivityRegistry()
+        let authority = LifecycleWorkAuthority()
+        let recording = RecordingSessionCoordinator(roots: roots, permission: permission, capture: capture,
+            recorders: ClosureAudioRecorderFactory { AVFoundationAudioRecorder(roots: roots) },
+            repository: repository, catalog: catalog, environment: .init(appVersion: "T19", osVersion: "test"),
+            makeSpeechModel: { speech }, makeSpeechConverter: { SpeechPCMConverter() }, activity: activity, authority: authority)
+        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: roots, catalog: catalog), authority: authority)
+        let coordinator = RecordingFinalizationCoordinator(recording: recording, finalization: finalization,
+            activity: activity, authority: authority)
+        let viewModel = RecordingSessionViewModel(coordinator: coordinator)
+        viewModel.startObserving()
+        let observedFirst = expectation(description: "first UI speech state")
+        let observedEnd = expectation(description: "speech cleanup complete")
+        var first = false, ended = false
+        let observer = viewModel.$snapshot.sink { value in
+            if !first && (failSpeech ? value.speech.failure != nil : !(value.speech.partial ?? "").isEmpty) {
+                first = true
+                observedFirst.fulfill()
+            }
+            if !ended && [.finished, .failed, .cancelled].contains(value.speech.phase) {
+                ended = true
+                observedEnd.fulfill()
+            }
+        }
+        defer { observer.cancel() }
+        let started = try await coordinator.start(.init(title: "T19 generated speech", languageMode: .english, timeZone: .gmt))
+        var samples: [Float]
+        if let path = ProcessInfo.processInfo.environment["LLSTT_T19_SPEECH_F32"], localStore != nil {
+            let data = try Data(contentsOf: URL(fileURLWithPath: path))
+            samples = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        } else {
+            samples = (0..<64_000).map { Float(sin(Double($0) * 2 * .pi * 220 / 16_000) * 0.2) }
+        }
+        XCTAssertGreaterThan(samples.count, 48_000)
+        let split = min(48_000, samples.count)
+        try await driver.emit(Array(samples.prefix(split)))
+        await fulfillment(of: [observedFirst], timeout: localStore == nil ? 10 : 90)
+        // The same snapshot path consumed by the actual ViewModel carries results.
+        let firstUI = viewModel.snapshot
+        if failSpeech { XCTAssertEqual(firstUI.speech.failure, .inferenceFailed) }
+        else { XCTAssertFalse((firstUI.speech.partial ?? "").isEmpty) }
+        XCTAssertEqual(firstUI.phase, .recording)
+        try await driver.emit(Array(samples.dropFirst(split)) + Array(repeating: 0, count: 16_000))
+        let result = await coordinator.stop()
+        guard case let .secured(secured) = result else { return XCTFail("audio must remain secured: \(result)") }
+        XCTAssertEqual(secured.location.sessionID, started.sessionID)
+        if let fake, !failSpeech {
+            await fake.waitUntil(.active(2))
+            let during = await recording.currentSnapshot()
+            XCTAssertTrue(during.speech.finals.isEmpty, "essential audio save does not wait for final STT")
+            XCTAssertFalse(during.canReset)
+            await coordinator.reset()
+            do {
+                _ = try await coordinator.start(.init(title: "must wait", timeZone: .gmt))
+                XCTFail("a new session cannot silently cancel pending finals")
+            } catch let failure as RecordingSessionFailure { XCTAssertEqual(failure, .busy) }
+            if failJournal {
+                // The fixture has never written a final transcript. Occupy its
+                // journal path with a directory to force a real FileHandle
+                // append failure while leaving metadata and audio writable.
+                let journal = fixture.root.appendingPathComponent(secured.location.folderName.rawValue)
+                    .appendingPathComponent(SessionArtifact.transcriptJournal.relativePath)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: journal.path))
+                try FileManager.default.createDirectory(at: journal, withIntermediateDirectories: false)
+            }
+            if cancelAtEnd {
+                _ = await finalization.waitForResult(at: secured.location)
+                if quitUsingDelegate {
+                    // Do not advance the final request's logical clock. Cmd-Q
+                    // must cancel it through the real delegate/lifecycle path,
+                    // join the file-backed handoff, and approve one reply.
+                    let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: repository,
+                        finalization: finalization, catalog: catalog, activity: activity, authority: authority)
+                    let replies = T19IntegrationTerminationReplies(), presenter = T19IntegrationQuitPresenter()
+                    let delegate = MacLifecycleDelegate(activity: FileIntegrationActivity(), automaticTermination: FileIntegrationTermination(),
+                        presenter: presenter, terminationReply: replies, windowClassifier: T19IntegrationWindows())
+                    delegate.configure(recording: coordinator, finalization: finalization, recovery: recovery, authority: authority)
+                    XCTAssertTrue(authority.state().active)
+                    XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+                    await delegate.waitForPendingTermination()
+                    XCTAssertEqual(replies.values, [true])
+                    XCTAssertEqual(presenter.calls, 0)
+                    XCTAssertFalse(authority.state().active, "all speech and handoff leases must be released before the reply")
+                    let afterQuit = await recording.currentSnapshot()
+                    XCTAssertTrue(afterQuit.speech.cleanupComplete)
+                    XCTAssertEqual(afterQuit.speech.phase, .cancelled)
+                    let metadata = try await repository.readMetadata(at: secured.location)
+                    XCTAssertEqual(metadata.captureOutcome, .completed, "quit must preserve normal Stop's durable outcome")
+                    XCTAssertEqual(metadata.detectedLanguage?.rawValue, "en")
+                }
+                await coordinator.settleFinalizationHandoffs()
+            } else {
+                try await fake.advance(by: 1_000)
+            }
+        }
+        await fulfillment(of: [observedEnd], timeout: localStore == nil ? 10 : 120)
+        _ = await finalization.waitForResult(at: secured.location)
+        await coordinator.settleFinalizationHandoffs()
+        let last = await recording.currentSnapshot()
+        if failSpeech || failJournal {
+            XCTAssertEqual(last.speech.failure, .inferenceFailed)
+            if failJournal {
+                XCTAssertEqual(last.speech.storageWarning, StorageErrorCode.jsonlAppendFailed.rawValue)
+                XCTAssertTrue(last.speech.finals.isEmpty, "a failed append must never appear as durable text")
+            }
+        }
+        else if cancelAtEnd {
+            XCTAssertEqual(last.speech.phase, .cancelled)
+            XCTAssertTrue(last.speech.finals.isEmpty)
+        }
+        else {
+            XCTAssertEqual(last.speech.phase, .finished)
+            XCTAssertFalse(last.speech.finals.isEmpty)
+            let file = fixture.root.appendingPathComponent(secured.location.folderName.rawValue)
+                .appendingPathComponent(SessionArtifact.transcriptJournal.relativePath)
+            let records = try Data(contentsOf: file).split(separator: 0x0A).map {
+                try JSONDecoder().decode(TranscriptJournalRecord.self, from: Data($0))
+            }
+            XCTAssertEqual(records.map(\.segment), last.speech.finals)
+            XCTAssertTrue(last.speech.finals.allSatisfy { $0.language.rawValue == "en" })
+        }
+        let audio = fixture.root.appendingPathComponent(secured.location.folderName.rawValue)
+            .appendingPathComponent(SessionArtifact.finalAudio.relativePath)
+        let decoded = try await decodeIntegrationAsset(at: audio)
+        XCTAssertEqual(decoded.durationSeconds, Double(samples.count + 16_000) / 16_000, accuracy: 0.08)
+        XCTAssertGreaterThan(decoded.decodedBytes, 0)
+        XCTAssertFalse(authority.state().active)
+        XCTAssertTrue(last.canReset)
+        if verifyExitPolicy {
+            let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: repository,
+                finalization: finalization, catalog: catalog, activity: activity, authority: authority)
+            let automatic = T19IntegrationAutomaticExitSpy()
+            let lifecycle = AppLifecycleCoordinator(recording: coordinator, finalization: finalization, recovery: recovery,
+                activity: FileIntegrationActivity(), termination: automatic, authority: authority)
+            await lifecycle.userWindowCountChanged(0)
+            let policy = await lifecycle.currentSnapshot(), exits = await automatic.count
+            XCTAssertTrue(policy.requiresUserAttention)
+            XCTAssertEqual(exits, 0, "successful audio must not hide a failed transcript by automatically quitting")
+            let evidence = await coordinator.essentialSaveEvidence()
+            XCTAssertEqual(evidence?.mayTerminate, true)
+            let replies = T19IntegrationTerminationReplies()
+            let delegate = MacLifecycleDelegate(activity: FileIntegrationActivity(), automaticTermination: automatic,
+                presenter: T19IntegrationQuitPresenter(), terminationReply: replies, windowClassifier: T19IntegrationWindows())
+            delegate.configure(recording: coordinator, finalization: finalization, recovery: recovery, authority: authority)
+            XCTAssertEqual(delegate.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+            await delegate.waitForPendingTermination()
+            XCTAssertEqual(replies.values, [true], "the user can still explicitly quit after essential save")
+            let metadata = try await repository.readMetadata(at: secured.location)
+            XCTAssertEqual(metadata.captureOutcome, .completed)
+            let afterQuit = await recording.currentSnapshot()
+            XCTAssertEqual(afterQuit.speech.failure, last.speech.failure)
+            XCTAssertEqual(afterQuit.speech.storageWarning, last.speech.storageWarning)
+        }
+        viewModel.stopObserving()
+        try await store.close()
+    }
+
     /// T10 B06: this deliberately crosses the production root, repository,
     /// capture, recorder and catalog path.  It proves the sleep path keeps a
     /// readable MOV and does not accidentally submit normal finalization.
@@ -572,6 +787,27 @@ private struct IntegrationDriverCounts: Sendable, Equatable {
     var stop: Int
 }
 
+private actor T19IntegrationDriver: MicrophoneCaptureDriving {
+    private var callback: (@Sendable (PCMChunk) -> Void)?
+    private var generation: UInt64 = 0
+    private var frame: Int64 = 0
+    private var sequence: UInt64 = 0
+    func prepare(generation: UInt64, onChunk: @escaping @Sendable (PCMChunk) -> Void,
+                 onRuntimeEvent: @escaping @Sendable (CaptureRuntimeEvent) -> Void) async throws -> InputDeviceSnapshot {
+        self.generation = generation; callback = onChunk
+        return .init(identity: "T19", displayName: "Synthetic speech")
+    }
+    func start() async throws {}
+    func stop() async { callback = nil }
+    func emit(_ samples: [Float]) throws {
+        guard let callback else { throw CaptureError(.runtimeFailure) }
+        callback(try PCMChunk(generation: generation, sequence: sequence,
+            format: PCMFormatDescription(sampleRate: 16_000, channelCount: 1), frameCount: samples.count,
+            sourceSampleTime: frame, samples: samples))
+        frame += Int64(samples.count); sequence += 1
+    }
+}
+
 private actor SyntheticIntegrationCaptureDriver: MicrophoneCaptureDriving {
     private let chunkCount: Int
     private let framesPerChunk: Int
@@ -886,4 +1122,28 @@ private actor FileIntegrationActivity: LifecycleActivityControlling {
 }
 private actor FileIntegrationTermination: LifecycleTerminationRequesting {
     func requestAutomaticTermination(isStillValid: @escaping @Sendable () async -> Bool) -> Bool { false }
+}
+
+@MainActor
+private final class T19IntegrationTerminationReplies: AppTerminationReplying {
+    var values: [Bool] = []
+    func replyToApplicationShouldTerminate(_ allowed: Bool) { values.append(allowed) }
+}
+@MainActor
+private final class T19IntegrationQuitPresenter: RecordingQuitPresenting {
+    var calls = 0
+    func chooseRecordingQuitAction() -> AppTerminationChoice { calls += 1; return .essentialSaveAndQuit }
+}
+@MainActor
+private final class T19IntegrationWindows: UserWindowClassifying {
+    func visibleUserWindowCount() -> Int { 1 }
+}
+
+private actor T19IntegrationAutomaticExitSpy: LifecycleTerminationRequesting {
+    private(set) var count = 0
+    func requestAutomaticTermination(isStillValid: @escaping @Sendable () async -> Bool) async -> Bool {
+        guard await isStillValid() else { return false }
+        count += 1
+        return true
+    }
 }
