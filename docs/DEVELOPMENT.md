@@ -835,3 +835,44 @@ xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
 ~~~
 
 Use a fresh `-resultBundlePath` on each run. The repair's artifacts are under `/private/tmp/stt-t19-attention-fix`; completed runs and results are recorded in [acceptance](T19_ACCEPTANCE.md). G1 remains unverified.
+
+## T20 transcript finalization verification
+
+The production app composes `SessionFinalizationWorker` after the T08 audio worker. New storage/rendering regressions are in `TranscriptFinalizationTests`; capture-to-canonical and essential-quit tests are the two `testT20` selectors in `RecordingSessionFileIntegrationTests`. These use generated PCM and an injected STT engine, with the real recorder, file repository and SQLite catalog. They do not establish lecture accuracy or G1 hardware evidence.
+
+```sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/stt-t15-validation.Uth8xp/DerivedData \
+  -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
+  CODE_SIGNING_ALLOWED=NO build test
+swift build --scratch-path /private/tmp/stt-t15-validation.Uth8xp/CLI --disable-automatic-resolution
+python3 -B -m unittest discover -s tools/t16 -v
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Release -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/stt-t15-validation.Uth8xp/DerivedData \
+  -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile CODE_SIGNING_ALLOWED=NO build
+python3 -B tools/verify_product_engine.py /private/tmp/stt-t15-validation.Uth8xp/DerivedData/Build/Products/Release/LocalLectureSTT.app
+```
+
+Use a new result-bundle name for each run. T20 artifacts are under `/private/tmp/stt-t20-work`. `CandidateFull.xcresult` records the candidate source full suite; `CompatibilityFull.xcresult` repeats it after the explicit-initializer CI compatibility repair. `RepeatedFinal.xcresult` uses 20 iterations for each of:
+
+- `LocalLectureSTTTests/TranscriptFinalizationTests/testTerminalDerivedFailureIsRetryableAndBlocksAutoExitButAllowsEssentialQuit`
+- `LocalLectureSTTTests/TranscriptFinalizationTests/testConcurrentEditIsRejectedAndExternalReplacementAcrossAwaitIsPreserved`
+- `LocalLectureSTTIntegrationTests/RecordingSessionFileIntegrationTests/testT20ExplicitQuitCancelsTranscriptWaitWithoutDrainingSpeech`
+
+For the repetition command, append those `-only-testing:` arguments and `-test-iterations 20` to the Debug test command. The startup recovery matrix recreates the repository and recovery coordinator after failures at five publication boundaries; the write-fault matrix covers every `TranscriptWritePoint`. Assertions check preserved recovery/journal/canonical bytes, read-back content, outcome, ordered checkpoints, scope release and retry results.
+
+Manual/Pending: record a short real lecture offline, stop and inspect the three transcript files; close/reopen the app after moving between rooms; confirm a derived-write failure is visible and explicit quit leaves the session recoverable. Exercise the text-edit API through the future T23 UI when that task is implemented. G1's physical microphone/TCC, signed Sandbox, lid/process-kill/power-loss and long-recording checks remain unverified. Recovery audio is retained; T20 supplies the verifier for the existing explicit T08 cleanup API but does not invoke deletion automatically.
+
+T20 review repair artifacts are in `/private/tmp/stt-t20-repair`. The same Debug command above uses `-resultBundlePath /private/tmp/stt-t20-repair/Full.xcresult`; the focused run uses `Focused2.xcresult` and these selectors:
+
+```sh
+-only-testing:LocalLectureSTTTests/TranscriptFinalizationTests \
+-only-testing:LocalLectureSTTTests/SpeechSegmentationTests \
+-only-testing:LocalLectureSTTIntegrationTests/RecordingSessionFileIntegrationTests/testT20NormalStopCompletesCanonicalDerivedAndCatalogAfterSpeech \
+-only-testing:LocalLectureSTTIntegrationTests/RecordingSessionFileIntegrationTests/testT20ExplicitQuitCancelsTranscriptWaitWithoutDrainingSpeech
+```
+
+The three `testReviewT20*` selectors reproduced the independent findings before repair (`Red.xcresult`). The repaired focused suite passed 54 tests. Timing regressions go through real T18 reconciliation, 21-second synthetic media, journal compaction, TXT/MD and reopening. Read-only tests use filesystem permissions, check file identities as well as bytes, and cover missing/stale exports and permission-restored recovery. [Acceptance](T20_ACCEPTANCE.md#same-task-review-repair-overlap-timing-and-read-only-completion) records the exact test names. These filesystem checks do not replace signed Sandbox or physical G1 verification.

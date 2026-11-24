@@ -423,17 +423,19 @@ actor AppLifecycleCoordinator {
         } ?? false) ||
             recordingValue.speech.storageWarning != nil
         let saveEvidence = await recording.essentialSaveEvidence()
+        let transcriptAttention = finalizationValues.contains { $0.result?.transcriptFailure != nil } ||
+            recoveryValue.report?.items.contains { $0.code == .transcriptFinalizationFailed } == true
         let safetyAttention = (recordingValue.phase == .error && saveEvidence?.mayTerminate != true) || saveEvidence?.requiresUserAttention == true ||
             finalizationValues.contains { snapshot in
                 guard let result = snapshot.result else { return false }
                 // Intentional cancellation is safe only after successful resource
                 // cleanup. Catalog/diagnostic warnings remain best effort.
-                return (result.failure != nil && result.failure != .cancelled) ||
+                return (result.failure != nil && result.failure != .cancelled && !result.permitsEssentialQuitAfterTranscriptFailure) ||
                     result.warnings.contains { $0.hasPrefix("cleanup.") || $0.hasPrefix("mediaCleanup.") }
             } ||
             recoveryValue.report?.items.contains(where: { issue in
                 switch issue.code {
-                case .audioReadyAwaitingRemainingFinalization, .audioRevalidated, .interruptedRecordingRecovered,
+                case .sessionReady, .transcriptFinalizationFailed, .audioReadyAwaitingRemainingFinalization, .audioRevalidated, .interruptedRecordingRecovered,
                      .currentProcessActive, .catalogRefreshFailed: return false
                 default: return true
                 }
@@ -449,7 +451,7 @@ actor AppLifecycleCoordinator {
         snapshot = AppLifecycleSnapshot(generation: snapshot.generation &+ 1,
                                         visibleUserWindowCount: snapshot.visibleUserWindowCount,
                                         hasRelevantWork: recordingWork || finalizationWork || recoveryWork || speechWork || ownedWork,
-                                        requiresUserAttention: safetyAttention || speechAttention,
+                                        requiresUserAttention: safetyAttention || speechAttention || transcriptAttention,
                                         blocksExplicitTermination: safetyAttention,
                                         autoExitReserved: snapshot.autoExitReserved)
         let readiness: AppTerminationDecision

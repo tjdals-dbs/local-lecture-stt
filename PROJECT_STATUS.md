@@ -1,24 +1,24 @@
 # Local Lecture STT Project Status
 
 - Status document version: 1.0
-- Last updated: 2026-11-24
+- Last updated: 2026-11-25
 - Specification baseline: `MVP_SPEC.md` 1.0, confirmed
 - Implementation plan: `IMPLEMENTATION_PLAN.md` 1.4
 
 ## Current position
 
-- Current milestone: M3 real-time STT. M2 model and engine tasks are complete.
-- Next Task: T20 canonical transcript and derived text/Markdown files.
-- Latest completed Task: T19 real-time STT coordinator and backpressure, independently reviewed and squash-integrated into dev.
+- Current milestone: M4 product UI. M3 real-time STT and canonical transcript tasks are complete.
+- Next Task: T21 session list, new recording and model management UI.
+- Latest completed Task: T20 canonical transcript and derived text/Markdown files, independently reviewed and squash-integrated into dev.
 - Latest passed gate: G2 engine and model selection, approved on 2026-11-15 at dev `f6ba18d`
-- The recording app loads the pinned whisper.cpp engine and verified non-quantized large-v3 before capture. Live microphone audio now feeds bounded STT inference and read-only provisional/final transcript UI; final segments are synced to the session journal before publication. STT failures preserve recording and inhibit automatic exit while safe explicit quit remains available. Canonical transcript/export and model management UI remain T20 and T21. [Architecture](docs/ARCHITECTURE.md#t19-live-speech-coordination-and-backpressure) · [Engine and model decision](docs/T16_ENGINE_MODEL_DECISION.md)
+- The recording app uses pinned whisper.cpp with verified non-quantized large-v3. After capture and speech settlement, it compacts the journal to canonical JSON, generates TXT/Markdown, and completes metadata/catalog publication. T18 segment order and times are preserved; healthy completed sessions verify on read-only roots, while missing/stale exports require repair. Text-only editing is available through the repository API; model management UI is T21 and playback/editing UI is T23. [Architecture](docs/ARCHITECTURE.md#t20-canonical-transcript-and-derived-files) · [Engine and model decision](docs/T16_ENGINE_MODEL_DECISION.md)
 
 ## Repository state at this handoff
 
 - Remote: private `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`
 - GitHub default branch: `main`
-- Approved T19 source on `task/t19-live-stt-backpressure`: `ab0e902baa70b4243b57fd2c1d2ad6354700d950`. The user accepted the independent review and authorized Phase 2 integration on 2026-11-24 with G1 unverified.
-- `dev` integration base: `63d7dc5806051845242ca53559525ab040244154` (T18). The delivery handoff identifies the resulting T19 integration commit, its local validation, its exact-commit CI and branch cleanup.
+- Approved T20 source on `task/t20-canonical-transcript`: `51a452d4bf323d42f6c6c758ae949cfe0436d99c`. The user accepted the independent review and authorized Phase 2 integration on 2026-11-25 with G1 unverified.
+- `dev` integration base: `672688b8ca4cbb659f8f189419350398048bd937` (T19). The delivery handoff identifies the resulting T20 integration commit, its local validation, its exact-commit CI and branch cleanup.
 - `main` and `origin/main`: preserved at the verified T01 baseline `38e126f92ac823d29306ea8c1f7703f7060a5818`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -55,11 +55,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T17 product engine and session metadata | Complete on dev. The Release app ships whisper.cpp and the recording path persists the selected model and settings. | Candidate review verified the Release bundle, an installed large-v3 recording, recovery and older metadata. [Validation procedure](docs/DEVELOPMENT.md#t17-product-engine-verification) |
 | T18 VAD, utterance segmentation and transcript reconciliation | Complete on dev through independently reviewed, separately authorized squash integration. | Candidate review passed 469 XCTest, four Python tests and 526 additional text/timing combinations. VAD fixtures and recovery-audio decoding verify segmentation and recording independence. [Implementation and checks](docs/DEVELOPMENT.md#t18-segmentation-and-overlap-checks) |
 | T19 real-time STT coordinator and backpressure | Complete on dev through independently reviewed, separately authorized squash integration. | Approved source/re-review passed 497 tests and three independent persistence/termination probes. Bounded inference, durable journal publication, recording isolation and safe quit/automatic-exit policy are verified. [Acceptance](docs/T19_ACCEPTANCE.md) |
+| T20 canonical transcript and derived text/Markdown files | Complete on dev through independently reviewed, separately authorized squash integration. | Approved source and independent re-review passed 519 tests, two additional permission-acquisition probes and exact-source CI. Strict journal replay, preserved overlap times/text edits, read-only verification and repair-required recovery are verified. [Acceptance](docs/T20_ACCEPTANCE.md) |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T19. T20 is next. G1 remains **Unverified**. G2 passed on 2026-11-15.
+Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T20. T21 is next. G1 remains **Unverified**. G2 passed on 2026-11-15.
 
 ## Gate status
 
@@ -73,7 +74,7 @@ Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T19. T20 is nex
 
 ## Confirmed workflow decisions
 
-- The coordinator manages specifications, plans, prompts and gate decisions. For T17 through T19 the user assigned implementation to the coordinator session and separately authorized dev integration after review.
+- The coordinator manages specifications, plans, prompts and gate decisions. For T17 through T20 the user assigned implementation to the coordinator session and separately authorized dev integration after review.
 - Each Task uses a fresh implementation session and stays in that session through implementation, review fixes, and any later authorized integration, or until safely blocked.
 - The initial implementation prompt ends after task-branch commit/push/CI with `review ready`; it does not authorize official completion, status/checklist updates, `dev` integration, or branch deletion.
 - This coordinator independently verifies the acceptance matrix, diff, tests, and CI. A completion message or green CI by itself is not sufficient.
@@ -174,7 +175,14 @@ Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T19. T20 is nex
 - Approved source `ab0e902` connects capture to 16 kHz mono STT, bounded partial/final scheduling, session-pinned language/model, journal persistence and live transcript UI. The two lifecycle repairs preserve essential-save quit and inhibit automatic exit on speech/storage errors while allowing normal cancellation and delay. [Architecture](docs/ARCHITECTURE.md#t19-live-speech-coordination-and-backpressure)
 - Independent review on 2026-11-24 passed 497 tests (480 unit, 17 integration; zero failures/skips), plus three disposable probes for journal/metadata writes during quit and STT-failure automatic exit. [Approved source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/45385706671) · [Acceptance](docs/T19_ACCEPTANCE.md)
 - Phase 2 preserves the reviewed executable/test inputs and validates the committed dev SHA with the full unsigned arm64 Debug build/test, Release product-engine inspection, SwiftPM benchmark build and Python tests. The final handoff records the integration SHA, exact-commit CI and branch cleanup; candidate results do not replace integration validation. [Commands](docs/DEVELOPMENT.md#t19-live-stt-verification)
-- G1 remains unverified. Canonical transcript assembly, transcript completion metadata and derived TXT/MD files remain T20; T19 retains the journal and recoverable audio for that work. T20 implementation has not started.
+- At the T19 handoff, canonical transcript assembly, completion metadata and derived TXT/MD files were deferred to T20; T19 retained the journal and recoverable audio. The T20 handoff below supersedes that pending-work snapshot. G1 remains unverified.
+
+## T20 handoff
+
+- Approved source `51a452d` implements journal compaction, canonical text-only edits, deterministic TXT/Markdown, ordered checkpoints and recovery/lifecycle integration. Overlap windows retain every T18 segment field; completed sessions require no file writes when validation succeeds. Missing/stale exports report required repair on read-only roots and resume after permission returns. [Architecture](docs/ARCHITECTURE.md#t20-canonical-transcript-and-derived-files)
+- Independent re-review on 2026-11-25 passed 519 XCTest (500 unit + 19 integration, zero failures/skips), plus two temporary probes for cancellation/replacement during write-scope acquisition, concurrent admission and successful retry. [Approved source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/45429543015) · [Acceptance](docs/T20_ACCEPTANCE.md#phase-2-dev-integration)
+- Phase 2 preserves the reviewed executable/test inputs. Committed-dev validation runs the full unsigned arm64 Debug build/test, Release product-engine inspection, SwiftPM benchmark build and four Python tests. The integration delivery records its actual SHA, local results, exact-commit CI and branch cleanup. [Commands](docs/DEVELOPMENT.md#t20-transcript-finalization-verification)
+- G1 remains unverified; physical microphone/TCC, signed Sandbox, lid/process-kill/power-loss and long-recording checks are still pending. Recovery audio and journal remain retained. T21 is next and has not started; no main promotion or release tag is authorized.
 
 ## Status update rules
 

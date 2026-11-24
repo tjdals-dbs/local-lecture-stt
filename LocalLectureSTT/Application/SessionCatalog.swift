@@ -196,6 +196,8 @@ enum FinalAudioIntegrity: String, Codable, Sendable, Equatable {
 enum SessionRecoveryCode: String, Codable, Sendable, Equatable, CaseIterable {
     case queued
     case audioReadyAwaitingRemainingFinalization
+    case sessionReady
+    case transcriptFinalizationFailed
     case audioRevalidated
     case interruptedRecordingRecovered
     case preparationAbandoned

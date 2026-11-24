@@ -89,6 +89,8 @@ final class RecordingSessionViewModel: ObservableObject {
         case .publishing: "오디오 파일 확정 중"
         case .projecting: "오디오 정보 저장 중"
         case .cleaning: "검증된 복구 오디오 정리 중"
+        case .compactingTranscript: "기록과 문서 저장 중"
+        case .sessionReady: "녹음과 기록 저장 완료"
         case .cancelling: "오디오 작업 정리 중"
         case .audioReadyAwaitingRemainingFinalization: "오디오 파일 준비 완료 · 나머지 마무리 대기"
         case .audioRevalidated: "오디오 파일 재검증 완료"

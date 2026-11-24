@@ -816,6 +816,19 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         speechSettlements[location.sessionID] = nil
     }
 
+    func settleSpeechForTranscript(at location: SessionLocation, control: AudioFinalizationControl) async throws {
+        // Do not park the finalization queue on a full STT backlog during quit:
+        // lifecycle cancels this optional wait before cancelling/joining STT.
+        while let job = speechJobs[location.sessionID] {
+            try control.check()
+            if await job.currentSnapshot().cleanupComplete { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try control.check()
+        await waitForSpeech(at: location)
+        try control.check()
+    }
+
     private func persistSettledSpeech(_ job: LiveSTTCoordinator, at location: SessionLocation) async {
         await job.waitUntilSettled()
         let value = await job.currentSnapshot()

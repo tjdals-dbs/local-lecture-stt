@@ -276,7 +276,7 @@ private final class FinalizationRun {
         try await reach(.opened)
         guard [.securing, .finalizing, .interrupted, .completed].contains(metadata.status),
               [.completed, .interrupted].contains(metadata.captureOutcome) else { throw AudioFinalizationCode.captureNotSettled }
-        if metadata.status == .completed && !checkpoint.completedSteps.contains(.metadataCompleted) {
+        if metadata.status == .completed && !checkpoint.completedSteps.contains(.derivedFilesGenerated) {
             throw AudioFinalizationCode.checkpointInconsistent
         }
         guard try files.identity(FinalizationFileAccess.source) != nil else { throw AudioFinalizationCode.sourceMissing }

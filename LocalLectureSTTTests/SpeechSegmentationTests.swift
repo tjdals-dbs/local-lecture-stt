@@ -570,3 +570,70 @@ final class SpeechSegmentationTests: XCTestCase {
 private extension Array {
     var only: Element? { count == 1 ? first : nil }
 }
+
+
+extension SpeechSegmentationTests {
+    func testReviewT20AcceptsExistingT18BoundaryShiftOutput() async throws {
+        let windows = try splitWindows(), session = try STTTestFixture.session()
+        var reconciler = TranscriptReconciler(session: session)
+        let first = try reconciler.reconcile(result(windows[0], [
+            (17_000, 19_450, "오늘은 신경망"), (19_450, 20_000, "Swift API.")
+        ], session: session), for: windows[0], language: ko)
+        let second = try reconciler.reconcile(result(windows[1], [
+            (19_010, 19_440, "신경 망"), (19_440, 20_500, "swift api, 다시"),
+            (20_500, 21_000, "정리합니다.")
+        ], session: session), for: windows[1], language: ko)
+        XCTAssertEqual((first + second).map(\.text), ["오늘은 신경망", "Swift API.", "다시", "정리합니다."])
+        XCTAssertEqual((first + second).map(\.startMs.rawValue), [17_000, 19_450, 19_440, 20_500])
+        var replay = TranscriptJournalReplay(sessionID: session.sessionID)
+        for value in first + second {
+            try replay.append(JSONEncoder().encode(TranscriptJournalRecord(sessionId: session.sessionID, segment: value)))
+        }
+        XCTAssertNoThrow(try TranscriptCanonical.compact(sessionID: session.sessionID,
+            journal: replay.segments, existing: nil, duration: .init(21_000)))
+        try await assertT20FileRoundTrip(first + second)
+    }
+
+    func testReviewT20AcceptsWeakOverlapPreservedByT18() async throws {
+        let windows = try splitWindows(), session = try STTTestFixture.session()
+        var reconciler = TranscriptReconciler(session: session)
+        let first = try reconciler.reconcile(result(windows[0], [
+            (19_150, 19_170, "다시"), (19_170, 19_820, ","), (19_820, 19_850, "확인합니다")
+        ], session: session), for: windows[0], language: ko)
+        let second = try reconciler.reconcile(result(windows[1], [
+            (19_150, 19_850, "다시 확인합니다"), (20_110, 20_400, "다시 확인합니다")
+        ], session: session), for: windows[1], language: ko)
+        XCTAssertEqual(second.map(\.text), ["다시 확인합니다", "다시 확인합니다"])
+        XCTAssertEqual(second.map(\.startMs.rawValue), [19_150, 20_110])
+        XCTAssertNoThrow(try TranscriptCanonical.compact(sessionID: session.sessionID,
+            journal: first + second, existing: nil, duration: .init(21_000)))
+        try await assertT20FileRoundTrip(first + second)
+    }
+
+    private func assertT20FileRoundTrip(_ segments: [TranscriptSegment]) async throws {
+        let f = try await FinalizationFixture.make(seconds: 21); defer { f.clean() }
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: f.base.appendingPathComponent("catalog"))
+        let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: f.roots), store: store)
+        let repository = FileTranscriptRepository(roots: f.roots, catalog: catalog)
+        for segment in segments {
+            try await f.repository.appendTranscriptJournal(.init(sessionId: f.location.sessionID, segment: segment), at: f.location)
+        }
+        let journalBefore = try Data(contentsOf: f.url(SessionArtifact.transcriptJournal.relativePath))
+        let worker = SessionFinalizationWorker(audio: f.worker(), transcripts: repository)
+        let result = await worker.finalize(.init(location: f.location), control: .init(), progress: { _ in })
+        XCTAssertNil(result.failure)
+        XCTAssertEqual(result.phase, .sessionReady)
+        let document = try await f.repository.readTranscript(at: f.location)
+        XCTAssertEqual(document.segments, segments, "IDs, sequence, text and immutable times must survive unchanged")
+        let metadata = try await f.repository.readMetadata(at: f.location)
+        let rendered = try TranscriptRenderer.render(document, metadata: metadata)
+        XCTAssertEqual(try Data(contentsOf: f.url("transcript.txt")), rendered.text)
+        XCTAssertEqual(try Data(contentsOf: f.url("transcript.md")), rendered.markdown)
+        let reopened = await worker.finalize(.init(location: f.location, operation: .verifyExistingCanonical),
+                                            control: .init(), progress: { _ in })
+        XCTAssertEqual(reopened.phase, .sessionReady)
+        let persisted = try await f.repository.readTranscript(at: f.location)
+        XCTAssertEqual(persisted.segments, segments)
+        XCTAssertEqual(try Data(contentsOf: f.url(SessionArtifact.transcriptJournal.relativePath)), journalBefore)
+    }
+}

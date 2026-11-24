@@ -49,15 +49,21 @@ struct RecordingSessionView: View {
                     if value.result == nil {
                         ProgressView(RecordingSessionViewModel.finalizationText(value.phase))
                     } else {
-                        Text(RecordingSessionViewModel.finalizationText(value.phase))
+                        Text(value.result?.permitsEssentialQuitAfterTranscriptFailure == true
+                             ? "기록 마무리 실패 · 오디오 보존" : RecordingSessionViewModel.finalizationText(value.phase))
                     }
                     if let result = value.result {
                         if let failure = result.failure { Text("오류: \(failure.rawValue)").monospaced() }
+                        if let failure = result.transcriptFailure {
+                            Text(failure.code == .repairRequired ? "기록 파일을 복구하려면 저장 폴더의 쓰기 권한이 필요합니다." :
+                                 "기록 오류: \(failure.code.rawValue)" + (failure.line.map { " · journal \($0)번째 줄" } ?? ""))
+                                .font(.caption)
+                        }
                         ForEach(Array(result.warnings.enumerated()), id: \.offset) { _, warning in
                             Text("추가 경고: \(warning)").font(.caption)
                         }
                         if result.canRetry {
-                            Button("오디오 마무리 재시도") { Task { await viewModel.retryFinalization(value) } }
+                            Button("마무리 재시도") { Task { await viewModel.retryFinalization(value) } }
                         }
                     }
                 }

@@ -5,6 +5,14 @@ import XCTest
 @testable import LocalLectureSTT
 
 final class RecordingSessionFileIntegrationTests: XCTestCase {
+    @MainActor func testT20NormalStopCompletesCanonicalDerivedAndCatalogAfterSpeech() async throws {
+        try await runT19Integration(failSpeech: false, completeTranscript: true)
+    }
+
+    @MainActor func testT20ExplicitQuitCancelsTranscriptWaitWithoutDrainingSpeech() async throws {
+        try await runT19Integration(failSpeech: false, cancelAtEnd: true, quitUsingDelegate: true, completeTranscript: true)
+    }
+
     @MainActor func testT19LiveSpeechReachesUIAndJournalWhileAudioIsPreserved() async throws {
         try await runT19Integration(failSpeech: false)
     }
@@ -31,7 +39,7 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
 
     @MainActor private func runT19Integration(failSpeech: Bool, cancelAtEnd: Bool = false,
                                              quitUsingDelegate: Bool = false, failJournal: Bool = false,
-                                             verifyExitPolicy: Bool = false) async throws {
+                                             verifyExitPolicy: Bool = false, completeTranscript: Bool = false) async throws {
         let fixture = try RecordingFileIntegrationFixture()
         defer { fixture.cleanup() }
         let roots = StorageRootManager(applicationSupportDirectory: fixture.applicationSupport, bookmarkCodec: fixture.bookmarks)
@@ -68,7 +76,12 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
             recorders: ClosureAudioRecorderFactory { AVFoundationAudioRecorder(roots: roots) },
             repository: repository, catalog: catalog, environment: .init(appVersion: "T19", osVersion: "test"),
             makeSpeechModel: { speech }, makeSpeechConverter: { SpeechPCMConverter() }, activity: activity, authority: authority)
-        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: roots, catalog: catalog), authority: authority)
+        let worker: any AudioFinalizationWorking = completeTranscript
+            ? SessionFinalizationWorker(audio: FileAudioFinalizer(roots: roots, catalog: catalog),
+                transcripts: FileTranscriptRepository(roots: roots, catalog: catalog),
+                settleSpeech: { location, control in try await recording.settleSpeechForTranscript(at: location, control: control) })
+            : FileAudioFinalizer(roots: roots, catalog: catalog)
+        let finalization = AudioFinalizationCoordinator(worker: worker, authority: authority)
         let coordinator = RecordingFinalizationCoordinator(recording: recording, finalization: finalization,
             activity: activity, authority: authority)
         let viewModel = RecordingSessionViewModel(coordinator: coordinator)
@@ -128,7 +141,12 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
                 try FileManager.default.createDirectory(at: journal, withIntermediateDirectories: false)
             }
             if cancelAtEnd {
-                _ = await finalization.waitForResult(at: secured.location)
+                if completeTranscript {
+                    let updates = await finalization.snapshots()
+                    for await values in updates {
+                        if values.contains(where: { $0.location == secured.location && $0.phase == .compactingTranscript }) { break }
+                    }
+                } else { _ = await finalization.waitForResult(at: secured.location) }
                 if quitUsingDelegate {
                     // Do not advance the final request's logical clock. Cmd-Q
                     // must cancel it through the real delegate/lifecycle path,
@@ -190,6 +208,30 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
         XCTAssertGreaterThan(decoded.decodedBytes, 0)
         XCTAssertFalse(authority.state().active)
         XCTAssertTrue(last.canReset)
+        if completeTranscript {
+            let completion = await finalization.currentSnapshot(at: secured.location)
+            let metadata = try await repository.readMetadata(at: secured.location)
+            if cancelAtEnd {
+                XCTAssertEqual(completion?.result?.failure, .cancelled)
+                XCTAssertEqual(metadata.status, .finalizing)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root
+                    .appendingPathComponent(secured.location.folderName.rawValue).appendingPathComponent("transcript.json").path))
+            } else {
+                XCTAssertEqual(completion?.phase, .sessionReady)
+                XCTAssertNil(completion?.result?.failure)
+                XCTAssertEqual(metadata.status, .completed)
+                let document = try await repository.readTranscript(at: secured.location)
+                XCTAssertEqual(document.segments, last.speech.finals)
+                XCTAssertEqual(metadata.transcript.segmentCount.rawValue, Int64(document.segments.count))
+                XCTAssertEqual(metadata.detectedLanguage?.rawValue, "en")
+                let rendered = try TranscriptRenderer.render(document, metadata: metadata)
+                let directory = fixture.root.appendingPathComponent(secured.location.folderName.rawValue)
+                XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("transcript.md")), rendered.markdown)
+                XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("transcript.txt")), rendered.text)
+                let items = try await catalog.orderedItems()
+                XCTAssertEqual(items.first?.metadataStatus, .completed)
+            }
+        }
         if verifyExitPolicy {
             let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: repository,
                 finalization: finalization, catalog: catalog, activity: activity, authority: authority)

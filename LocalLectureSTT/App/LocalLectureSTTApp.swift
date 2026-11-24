@@ -22,15 +22,6 @@ struct LocalLectureSTTApp: App {
             driver: AVAudioEngineMicrophoneDriver(),
             monitor: InputSignalMonitor()
         )
-        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: roots, catalog: catalog), authority: authority)
-        let recovery = SessionRecoveryCoordinator(
-            scanner: SessionFileScanner(roots: roots),
-            persistence: repository,
-            finalization: finalization,
-            catalog: catalog,
-            activity: activity, authority: authority
-        )
-        let coordinator = CatalogStartupCoordinator(catalog: catalog, recovery: recovery)
         let recordingCoordinator = RecordingSessionCoordinator(
             roots: roots,
             permission: permission,
@@ -46,6 +37,20 @@ struct LocalLectureSTTApp: App {
             makeSpeechConverter: { SpeechPCMConverter() },
             activity: activity, authority: authority
         )
+        let transcripts = FileTranscriptRepository(roots: roots, catalog: catalog)
+        let finalization = AudioFinalizationCoordinator(worker: SessionFinalizationWorker(
+            audio: FileAudioFinalizer(roots: roots, catalog: catalog), transcripts: transcripts,
+            settleSpeech: { location, control in
+                try await recordingCoordinator.settleSpeechForTranscript(at: location, control: control)
+            }), authority: authority)
+        let recovery = SessionRecoveryCoordinator(
+            scanner: SessionFileScanner(roots: roots),
+            persistence: repository,
+            finalization: finalization,
+            catalog: catalog,
+            activity: activity, authority: authority
+        )
+        let coordinator = CatalogStartupCoordinator(catalog: catalog, recovery: recovery)
         let lifetime = RecordingFinalizationCoordinator(recording: recordingCoordinator, finalization: finalization,
                                                         startupRecovery: recovery, activity: activity, authority: authority)
         _catalogStartup = StateObject(wrappedValue: coordinator)

@@ -141,6 +141,35 @@ final class FinalizationFileAccess: @unchecked Sendable {
     }
 
     func writeJSON<T: Encodable>(_ value: T, _ path: String) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try writeData(encoder.encode(value), path)
+    }
+
+    /// Descriptor-bound reads also cover JSONL. The callback can check explicit
+    /// cancellation between bounded reads, without imposing a session-length cap.
+    func readChunks(_ path: String, consume: (Data) throws -> Void) throws {
+        guard let before = try identity(path) else { throw AudioFinalizationCode.sourceMissing }
+        let (parentFD, name) = try parent(path)
+        let fd = openat(parentFD, name, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { throw AudioFinalizationCode.storageAccess }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var opened = stat()
+        guard fstat(fd, &opened) == 0, evidence(path, opened, sha256: "") == before else {
+            throw AudioFinalizationCode.identityChanged
+        }
+        while let chunk = try handle.read(upToCount: Self.bufferSize), !chunk.isEmpty { try consume(chunk) }
+        try verify(before)
+    }
+
+    func readData(_ path: String, control: AudioFinalizationControl) throws -> Data {
+        var result = Data()
+        try readChunks(path) { chunk in try control.check(); result.append(chunk) }
+        return result
+    }
+
+    func writeData(_ data: Data, _ path: String) throws {
         try validateDirectories()
         let before = try identity(path)
         let (fd, name) = try parent(path)
@@ -151,7 +180,7 @@ final class FinalizationFileAccess: @unchecked Sendable {
         defer { if !renamed { unlinkat(fd, temp, 0) } }
         let handle = FileHandle(fileDescriptor: fileFD, closeOnDealloc: true)
         do {
-            try handle.write(contentsOf: JSONEncoder().encode(value))
+            try handle.write(contentsOf: data)
             try handle.synchronize()
             try handle.close()
             guard try identity(path) == before else { throw AudioFinalizationCode.identityChanged }

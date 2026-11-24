@@ -45,12 +45,13 @@ enum AudioFinalizationCode: String, Codable, Sendable, Error, CaseIterable {
     case captureNotSettled, sourceMissing, sourceUnreadable, checkpointInconsistent
     case canonicalConflict, invalidContainer, invalidTracks, invalidFormat, invalidDuration
     case discontinuousTimeline, exportCreate, exportStart, exportRead, exportWrite, exportFinish
-    case decode, publication, flush, persistence, diskFull, cancelled, completionEvidence
+    case decode, publication, flush, persistence, diskFull, cancelled, completionEvidence, transcript
 }
 
 enum AudioFinalizationPhase: String, Codable, Sendable {
     case queued, securing, exporting, verifying, publishing, projecting, cleaning, cancelling
     case audioReadyAwaitingRemainingFinalization, audioRevalidated, recoveryAudioRemoved, failed
+    case compactingTranscript, sessionReady
 }
 
 struct AudioEndpointReport: Codable, Sendable, Equatable {
@@ -107,8 +108,13 @@ struct AudioFinalizationResult: Codable, Sendable, Equatable {
     /// Presence is not a claim that validation or directory synchronization succeeded.
     let presentPaths: [String]
     let recoveryWasRemoved: Bool
+    var transcriptFailure: TranscriptFailure? = nil
 
     var canRetry: Bool { failure != nil }
+    var permitsEssentialQuitAfterTranscriptFailure: Bool {
+        transcriptFailure != nil && final != nil && completedSteps.contains(.finalM4AVerified) &&
+            failure.map { [.transcript, .persistence, .flush, .diskFull].contains($0) } == true
+    }
 }
 
 struct AudioFinalizationSnapshot: Codable, Sendable, Equatable {

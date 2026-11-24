@@ -359,7 +359,10 @@ actor SessionRecoveryCoordinator {
 
     private func recoverTerminal(_ candidate: SessionRecoveryCandidate, metadata: SessionMetadataDocument,
                                  pass: UInt64) async -> [SessionRecoveryIssue] {
-        guard candidate.checkpoint?.completedSteps.contains(.metadataCompleted) == true else {
+        // Metadata publication and its checkpoint are separate atomic writes.
+        // T20 can recover a completed metadata document at prefix 5 after a
+        // crash in between; the worker must still revalidate audio/transcript.
+        guard candidate.checkpoint?.completedSteps.contains(.derivedFilesGenerated) == true else {
             return [issue(for: candidate, captureOutcome: metadata.captureOutcome,
                           code: .terminalInconsistent, retryable: false)]
         }
@@ -390,6 +393,9 @@ actor SessionRecoveryCoordinator {
             return [issueFromFinalization(candidate, metadata: metadata, result: result, startedWarning: nil)]
         }
         if result.failure == .cancelled {
+            return [issueFromFinalization(candidate, metadata: metadata, result: result, startedWarning: nil)]
+        }
+        if result.transcriptFailure != nil {
             return [issueFromFinalization(candidate, metadata: metadata, result: result, startedWarning: nil)]
         }
         return [issue(for: candidate, captureOutcome: metadata.captureOutcome,
@@ -429,16 +435,18 @@ actor SessionRecoveryCoordinator {
                                        diagnosticWarning: String? = nil) -> SessionRecoveryIssue {
         let code: SessionRecoveryCode
         if let failure = result.failure {
-            code = failure == .cancelled ? .cancelled : .finalizationFailed
+            code = result.permitsEssentialQuitAfterTranscriptFailure ? .transcriptFinalizationFailed :
+                (failure == .cancelled ? .cancelled : .finalizationFailed)
         } else {
             switch result.phase {
+            case .sessionReady: code = .sessionReady
             case .audioReadyAwaitingRemainingFinalization:
                 code = metadata.captureOutcome == .interrupted ? .interruptedRecordingRecovered : .audioReadyAwaitingRemainingFinalization
             case .audioRevalidated: code = .audioRevalidated
             default: code = .queued
             }
         }
-        let first = result.failure?.rawValue
+        let first = result.transcriptFailure.map { "transcript.\($0.code.rawValue)" } ?? result.failure?.rawValue
         return issue(for: candidate, captureOutcome: metadata.captureOutcome, code: code, retryable: result.canRetry,
                      warning: first,
                      warnings: deduplicated(([first, diagnosticWarning, startedWarning] + result.warnings).compactMap { $0 }))

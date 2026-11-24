@@ -39,6 +39,15 @@ struct RecoveryStatusPresentation: Equatable {
         let action: Action?
         switch issue.code {
         case .queued: title = "복구 작업 대기"; action = nil
+        case .sessionReady: title = "오디오와 기록 복구 완료"; action = nil
+        case .transcriptFinalizationFailed:
+            if issue.warning == "transcript.repairRequired" {
+                title = "기록 파일 복구에 저장 폴더 쓰기 권한 필요"
+                action = .reauthorize(issue.rootID)
+            } else {
+                title = "오디오 보존됨 — 기록 마무리 재시도 필요"
+                action = .retry
+            }
         case .audioReadyAwaitingRemainingFinalization: title = "정상 녹음 오디오 완료 — 나머지 마무리 대기"; action = nil
         case .audioRevalidated:
             switch issue.captureOutcome {

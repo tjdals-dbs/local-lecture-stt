@@ -992,7 +992,7 @@ fix(transcript): prevent overlap duplication (T18)
 - [x] T17 제품 엔진 고정
 - [x] T18 VAD와 reconciler
 - [x] T19 실시간 STT coordinator
-- [ ] T20 canonical 및 파생 transcript
+- [x] T20 canonical 및 파생 transcript
 - [ ] T21 세션·시작·모델 UI
 - [ ] T22 활성 녹음 UI
 - [ ] T23 재생·편집·파일 관리
