@@ -982,3 +982,24 @@ Manual/Pending (use disposable sessions; G1 remains unverified):
 4. Confirm warning layout, minimum window size, long Korean text and VoiceOver; the recording Stop control must stay visible. Close/reopen during export and request explicit Quit; cancellation should release the selected-folder scope after I/O. Real disk removal, full-volume behavior, TCC, signed Sandbox permissions and hardware/lid/long-recording tests are not established by unsigned fixtures.
 
 The retention clock/size and fault seams are test-only dependency injection. Production logging has no uploader and requires no network. [Acceptance matrix](T25_ACCEPTANCE.md) records automated results separately from these manual checks.
+
+
+## G3 model management repair verification
+
+Run the repository-backed G3 regression cases together with the existing model and UI suites:
+
+```sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/stt-t15-validation.Uth8xp/DerivedData \
+  -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+  -only-testing:LocalLectureSTTTests/ModelRepositoryTests \
+  -only-testing:LocalLectureSTTTests/SessionModelUITests \
+  -only-testing:LocalLectureSTTTests/ModelDownloadTests \
+  -only-testing:LocalLectureSTTTests/DiagnosticsTests \
+  CODE_SIGNING_ALLOWED=NO build test
+```
+
+Omit the `-only-testing` options for the full suite. Use a fresh `-resultBundlePath` on each run. [Acceptance](G3_MODEL_MANAGEMENT_REPAIR.md) records the actual results and evidence paths. The shared SwiftPM target, four Python tests and Release product-engine verifier use the existing commands above.
+
+Manual (pending): with a signed app and disposable copies of a model package, import via the general manifest-folder button and the catalog-specific weight-folder button; cancel the picker and verify no operation remains active. In a disposable installed copy only, corrupt/remove its manifest, refresh the model list, cancel the preservation sheet once, then acknowledge and confirm. Verify the original bytes remain in the model store's `.preserved-<UUID>` directory (Finder Show Hidden Files), an unaffected revision and session stay intact, and explicit reimport succeeds. A future-schema or symlink package must remain untouched. Never use a real lecture/session or the only copy of a model for destructive fixture preparation. Real filesystem capacity exhaustion, native sheets and Sandbox behavior remain manual; injected capacity and filesystem races are covered automatically. G1 remains unverified.

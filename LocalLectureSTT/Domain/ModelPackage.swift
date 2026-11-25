@@ -7,6 +7,7 @@ enum ModelRepositoryCode: String, Error, Codable, Sendable, Equatable {
     case collision, busy, staleAssessment, confirmationRequired, acknowledgmentRequired
     case cancelled, copyFailed, hashFailed, manifestWriteFailed, flushFailed, publishFailed
     case cleanupFailed, deletionFailed, incompleteRemoval, identityChanged
+    case insufficientCapacity, capacityUnknown, capacityOverflow
 }
 
 /// Values are logical identities, never pathname fragments.

@@ -178,7 +178,8 @@ struct ModelDownloadStorage: Sendable {
         try root.removeOwned(Self.name(id), expected: directory.stamp)
     }
 }
-struct ModelDownloadCapacityProvider: Sendable {
+typealias ModelDownloadCapacityProvider = ModelStorageCapacityProvider
+struct ModelStorageCapacityProvider: Sendable {
     var available: @Sendable (URL) throws -> Int64? = { url in
         var candidate = url
         while !FileManager.default.fileExists(atPath: candidate.path), candidate.path != "/" { candidate.deleteLastPathComponent() }

@@ -70,7 +70,7 @@ struct ModelManagementView: View {
                                 if download.phase != .installed && download.phase != .cancelled {
                                     downloadButton("다운로드 취소", download, .cancel)
                                 }
-                            }.disabled(models.operation != nil || models.recordingLocked || models.deletion != nil)
+                            }.disabled(models.operation != nil || models.recordingLocked || models.deletion != nil || models.recovery != nil)
                         }.frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -89,6 +89,9 @@ struct ModelManagementView: View {
                                     Button("검증") { Task { await models.validate(manifest.descriptor.key) } }
                                     Button("삭제…", role: .destructive) { Task { await models.prepareDeletion(manifest.descriptor.key) } }
                                 }.disabled(models.busy || models.recordingLocked)
+                            } else if entry.state == .corrupt {
+                                Button("원본 보존 후 재설치 준비…") { Task { await models.prepareRecovery(entry.namespace) } }
+                                    .disabled(models.busy || models.recordingLocked)
                             }
                         }.frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -97,6 +100,9 @@ struct ModelManagementView: View {
         }
         .sheet(isPresented: Binding(get: { models.deletion != nil }, set: { if !$0 { models.cancelDeletion() } })) {
             if let deletion = models.deletion { ModelDeletionView(models: models, assessment: deletion) }
+        }
+        .sheet(isPresented: Binding(get: { models.recovery != nil }, set: { if !$0 { models.cancelRecovery() } })) {
+            ModelRecoveryView(models: models)
         }
         .accessibilityIdentifier("model-management")
     }
@@ -123,6 +129,25 @@ struct ModelManagementView: View {
         case .unsupportedSchema: "지원되지 않는 모델 정보"
         case .inaccessible: "모델 파일에 접근할 수 없음"
         }
+    }
+}
+
+private struct ModelRecoveryView: View {
+    @ObservedObject var models: ModelManagementViewModel
+    @State private var acknowledged = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("손상 모델을 보존하고 재설치할까요?").font(.title2.bold())
+            Text("손상된 폴더 전체를 앱 저장소의 별도 보존 위치로 옮깁니다. 모델 파일을 삭제하거나 덮어쓰지 않습니다. 이후 원본을 가져오거나 다시 다운로드할 수 있습니다.")
+            Text("모델 정보를 읽을 수 없어 이 모델을 사용한 세션을 식별할 수 없습니다. 기존 녹음과 transcript는 그대로 유지됩니다.")
+            Toggle("참조 세션을 확인할 수 없음을 이해했습니다.", isOn: $acknowledged)
+            HStack {
+                Button("취소") { models.cancelRecovery() }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("보존 후 재설치 준비") { Task { await models.confirmRecovery(acknowledgeUnidentifiedReferences: acknowledged) } }
+                    .disabled(!acknowledged)
+            }.disabled(models.operation != nil)
+        }.padding(24).frame(width: 460).interactiveDismissDisabled(models.operation != nil)
     }
 }
 

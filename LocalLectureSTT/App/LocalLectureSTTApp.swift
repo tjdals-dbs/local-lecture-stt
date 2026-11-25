@@ -44,15 +44,14 @@ struct LocalLectureSTTApp: App {
                 return true
             })
         _diagnosticSettings = StateObject(wrappedValue: diagnosticSettings)
+        let folderImporter = ModelFolderImporter(repository: models, sources: sources, selectSource: {
+            guard let url = OpenPanelDirectorySelector().chooseDirectory() else { return nil }
+            return await sources.registerSelectedDirectory(url)
+        })
         let modelManagement = ModelManagementViewModel(repository: models, downloader: ModelDownloadService(repository: models), authority: authority,
             diagnostics: diagnostics,
             supports: { ProductionSpeechModel.supports($0) }, importFolder: { descriptor in
-                guard let url = OpenPanelDirectorySelector().chooseDirectory() else { return nil }
-                let source = await sources.registerSelectedDirectory(url)
-                do {
-                    let result = try await models.importPackage(from: source, descriptor: descriptor, origin: .suppliedLocal)
-                    await sources.unregister(source); return result
-                } catch { await sources.unregister(source); throw error }
+                try await folderImporter.importFolder(descriptor)
             })
         _modelManagement = StateObject(wrappedValue: modelManagement)
         let permission = AVFoundationMicrophonePermissionAuthorizer()

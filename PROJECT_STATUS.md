@@ -7,18 +7,18 @@
 
 ## Current position
 
-- Current milestone: M4 product UI implementation complete through T25; G3 feature-completeness review is pending.
-- Next step: G3 feature-completeness review, then T26 fault-injection and recovery integration tests. Neither is performed by T25.
+- Current milestone: M4 product UI complete through T25; G3 feature-completeness review passed with the model-management repairs integrated into dev.
+- Next step: T26 fault-injection and recovery integration tests, under separate authorization. T26 is not implemented by the G3 repair integration.
 - Latest completed Task: T25 integrated error presentation and local diagnostics, reviewed and squash-integrated into dev under the continuous-work authorization.
-- Latest passed gate: G2 engine and model selection, approved on 2026-11-15 at dev `f6ba18d`
+- Latest passed gate: G3 feature completeness, independently reviewed on 2026-11-25. G1 remains Unverified; no main promotion or release tag is authorized.
 - The recording app uses pinned whisper.cpp with verified non-quantized large-v3. After capture and speech settlement, it compacts the journal to canonical JSON, generates TXT/Markdown, and completes metadata/catalog publication. T18 segment order and times are preserved; healthy completed sessions verify on read-only roots, while missing/stale exports require repair. The single window now provides session rows, root selection, a validated model picker and model download/import/deletion management. Text-only editing is available through the repository API; active recording now has stable final/partial transcript presentation, scroll-follow controls and background progress; completed-session detail now provides playback/seek, text/title editing, derived regeneration, Finder reveal and confirmed Trash. [T23 acceptance](docs/T23_ACCEPTANCE.md). [Architecture](docs/ARCHITECTURE.md#t20-canonical-transcript-and-derived-files) · [Engine and model decision](docs/T16_ENGINE_MODEL_DECISION.md)
 
 ## Repository state at this handoff
 
 - Remote: public `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`. On 2026-11-25 the user approved retaining public visibility after the code/history/Actions audit and accepted the personal email and local-path exposure.
 - GitHub default branch: `main`
-- Approved T25 source on `task/t25-errors-local-diagnostics`: `ccff3ebfddd745c0c3b56a5086b6ebb0b95627d1`. Separate read-only review/repairs, full local checks and [exact-source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/45560893166) passed. The 2026-11-25 continuous-work authorization includes dev integration and verified cleanup; G1 remains unverified.
-- `dev` integration base: `04b7bac2f7ce39a6f27458410a51cc3a4c7cfe7c` (T24). The delivery handoff identifies the resulting T25 integration commit, committed-dev validation, exact-commit CI and branch cleanup.
+- Approved G3 repair source on `task/t21-g3-model-management-repair`: `fda22c90a77fe43d9bca5fe13f76cd5c8c30ac78`. Independent re-review, 125 focused tests and [exact-source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/45589731661) passed. The user separately authorized dev integration, integration validation/CI and branch cleanup; T26 is excluded and G1 remains unverified.
+- `dev` integration base: `5fd30d5ef9a08cb4ed08284847d1acf7ef843812` (T25). The delivery handoff identifies the resulting G3 integration commit, committed-dev validation, exact-commit CI and branch cleanup.
 - `main` and `origin/main`: preserved at the verified T01 baseline `38e126f92ac823d29306ea8c1f7703f7060a5818`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
@@ -65,7 +65,7 @@ The actual Git status and remote state must be rechecked at the start of every t
 
 ## Implementation Task status
 
-Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T25. G3 review is next, followed by T26. G1 remains **Unverified**. G2 passed on 2026-11-15.
+Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T25 and G3 feature review. T26 is next, not yet implemented. G1 remains **Unverified**. G2 passed on 2026-11-15; G3 passed on 2026-11-25.
 
 ## Gate status
 
@@ -74,10 +74,12 @@ Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T25. G3 review 
 | T01 initial runnable baseline | Passed | First `main` created from verified `dev` |
 | G1 safe recorder | Unverified; manual validation deferred by user on 2026-11-13 | `v0.1.0-alpha.1` (not authorized) |
 | G2 engine and model selection | Passed for T17. Four candidates compared on three lectures. User selected whisper.cpp + non-quantized large-v3. [Evidence](docs/T16_ENGINE_MODEL_DECISION.md) | No main promotion or release tag authorized |
-| G3 feature complete | Pending | `v0.1.0-beta.1` |
+| G3 feature complete | Passed: MVP feature/UI availability reviewed; three model-management findings repaired and independently re-reviewed. [Evidence](docs/G3_MODEL_MANAGEMENT_REPAIR.md) | No main promotion or tag authorized; G1 remains unverified |
 | G4 MVP complete | Pending | `v0.1.0` |
 
 ## Confirmed workflow decisions
+
+- G3 integration authorization (2026-11-25): after independent review of `fda22c9`, the user selected dev integration, validation and task-branch cleanup only. This supersedes the earlier repair-candidate-only restriction for integration. G1 stays unverified; main/tag promotion and T26 implementation remain excluded.
 
 - T25 authorization (2026-11-25): after T24 integration, the user requested continuing directly with T25 under the same implementation/review/repair/test/CI/integration/cleanup workflow. G1 remains unverified, main unchanged, and official completion/checklist updates wait until integration. T26 is excluded.
 
@@ -253,3 +255,11 @@ Keep this file concise. Detailed product requirements belong in `MVP_SPEC.md`, T
 - Final source passed 607 XCTest (no failures/skips), 16 tests × 10 = 160 repetitions, SwiftPM build, four Python tests and Release product-engine verification. Separate review repaired macOS path-alias handling and model-access guidance and added durable-event/idempotency and lifecycle assertions.
 - Integration preserves the approved source/test/project tree. Only status, T25 checklist and integration evidence change. Committed-dev full checks and exact-commit CI must pass before verified local/remote task cleanup and final delivery; the final delivery records actual results without amending a self-referential SHA.
 - Signed Sandbox/Finder/export dialog behavior, VoiceOver/native layout, physical devices/storage failure, lid/process-kill and long lecture checks remain manual. No product-spec deviation; G1 stays unverified and main unchanged. Next is G3 feature-completeness review, then T26 under a new authorization. No G3 pass or T26 implementation is claimed.
+
+
+## G3 feature review and repair integration
+
+- The feature review found three model-management gaps: generic manifest import, local-import capacity admission and a user recovery action for corrupt manifests. Candidate `fda22c90a77fe43d9bca5fe13f76cd5c8c30ac78` repairs all three and withholds namespace-mismatched model identities from deletion controls. Original model bytes, sibling revisions and session data are preserved. [Acceptance and review](docs/G3_MODEL_MANAGEMENT_REPAIR.md).
+- Independent re-review found no remaining blocker in the assigned scope. It reran Debug build and 125 model/UI/download/diagnostic tests (zero failures/skips), inspected the final production wiring and safety guards, and confirmed exact-source CI: 598 unit + 22 integration tests, CLI/Python and Release checks passed. Recording/live transcript, session/detail/file management, recovery/root reauthorization and diagnostic UI had already passed the G3 feature inventory; deferred features were not added.
+- The user separately authorized dev squash integration, full integration checks/CI and cleanup. Only this status, the plan gate/checklist, architecture's gate note and review evidence differ from the reviewed source. The final delivery records actual committed-dev validation, CI and cleanup without a self-referential commit amendment.
+- G3 is a feature-completeness judgment, not G1/G4 or a hardware reliability claim. Signed Sandbox/TCC, native dialogs, physical disk exhaustion, lid/process-kill and long/offline sessions remain manual or T26/T27 work. G1 stays unverified and main is unchanged. T26 awaits its own authorization.

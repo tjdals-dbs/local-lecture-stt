@@ -3,7 +3,7 @@ import Foundation
 enum UserIssueCode: String, Codable, Sendable, CaseIterable {
     case microphonePermission, microphoneRestricted, noInput, microphoneDisconnected, captureFailed
     case storageSelection, storagePermission, storageMissing, diskFull, storageWrite
-    case modelMissing, modelCorrupt, modelIncompatible, modelBusy, modelTransfer, modelOperation, modelAccess
+    case modelMissing, modelCorrupt, modelIncompatible, modelBusy, modelTransfer, modelOperation, modelAccess, modelCapacity
     case engineInitialization, engineInference, speechDelayed, transcriptStorage, transcriptRepair
     case audioFinalization, sessionMissing, sessionCorrupt, catalog, busy, conflict, invalidTitle
     case interrupted, cancelled, playback, diagnosticStorage, diagnosticExport, unknown
@@ -52,6 +52,7 @@ struct UserIssue: Sendable, Equatable, Identifiable {
         case .modelCorrupt: ("모델 파일 검증에 실패했습니다", "파일 크기 또는 체크섬이 기대한 모델과 다릅니다.", "모델 관리에서 원본 파일을 다시 가져오거나 다운로드하세요. 기존 모델은 자동 삭제하지 않습니다.")
         case .modelIncompatible: ("호환되지 않는 모델입니다", "모델 형식이나 설정이 현재 엔진에서 지원되지 않습니다.", "모델 관리에서 현재 엔진과 호환되는 모델을 선택하세요.")
         case .modelBusy: ("모델이 사용 중입니다", "녹음 또는 다른 모델 작업이 해당 모델을 사용하고 있습니다.", "작업이 끝난 뒤 모델 작업을 다시 시도하세요.")
+        case .modelCapacity: ("모델 설치 공간을 확인하지 못했습니다", "모델 저장 장치의 사용 가능한 용량을 읽을 수 없습니다.", "저장 장치 연결과 접근 권한을 확인한 뒤 다시 가져오세요. 모델 파일 복사는 시작하지 않았습니다.")
         case .modelTransfer: ("모델 다운로드에 실패했습니다", "네트워크 또는 다운로드 파일 확인에 실패했습니다.", "인터넷 연결을 확인하고 모델 관리에서 재개·재시도하거나 파일을 직접 가져오세요.")
         case .modelOperation: ("모델 작업을 완료하지 못했습니다", "모델 설치·검증·삭제 상태를 확인할 수 없습니다.", "모델 관리 목록을 새로고침하고 파일 접근 권한과 저장 공간을 확인하세요.")
         case .modelAccess: ("모델 폴더에 접근할 수 없습니다", "선택한 모델 원본 또는 앱 모델 저장소의 접근 권한이 없습니다.", "모델 관리에서 원본 폴더를 다시 선택해 가져오세요. 앱 모델 저장소의 권한과 저장 장치 연결도 확인하세요.")
@@ -160,6 +161,9 @@ enum UserIssues {
     }
     static func model(_ c: ModelRepositoryCode) -> UserIssue {
         switch c {
+        case .insufficientCapacity: .init(code: .diskFull)
+        case .capacityUnknown: .init(code: .modelCapacity)
+        case .capacityOverflow: .init(code: .modelIncompatible)
         case .integrityMismatch, .hashFailed: .init(code: .modelCorrupt)
         case .incompatible, .unsupportedSchema, .invalidDescriptor, .validationUnavailable: .init(code: .modelIncompatible)
         case .busy: .init(code: .modelBusy)

@@ -291,3 +291,22 @@ final class ModelImportLease: @unchecked Sendable {
         if release { await stop() }
     }
 }
+
+/// Shared by the app's folder picker and repository-backed UI tests. Selection is
+/// cancellable; every registered selection is unregistered on success or failure.
+@MainActor
+struct ModelFolderImporter {
+    let repository: any ModelRepository
+    let sources: ModelImportSources
+    let selectSource: @MainActor () async -> ModelImportSourceID?
+    func importFolder(_ descriptor: ModelPackageDescriptor?) async throws -> ModelImportResult? {
+        try Task.checkCancellation()
+        guard let source = await selectSource() else { return nil }
+        do {
+            try Task.checkCancellation()
+            let result = try await repository.importPackage(from: source, descriptor: descriptor, origin: .suppliedLocal)
+            await sources.unregister(source)
+            return result
+        } catch { await sources.unregister(source); throw error }
+    }
+}

@@ -15,6 +15,7 @@ final class ModelManagementViewModel: ObservableObject, LifecycleAuxiliaryWorkin
     @Published private(set) var downloads: [ModelDownloadSnapshot] = [] { didSet { publishWork() } }
     @Published private(set) var pendingWarnings: [String] = [] { didSet { publishWork() } }
     @Published private(set) var deletion: ModelDeletionAssessment? { didSet { publishWork() } }
+    @Published private(set) var recovery: ModelRecoveryAssessment? { didSet { publishWork() } }
     @Published var recordingLocked = false
     private let repository: any ModelRepository
     private let downloader: any ModelDownloading
@@ -51,13 +52,14 @@ final class ModelManagementViewModel: ObservableObject, LifecycleAuxiliaryWorkin
     }
     var selectedDescriptor: ModelPackageDescriptor? { choices.first { $0.key == selectedKey } }
     var transferActive: Bool { downloads.contains { $0.phase == .transferring || $0.phase == .installing } }
-    var busy: Bool { quiescing || operation != nil || transferActive || deletion != nil }
+    var busy: Bool { quiescing || operation != nil || transferActive || deletion != nil || recovery != nil }
     var readyToRecord: Bool { loaded && inventoryIsCurrent && !busy && !recordingLocked && selectedDescriptor != nil }
     var blockingReason: String? {
         if recordingLocked { return "녹음 작업이 끝나면 모델을 변경할 수 있습니다." }
         if let operation { return operation }
         if transferActive { return "모델 다운로드와 검증이 끝날 때까지 기다려 주세요." }
         if deletion != nil { return "모델 삭제 확인을 마쳐 주세요." }
+        if recovery != nil { return "손상 모델 보존 확인을 마쳐 주세요." }
         if !loaded { return "설치된 모델을 확인하는 중…" }
         if !inventoryIsCurrent { return "모델 상태를 확인하지 못했습니다. 모델 관리에서 다시 확인하세요." }
         if selectedDescriptor == nil { return "사용 가능한 모델이 없습니다. 모델 관리에서 다운로드하거나 가져오세요." }
@@ -205,6 +207,35 @@ final class ModelManagementViewModel: ObservableObject, LifecycleAuxiliaryWorkin
         catch { needsAttention = !quiescing; message = reportError(error) }
     }
     func cancelDeletion() { guard operation == nil else { return }; deletion = nil }
+    func prepareRecovery(_ namespace: String) async {
+        guard !busy, !recordingLocked else { return }
+        needsAttention = false
+        operation = "손상 모델을 확인하는 중…"; message = nil
+        defer { operation = nil }
+        do { recovery = try await cancellable { try await self.repository.prepareRecovery(namespace: namespace) } }
+        catch { needsAttention = !quiescing; message = reportError(error) }
+    }
+    func cancelRecovery() { guard operation == nil else { return }; recovery = nil }
+    func confirmRecovery(acknowledgeUnidentifiedReferences: Bool) async {
+        guard !quiescing, operation == nil, !recordingLocked, let assessment = recovery,
+              acknowledgeUnidentifiedReferences else { return }
+        needsAttention = false
+        operation = "손상 모델 원본을 보존하는 중…"; message = nil; inventoryIsCurrent = false
+        defer { operation = nil; recovery = nil }
+        do {
+            let result = try await cancellable {
+                try await self.repository.preserveForRecovery(assessment, confirmation: .init(assessmentID: assessment.id,
+                    acknowledgeUnidentifiedReferences: acknowledgeUnidentifiedReferences))
+            }
+            try await reloadInventory()
+            message = "손상 모델을 보존했습니다. 원본 폴더에서 다시 가져오거나 카탈로그에서 다운로드하세요. 녹음과 기록은 유지됩니다."
+            if let warning = result.warning { message! += "\n보존 후 확인 필요: \(warning.rawValue)" }
+            needsAttention = result.warning != nil
+        } catch {
+            needsAttention = !quiescing; message = reportError(error)
+            do { try await reloadInventory() } catch { inventoryIsCurrent = false }
+        }
+    }
     func confirmDeletion(acknowledgeReferences: Bool, acknowledgeIncompleteCoverage: Bool) async {
         guard !quiescing, operation == nil, !recordingLocked, let assessment = deletion else { return }
         guard (assessment.references.sessions.isEmpty || acknowledgeReferences),
@@ -231,7 +262,7 @@ final class ModelManagementViewModel: ObservableObject, LifecycleAuxiliaryWorkin
     }
     func currentWork() -> LifecycleAuxiliarySnapshot {
         .init(active: operation != nil || transferActive || quiescing,
-              requiresAttention: needsAttention || deletion != nil || !pendingWarnings.isEmpty ||
+              requiresAttention: needsAttention || deletion != nil || recovery != nil || !pendingWarnings.isEmpty ||
                 inventory.contains { $0.state != .usable } || downloads.contains {
                     $0.phase == .failed || ($0.phase == .installed && ($0.result?.warning != nil || $0.failure != nil))
                 })

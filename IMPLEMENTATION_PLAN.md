@@ -934,6 +934,8 @@ fix(transcript): prevent overlap duplication (T18)
 
 ### G3. 기능 완성 게이트
 
+- 상태: 2026-11-25 기능 완성 검토 통과. 모델 관리 3건을 보완한 `fda22c9`를 독립 재검토하고 사용자가 dev 통합·검증·브랜치 정리를 별도 승인했다. [검토 근거](docs/G3_MODEL_MANAGEMENT_REPAIR.md). G1은 미검증이며 main 승격·태그·T26 구현은 승인 범위에 포함하지 않는다.
+
 - 시점: T25 완료 후
 - 확인할 것:
   - 명세의 모든 MVP 사용자 기능 존재
@@ -1009,5 +1011,6 @@ fix(transcript): prevent overlap duplication (T18)
 - [x] T23 재생·편집·파일 관리
 - [x] T24 일시정지·재개
 - [x] T25 오류와 진단 로그
+- [x] G3 기능 완성 검토 및 모델 관리 보완 (G1 미검증 유지)
 - [ ] T26 장애 주입과 복구 시험
 - [ ] T27 장시간·오프라인·배포 검증

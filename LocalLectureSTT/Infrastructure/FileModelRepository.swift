@@ -11,7 +11,7 @@ struct UnavailableModelFormatValidator: OfflineModelFormatValidating {
 }
 enum ModelRepositoryPoint: String, Sendable {
     case sourceAcquired, copyChunk, hashChunk, formatValidation, manifestWrite, flush, beforePublish, afterPublish, cleanup
-    case referenceScan, beforeDelete, removing
+    case referenceScan, beforeDelete, removing, beforeRecovery, afterRecovery
 }
 struct ModelRepositoryHooks: Sendable {
     var visit: @Sendable (ModelRepositoryPoint) async throws -> Void = { _ in }
@@ -81,7 +81,9 @@ actor FileModelRepository: ModelRepository {
     private let references: any ModelReferenceChecking
     private let catalogLoader: BundledModelCatalogLoader
     private let hooks: ModelRepositoryHooks
+    private let capacity: ModelStorageCapacityProvider
     private var assessments = [UUID: ModelDeletionAssessment]()
+    private var recoveryAssessments = [UUID: ModelRecoveryAssessment]()
 
     init(storeURL: @escaping @Sendable () throws -> URL = {
         guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
@@ -89,9 +91,10 @@ actor FileModelRepository: ModelRepository {
         }
         return support.appendingPathComponent("LocalLectureSTT/Models", isDirectory: true)
     }, sources: ModelImportSources, validator: any OfflineModelFormatValidating = UnavailableModelFormatValidator(),
-         references: any ModelReferenceChecking, catalogLoader: BundledModelCatalogLoader = .init(), hooks: ModelRepositoryHooks = .init()) {
+         references: any ModelReferenceChecking, catalogLoader: BundledModelCatalogLoader = .init(), hooks: ModelRepositoryHooks = .init(),
+         capacity: ModelStorageCapacityProvider = .init()) {
         self.storeURL = storeURL; self.sources = sources; self.validator = validator; self.references = references
-        self.catalogLoader = catalogLoader; self.hooks = hooks
+        self.catalogLoader = catalogLoader; self.hooks = hooks; self.capacity = capacity
     }
     static func namespace(_ key: InstalledModelKey) -> [String] {
         [key.engineID.rawValue, key.modelID.rawValue, key.revision].map { ModelPackageRules.sha256(Data($0.utf8)) }
@@ -166,10 +169,12 @@ actor FileModelRepository: ModelRepository {
         var value: ModelInstallationManifest?
         do {
             // Reject unknown schemas before interpreting their payload layout.
-            let decoded = try manifest(directory, key: key); value = decoded
+            let decoded = try manifest(directory, key: key)
+            // Never give the UI another package's deletion key for this row.
+            guard Self.namespace(decoded.descriptor.key).joined(separator: "/") == namespace else { throw ModelRepositoryCode.identityChanged }
+            value = decoded
             let before = try snapshot(directory)
             guard try manifest(directory, key: key) == decoded else { throw ModelRepositoryCode.identityChanged }
-            guard Self.namespace(decoded.descriptor.key).joined(separator: "/") == namespace else { throw ModelRepositoryCode.identityChanged }
             try checkCatalogOrigin(decoded)
             try await verify(directory, descriptor: decoded.descriptor, installed: true)
             guard try snapshot(directory) == before else { throw ModelRepositoryCode.identityChanged }
@@ -195,7 +200,7 @@ actor FileModelRepository: ModelRepository {
             do { store = try ModelPackageDirectory(url: url) }
             catch ModelRepositoryCode.sourceUnavailable { return [] }
             var entries = [ModelInventoryEntry]()
-            for engine in try store.names() where !engine.hasPrefix(".operation-") {
+            for engine in try store.names() where !engine.hasPrefix(".operation-") && !engine.hasPrefix(".preserved-") {
                 do {
                     let engineDir = try store.child(engine)
                     for model in try engineDir.names() {
@@ -263,11 +268,32 @@ actor FileModelRepository: ModelRepository {
     }
 
     func importPackage(from source: ModelImportSourceID, descriptor: ModelPackageDescriptor?, origin: ModelPackageOrigin = .suppliedLocal) async throws -> ModelImportResult {
-        guard let descriptor else { throw ModelOperationFailure(.descriptorRequired) }
-        let claim: ModelStoreClaim
-        do { claim = try self.claim(descriptor.key) } catch { throw ModelOperationFailure(failure(error)) }
-        defer { claim.release() }
-        return try await install(descriptor: descriptor, origin: origin, acquire: { [sources] in try await sources.acquire(source) })
+        if let descriptor {
+            // Known catalog identities retain the original admission order: a busy
+            // model is rejected before opening another security scope.
+            let claim: ModelStoreClaim
+            do { claim = try self.claim(descriptor.key) } catch { throw ModelOperationFailure(failure(error)) }
+            defer { claim.release() }
+            return try await install(descriptor: descriptor, origin: origin, acquire: { [sources] in try await sources.acquire(source) })
+        }
+        var lease: ModelImportLease?
+        do {
+            try Task.checkCancellation()
+            let acquired = try await sources.acquire(source); lease = acquired
+            let resolved: ModelPackageDescriptor
+            guard try acquired.directory.names().contains("manifest.json") else { throw ModelRepositoryCode.descriptorRequired }
+            // Imported provenance/claimed validation is never trusted. Only the
+            // descriptor is used; destination bytes undergo the normal verification.
+            do { resolved = try manifest(acquired.directory).descriptor }
+            catch is DecodingError { throw ModelRepositoryCode.invalidDescriptor }
+            try Task.checkCancellation()
+            let claim = try self.claim(resolved.key); defer { claim.release() }
+            return try await install(descriptor: resolved, origin: origin, acquire: { acquired })
+        } catch {
+            if let lease { await lease.release() }
+            if let error = error as? ModelOperationFailure { throw error }
+            throw ModelOperationFailure(failure(error))
+        }
     }
     /// Internal owned-source entry: no security-scope registration or recursive claim.
     /// The caller keeps this exact claim through transport, install and download cleanup.
@@ -334,6 +360,13 @@ actor FileModelRepository: ModelRepository {
                 evidence?.record(old, tree: try old.treeStamps())
                 return .init(disposition: .alreadyInstalled, manifest: oldManifest, warning: nil)
             }
+            if origin == .suppliedLocal {
+                let available: Int64?
+                do { available = try capacity.available(destination.url) }
+                catch { throw ModelRepositoryCode.capacityUnknown }
+                _ = try ModelImportCapacity.assess(lengths: descriptor.files.map(\.byteCount), available: available)
+                try Task.checkCancellation()
+            }
             guard mkdirat(destination.fd, stageName, 0o700) == 0 else { throw ModelRepositoryCode.copyFailed }
             stageCreated = true
             let staging = try destination.child(stageName); stage = staging
@@ -380,6 +413,76 @@ actor FileModelRepository: ModelRepository {
             if let lease { await lease.release() }
             throw ModelOperationFailure(first, cleanupIssue: cleanup, retainedOperation: cleanup == nil ? nil : operation)
         }
+    }
+    private func recoveryParts(_ namespace: String) throws -> [String] {
+        let parts = namespace.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 3, parts.allSatisfy({ $0.utf8.count == 64 && $0.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) } }) else {
+            throw ModelRepositoryCode.unsafeLayout
+        }
+        return parts
+    }
+    private func recoveryFingerprint(_ directory: ModelPackageDirectory, namespace: String) throws -> String {
+        var records = try directory.treeStamps()
+        if try directory.names().contains("manifest.json") {
+            let bytes = try directory.readMetadata("manifest.json")
+            var malformed = false
+            do {
+                let decoded = try JSONDecoder().decode(ModelInstallationManifest.self, from: bytes)
+                malformed = Self.namespace(decoded.descriptor.key).joined(separator: "/") != namespace
+            }
+            catch is DecodingError { malformed = true }
+            catch ModelRepositoryCode.invalidDescriptor { malformed = true }
+            // Future schemas and unsafe/unreadable files stay untouched.
+            guard malformed else { throw ModelRepositoryCode.invalidDescriptor }
+            records.append(ModelPackageRules.sha256(bytes))
+        }
+        return ModelPackageRules.sha256(Data(records.joined(separator: "\n").utf8))
+    }
+    func prepareRecovery(namespace: String) async throws -> ModelRecoveryAssessment {
+        do {
+            try Task.checkCancellation()
+            let parts = try recoveryParts(namespace)
+            let claim = try ModelOperationClaims.shared.acquire(try storeURL().path + "/" + namespace)
+            defer { claim.release() }
+            let store = try ModelPackageDirectory(url: storeURL())
+            let directory = try parts.reduce(store) { try $0.child($1) }
+            let value = ModelRecoveryAssessment(id: UUID(), namespace: namespace, fingerprint: try recoveryFingerprint(directory, namespace: namespace))
+            recoveryAssessments = recoveryAssessments.filter { $0.value.namespace != namespace }
+            guard recoveryAssessments.count < 128 else { throw ModelRepositoryCode.busy }
+            recoveryAssessments[value.id] = value
+            return value
+        } catch { throw ModelOperationFailure(failure(error)) }
+    }
+    func preserveForRecovery(_ assessment: ModelRecoveryAssessment, confirmation: ModelRecoveryConfirmation?) async throws -> ModelRecoveryResult {
+        do {
+            guard let confirmation, confirmation.assessmentID == assessment.id else { throw ModelRepositoryCode.confirmationRequired }
+            guard confirmation.acknowledgeUnidentifiedReferences else { throw ModelRepositoryCode.acknowledgmentRequired }
+            guard recoveryAssessments[assessment.id] == assessment else { throw ModelRepositoryCode.staleAssessment }
+            let parts = try recoveryParts(assessment.namespace)
+            let claim = try ModelOperationClaims.shared.acquire(try storeURL().path + "/" + assessment.namespace)
+            defer { claim.release() }
+            let store = try ModelPackageDirectory(url: storeURL())
+            let parent = try parts.dropLast().reduce(store) { try $0.child($1) }
+            let name = parts.last!
+            let directory = try parent.child(name)
+            guard try recoveryFingerprint(directory, namespace: assessment.namespace) == assessment.fingerprint else { throw ModelRepositoryCode.staleAssessment }
+            try await hooks.visit(.beforeRecovery)
+            try Task.checkCancellation()
+            guard try recoveryFingerprint(directory, namespace: assessment.namespace) == assessment.fingerprint else { throw ModelRepositoryCode.staleAssessment }
+            let id = UUID()
+            // Atomic, exclusive rename is the commit point. Never remove its contents.
+            try parent.publish(name: name, to: store, finalName: ".preserved-" + id.uuidString.lowercased(), owned: directory)
+            recoveryAssessments[assessment.id] = nil
+            do {
+                let retained = try store.child(".preserved-" + id.uuidString.lowercased())
+                guard retained.stamp.sameObject(directory.stamp) else { throw ModelRepositoryCode.identityChanged }
+                let evidence = try retained.treeStamps()
+                try await hooks.visit(.afterRecovery)
+                guard try retained.treeStamps() == evidence else { throw ModelRepositoryCode.identityChanged }
+                try parent.sync(); try store.sync()
+                return .init(retainedID: id, warning: Task.isCancelled ? .cancelled : nil)
+            } catch { return .init(retainedID: id, warning: failure(error)) }
+        } catch { throw ModelOperationFailure(failure(error)) }
     }
     func prepareDeletion(_ key: InstalledModelKey) async throws -> ModelDeletionAssessment {
         do {

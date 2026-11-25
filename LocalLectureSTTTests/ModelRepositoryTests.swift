@@ -78,9 +78,9 @@ private final class ModelFixture: @unchecked Sendable {
     }
     func repository(validator: any OfflineModelFormatValidating = TestFormatValidator(),
                     references: any ModelReferenceChecking = TestReferences(), hooks: ModelRepositoryHooks = .init(),
-                    catalog: BundledModelCatalogLoader = .init()) -> FileModelRepository {
+                    catalog: BundledModelCatalogLoader = .init(), capacity: ModelStorageCapacityProvider = .init()) -> FileModelRepository {
         FileModelRepository(storeURL: { [store] in store }, sources: sources, validator: validator,
-                            references: references, catalogLoader: catalog, hooks: hooks)
+                            references: references, catalogLoader: catalog, hooks: hooks, capacity: capacity)
     }
     func installed(_ key: InstalledModelKey) -> URL {
         FileModelRepository.namespace(key).reduce(store) { $0.appendingPathComponent($1) }
@@ -562,6 +562,251 @@ extension ModelRepositoryTests {
 }
 
 extension ModelRepositoryTests {
+    private func writeImportManifest(_ f: ModelFixture, _ descriptor: ModelPackageDescriptor) throws {
+        let value = try ModelInstallationManifest(descriptor: descriptor, origin: .suppliedLocal, installedAt: AbsoluteTime(Date()))
+        try JSONEncoder().encode(value).write(to: f.source.appendingPathComponent("manifest.json"))
+    }
+    @MainActor private func realModelUI(_ f: ModelFixture, _ repository: FileModelRepository,
+                                       select: (@MainActor () async -> ModelImportSourceID?)? = nil) -> ModelManagementViewModel {
+        let importer = ModelFolderImporter(repository: repository, sources: f.sources, selectSource: select ?? { await f.register() })
+        return ModelManagementViewModel(repository: repository,
+            downloader: ModelDownloadService(repository: repository, storage: .init(rootURL: { f.root.appendingPathComponent("downloads") })),
+            supports: { $0.format == "generated-test-v1" }, importFolder: { try await importer.importFolder($0) })
+    }
+    @MainActor func testG3GenericImportUsesProductionUIAdapterAndRepository() async throws {
+        let f = try ModelFixture(); let d = try f.descriptor(); try writeImportManifest(f, d)
+        let r = f.repository(catalog: .init { try .init(entries: [d]) })
+        let source = await f.register()
+        let vm = realModelUI(f, r, select: { source })
+        await vm.refresh(); XCTAssertFalse(vm.readyToRecord)
+        await vm.importModel(nil)
+        XCTAssertTrue(vm.readyToRecord); XCTAssertEqual(vm.selectedDescriptor, d)
+        XCTAssertEqual(vm.inventory.first?.manifest?.origin, .suppliedLocal)
+        XCTAssertEqual(try Data(contentsOf: f.source.appendingPathComponent(d.files[0].path)),
+                       try Data(contentsOf: f.installed(d.key).appendingPathComponent(d.files[0].path)))
+        let counts = await f.scope.counts(); XCTAssertEqual(counts, [1, 1])
+        do { _ = try await f.sources.acquire(source); XCTFail("Selection was not unregistered") }
+        catch { XCTAssertEqual(error as? ModelRepositoryCode, .sourceUnavailable) }
+        try FileManager.default.removeItem(at: f.source)
+        let verified = try await r.validate(d.key); XCTAssertEqual(verified.state, .usable)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.root.appendingPathComponent("downloads").path))
+    }
+    @MainActor func testG3ImportCancellationBadManifestAndTamperedPayloadRemainUnavailable() async throws {
+        let f = try ModelFixture(); let d = try f.descriptor()
+        let r = f.repository(catalog: .init { try .init(entries: [d]) })
+        let cancelled = realModelUI(f, r, select: { nil }); await cancelled.refresh(); await cancelled.importModel(nil)
+        XCTAssertNil(cancelled.message); XCTAssertFalse(cancelled.readyToRecord)
+        let source = await f.register(); let vm = realModelUI(f, r, select: { source }); await vm.refresh()
+        try Data("broken manifest".utf8).write(to: f.source.appendingPathComponent("manifest.json"))
+        await vm.importModel(nil)
+        XCTAssertTrue(vm.message?.contains("invalidDescriptor") == true); XCTAssertFalse(vm.readyToRecord)
+        do { _ = try await f.sources.acquire(source); XCTFail("Selection was not unregistered") }
+        catch { XCTAssertEqual(error as? ModelRepositoryCode, .sourceUnavailable) }
+        try writeImportManifest(f, d)
+        try Data("STT-TEST xyz".utf8).write(to: f.source.appendingPathComponent(d.files[0].path))
+        let other = realModelUI(f, r); await other.refresh(); await other.importModel(nil)
+        XCTAssertTrue(other.message?.contains("integrityMismatch") == true); XCTAssertFalse(other.readyToRecord)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.installed(d.key).path))
+        XCTAssertEqual(try Data(contentsOf: f.source.appendingPathComponent(d.files[0].path)), Data("STT-TEST xyz".utf8))
+        let counts = await f.scope.counts(); XCTAssertEqual(counts, [2, 2])
+    }
+    func testG3ImportCapacityExactBoundaryUnknownAndOverflow() throws {
+        let needed = ModelImportCapacity.safetyBytes + 10
+        let exact = try ModelImportCapacity.assess(lengths: [4, 6], available: needed)
+        XCTAssertEqual(exact.requiredBytes, needed)
+        for (lengths, available, code): ([Int64], Int64?, ModelRepositoryCode) in [
+            ([10], needed - 1, .insufficientCapacity), ([10], nil, .capacityUnknown), ([10], -1, .capacityUnknown),
+            ([Int64.max], Int64.max, .capacityOverflow), ([-1], needed, .capacityOverflow)
+        ] {
+            XCTAssertThrowsError(try ModelImportCapacity.assess(lengths: lengths, available: available)) { XCTAssertEqual($0 as? ModelRepositoryCode, code) }
+        }
+    }
+    @MainActor func testG3CatalogFolderImportAndFutureManifestUseRealUIRepository() async throws {
+        let f = try ModelFixture(); let d = try f.descriptor()
+        let r = f.repository(catalog: .init { try .init(entries: [d]) }); let vm = realModelUI(f, r)
+        await vm.refresh(); await vm.importModel(d)
+        XCTAssertTrue(vm.readyToRecord); XCTAssertEqual(vm.selectedDescriptor, d)
+        let before = try Data(contentsOf: f.installed(d.key).appendingPathComponent("manifest.json"))
+        try Data("{\"schemaVersion\":2}".utf8).write(to: f.source.appendingPathComponent("manifest.json"))
+        await vm.importModel(nil)
+        XCTAssertTrue(vm.message?.contains("unsupportedSchema") == true)
+        XCTAssertEqual(try Data(contentsOf: f.installed(d.key).appendingPathComponent("manifest.json")), before)
+        let counts = await f.scope.counts(); XCTAssertEqual(counts, [2, 2])
+    }
+    @MainActor func testG3FolderAdapterCancellationAfterSelectionUnregistersWithoutOpeningScope() async throws {
+        let f = try ModelFixture(); let d = try f.descriptor(); try writeImportManifest(f, d)
+        let source = await f.register(); let gate = ModelGate()
+        let importer = ModelFolderImporter(repository: f.repository(), sources: f.sources, selectSource: {
+            await gate.hold(); return source
+        })
+        let task = Task { try await importer.importFolder(nil) }
+        try await gate.waitForEntry(of: task)
+        task.cancel(); await gate.release()
+        do { _ = try await task.value; XCTFail("Cancelled selection was imported") } catch { XCTAssertTrue(error is CancellationError) }
+        do { _ = try await f.sources.acquire(source); XCTFail("Selection was retained") }
+        catch { XCTAssertEqual(error as? ModelRepositoryCode, .sourceUnavailable) }
+        let counts = await f.scope.counts(); XCTAssertEqual(counts, [0, 0])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.store.path))
+    }
+    @MainActor func testG3CapacityRejectsBeforeCopyAndPreservesSourceAndExistingRevision() async throws {
+        for available: Int64? in [0, nil, -1] {
+            let f = try ModelFixture(); let old = try f.descriptor(revision: "old"); let source = await f.register()
+            _ = try await f.repository().importPackage(from: source, descriptor: old)
+            let original = try Data(contentsOf: f.installed(old.key).appendingPathComponent(old.files[0].path))
+            let d = try f.descriptor(revision: "new"); try writeImportManifest(f, d)
+            let r = f.repository(hooks: .init(visit: { if $0 == .copyChunk { XCTFail("Capacity denial reached payload copy") } }),
+                                 catalog: .init { try .init(entries: [d]) }, capacity: .init(available: { _ in available }))
+            let vm = realModelUI(f, r); await vm.refresh(); await vm.importModel(nil)
+            XCTAssertTrue(vm.message?.contains(available == 0 ? "insufficientCapacity" : "capacityUnknown") == true)
+            XCTAssertEqual(try Data(contentsOf: f.installed(old.key).appendingPathComponent(old.files[0].path)), original)
+            XCTAssertEqual(try Data(contentsOf: f.source.appendingPathComponent(d.files[0].path)), original)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: f.installed(d.key).path))
+            XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: f.store.path).contains { $0.hasPrefix(".operation-") })
+            let counts = await f.scope.counts(); XCTAssertEqual(counts, [2, 2])
+        }
+    }
+    func testG3CapacityQueryFailureAndAlreadyInstalledLowSpace() async throws {
+        let f = try ModelFixture(); let d = try f.descriptor(); let source = await f.register()
+        let bad = f.repository(capacity: .init(available: { _ in throw ModelRepositoryCode.storageUnavailable }))
+        await expect(.capacityUnknown) { _ = try await bad.importPackage(from: source, descriptor: d) }
+        let required = ModelImportCapacity.safetyBytes + d.files[0].byteCount
+        let r = f.repository(capacity: .init(available: { _ in required }))
+        _ = try await r.importPackage(from: source, descriptor: d)
+        let low = f.repository(capacity: .init(available: { _ in XCTFail("Idempotent import needs no copy space"); return 0 }))
+        let result = try await low.importPackage(from: source, descriptor: d)
+        XCTAssertEqual(result.disposition, .alreadyInstalled)
+        let counts = await f.scope.counts(); XCTAssertEqual(counts, [3, 3])
+    }
+    @MainActor func testG3ManifestRecoveryUIRequiresConfirmationPreservesBytesAndAllowsReinstall() async throws {
+        let f = try ModelFixture(); let d = try f.descriptor(); try writeImportManifest(f, d)
+        let r = f.repository(catalog: .init { try .init(entries: [d]) })
+        let vm = realModelUI(f, r); await vm.refresh(); await vm.importModel(nil)
+        let sibling = try f.descriptor(revision: "sibling"); let source = await f.register()
+        _ = try await r.importPackage(from: source, descriptor: sibling)
+        let session = f.root.appendingPathComponent("session-sentinel"); try Data("audio and transcript".utf8).write(to: session)
+        let installed = f.installed(d.key); let bad = Data("invalid json".utf8)
+        try bad.write(to: installed.appendingPathComponent("manifest.json"))
+        await vm.refresh()
+        let entry = try XCTUnwrap(vm.inventory.first { $0.manifest == nil })
+        XCTAssertEqual(entry.state, .corrupt)
+        vm.recordingLocked = true; await vm.prepareRecovery(entry.namespace); XCTAssertNil(vm.recovery)
+        vm.recordingLocked = false; await vm.prepareRecovery(entry.namespace)
+        XCTAssertNotNil(vm.recovery); XCTAssertTrue(vm.busy); XCTAssertTrue(vm.currentWork().requiresAttention)
+        vm.cancelRecovery(); XCTAssertNil(vm.recovery); XCTAssertTrue(FileManager.default.fileExists(atPath: installed.path))
+        await vm.prepareRecovery(entry.namespace); await vm.confirmRecovery(acknowledgeUnidentifiedReferences: false)
+        XCTAssertNotNil(vm.recovery); XCTAssertTrue(FileManager.default.fileExists(atPath: installed.path))
+        await vm.confirmRecovery(acknowledgeUnidentifiedReferences: true)
+        XCTAssertNil(vm.recovery); XCTAssertFalse(FileManager.default.fileExists(atPath: installed.path))
+        let retained = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: f.store, includingPropertiesForKeys: nil).first { $0.lastPathComponent.hasPrefix(".preserved-") })
+        XCTAssertEqual(try Data(contentsOf: retained.appendingPathComponent("manifest.json")), bad)
+        XCTAssertEqual(try Data(contentsOf: retained.appendingPathComponent(d.files[0].path)), Data("STT-TEST abc".utf8))
+        await vm.importModel(nil); XCTAssertEqual(vm.selectedDescriptor, d); XCTAssertTrue(vm.readyToRecord)
+        let verifiedSibling = try await r.validate(sibling.key); XCTAssertEqual(verifiedSibling.state, .usable)
+        XCTAssertEqual(try Data(contentsOf: session), Data("audio and transcript".utf8))
+        XCTAssertEqual(try Data(contentsOf: retained.appendingPathComponent("manifest.json")), bad)
+        XCTAssertTrue(vm.inventory.allSatisfy { $0.state == .usable })
+    }
+    func testG3RecoveryMissingManifestAndStaleOrAbsentConfirmation() async throws {
+        let f = try ModelFixture(); let d = try f.descriptor(); let r = f.repository(); let source = await f.register()
+        _ = try await r.importPackage(from: source, descriptor: d)
+        let dir = f.installed(d.key); try FileManager.default.removeItem(at: dir.appendingPathComponent("manifest.json"))
+        let ns = FileModelRepository.namespace(d.key).joined(separator: "/")
+        let a = try await r.prepareRecovery(namespace: ns)
+        await expect(.confirmationRequired) { _ = try await r.preserveForRecovery(a, confirmation: nil) }
+        await expect(.acknowledgmentRequired) { _ = try await r.preserveForRecovery(a, confirmation: .init(assessmentID: a.id, acknowledgeUnidentifiedReferences: false)) }
+        try Data("new file".utf8).write(to: dir.appendingPathComponent("sentinel"))
+        await expect(.staleAssessment) { _ = try await r.preserveForRecovery(a, confirmation: .init(assessmentID: a.id, acknowledgeUnidentifiedReferences: true)) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path))
+        let fresh = try await r.prepareRecovery(namespace: ns)
+        let result = try await r.preserveForRecovery(fresh, confirmation: .init(assessmentID: fresh.id, acknowledgeUnidentifiedReferences: true))
+        let retained = f.store.appendingPathComponent(".preserved-" + result.retainedID.uuidString.lowercased())
+        XCTAssertEqual(try Data(contentsOf: retained.appendingPathComponent("sentinel")), Data("new file".utf8))
+        await expect(.staleAssessment) { _ = try await r.preserveForRecovery(fresh, confirmation: .init(assessmentID: fresh.id, acknowledgeUnidentifiedReferences: true)) }
+    }
+    @MainActor func testG3WrongManifestIdentityCannotTargetHealthySiblingFromUI() async throws {
+        let f = try ModelFixture(); let d = try f.descriptor(); let other = try f.descriptor(model: "other")
+        let r = f.repository(catalog: .init { try .init(entries: [d, other]) }); let source = await f.register()
+        _ = try await r.importPackage(from: source, descriptor: d)
+        _ = try await r.importPackage(from: source, descriptor: other)
+        let healthyBytes = try Data(contentsOf: f.installed(other.key).appendingPathComponent("manifest.json"))
+        try healthyBytes.write(to: f.installed(d.key).appendingPathComponent("manifest.json"))
+        let vm = realModelUI(f, r); await vm.refresh()
+        let ns = FileModelRepository.namespace(d.key).joined(separator: "/")
+        let row = try XCTUnwrap(vm.inventory.first { $0.namespace == ns })
+        XCTAssertEqual(row.state, .corrupt); XCTAssertNil(row.manifest)
+        await vm.prepareRecovery(row.namespace); XCTAssertNotNil(vm.recovery)
+        await vm.confirmRecovery(acknowledgeUnidentifiedReferences: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.installed(d.key).path))
+        XCTAssertEqual(try Data(contentsOf: f.installed(other.key).appendingPathComponent("manifest.json")), healthyBytes)
+        let valid = try await r.validate(other.key); XCTAssertEqual(valid.state, .usable)
+        XCTAssertEqual(vm.selectedDescriptor, other)
+        let retained = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: f.store, includingPropertiesForKeys: nil).first { $0.lastPathComponent.hasPrefix(".preserved-") })
+        XCTAssertEqual(try Data(contentsOf: retained.appendingPathComponent("manifest.json")), healthyBytes)
+        await vm.importModel(d); XCTAssertEqual(vm.selectedDescriptor, d)
+    }
+    func testG3RecoveryRejectsHealthyFutureSchemaAndPathOrSymlinkEscape() async throws {
+        let f = try ModelFixture(); let d = try f.descriptor(); let r = f.repository(); let source = await f.register()
+        _ = try await r.importPackage(from: source, descriptor: d)
+        let ns = FileModelRepository.namespace(d.key).joined(separator: "/")
+        await expect(.invalidDescriptor) { _ = try await r.prepareRecovery(namespace: ns) }
+        for unsafe in ["../source", ns + "/..", "/" + ns] { await expect(.unsafeLayout) { _ = try await r.prepareRecovery(namespace: unsafe) } }
+        let manifest = f.installed(d.key).appendingPathComponent("manifest.json")
+        try Data("{\"schemaVersion\":2}".utf8).write(to: manifest)
+        await expect(.unsupportedSchema) { _ = try await r.prepareRecovery(namespace: ns) }
+        try Data("bad".utf8).write(to: manifest)
+        let external = f.root.appendingPathComponent("external"); try Data("untouched".utf8).write(to: external)
+        try FileManager.default.createSymbolicLink(at: f.installed(d.key).appendingPathComponent("link"), withDestinationURL: external)
+        await expect(.unsafeLayout) { _ = try await r.prepareRecovery(namespace: ns) }
+        XCTAssertEqual(try Data(contentsOf: external), Data("untouched".utf8))
+    }
+    func testG3RecoveryClaimAndCancellationCannotMoveOrDeletePackage() async throws {
+        let f = try ModelFixture(); let d = try f.descriptor(); let source = await f.register()
+        _ = try await f.repository().importPackage(from: source, descriptor: d)
+        try Data("bad".utf8).write(to: f.installed(d.key).appendingPathComponent("manifest.json"))
+        let gate = ModelGate(); let r = f.repository(hooks: .init(visit: { if $0 == .beforeRecovery { await gate.hold() } }))
+        let ns = FileModelRepository.namespace(d.key).joined(separator: "/"); let a = try await r.prepareRecovery(namespace: ns)
+        let task = Task { try await r.preserveForRecovery(a, confirmation: .init(assessmentID: a.id, acknowledgeUnidentifiedReferences: true)) }
+        try await gate.withHeld(task) {
+            let other = f.repository()
+            do { _ = try await other.prepareRecovery(namespace: ns); XCTFail("Missing recovery claim") }
+            catch { XCTAssertEqual((error as? ModelOperationFailure)?.cause, .busy) }
+            do { _ = try await other.importPackage(from: source, descriptor: d); XCTFail("Missing import claim") }
+            catch { XCTAssertEqual((error as? ModelOperationFailure)?.cause, .busy) }
+            task.cancel()
+        }
+        await expect(.cancelled) { _ = try await task.value }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.installed(d.key).path))
+        _ = try await f.repository().prepareRecovery(namespace: ns)
+    }
+    func testG3RecoveryRechecksReplacementAtPublicationAndReportsCommittedWarning() async throws {
+        for replacement in [true, false] {
+            let f = try ModelFixture(); let d = try f.descriptor(); let source = await f.register()
+            _ = try await f.repository().importPackage(from: source, descriptor: d)
+            let dir = f.installed(d.key); try Data("bad".utf8).write(to: dir.appendingPathComponent("manifest.json"))
+            let moved = f.root.appendingPathComponent("original")
+            let r = f.repository(hooks: .init(visit: { point in
+                if replacement, point == .beforeRecovery {
+                    try FileManager.default.moveItem(at: dir, to: moved)
+                    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false)
+                    try Data("replacement".utf8).write(to: dir.appendingPathComponent("sentinel"))
+                }
+                if !replacement, point == .afterRecovery { throw ModelRepositoryCode.flushFailed }
+            }))
+            let a = try await r.prepareRecovery(namespace: FileModelRepository.namespace(d.key).joined(separator: "/"))
+            if replacement {
+                await expect(.identityChanged) { _ = try await r.preserveForRecovery(a, confirmation: .init(assessmentID: a.id, acknowledgeUnidentifiedReferences: true)) }
+                XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("sentinel")), Data("replacement".utf8))
+                XCTAssertEqual(try Data(contentsOf: moved.appendingPathComponent("manifest.json")), Data("bad".utf8))
+            } else {
+                let result = try await r.preserveForRecovery(a, confirmation: .init(assessmentID: a.id, acknowledgeUnidentifiedReferences: true))
+                XCTAssertEqual(result.warning, .flushFailed)
+                let retained = f.store.appendingPathComponent(".preserved-" + result.retainedID.uuidString.lowercased())
+                XCTAssertEqual(try Data(contentsOf: retained.appendingPathComponent("manifest.json")), Data("bad".utf8))
+                _ = try await r.importPackage(from: source, descriptor: d)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: retained.path))
+            }
+        }
+    }
     func testMissingFilesUnrecognizedMetadataAndUnreadableStoreAreNotUsable() async throws {
         let f = try ModelFixture(); let d = try f.descriptor(); let source = await f.register(); let r = f.repository()
         await expect(.descriptorRequired) { _ = try await r.importPackage(from: source, descriptor: nil) }
