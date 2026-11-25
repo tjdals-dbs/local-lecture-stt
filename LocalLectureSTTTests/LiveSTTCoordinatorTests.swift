@@ -2,6 +2,33 @@ import XCTest
 @testable import LocalLectureSTT
 
 final class LiveSTTCoordinatorTests: XCTestCase {
+    func testSuspendedPublicationCannotOvertakeTerminalFailure() async throws {
+        let publicationGate = T14Gate()
+        let cancelGate = T14Gate()
+        let prematureFailure = expectation(description: "failure cannot overtake a suspended earlier publication")
+        prematureFailure.isInverted = true
+        let probe = T19PublicationProbe(gate: publicationGate, prematureFailure: prematureFailure)
+        let f = try T19Fixture(cancelGate: cancelGate, publish: { await probe.append($0) })
+        await f.start()
+        try f.send(2_000)
+        try await publicationGate.wait()
+        _ = try await f.engine.request(0)
+        try await f.engine.fail(0, .inferenceFailed)
+        try await cancelGate.wait()
+        let failed = await f.coordinator.currentSnapshot()
+        XCTAssertEqual(failed.failure, .inferenceFailed)
+        await fulfillment(of: [prematureFailure], timeout: 0.2)
+        await probe.release()
+        await cancelGate.release()
+        await f.coordinator.waitUntilSettled()
+        let delivered = await probe.values
+        let firstFailure = try XCTUnwrap(delivered.firstIndex { $0.failure != nil })
+        XCTAssertTrue(delivered[firstFailure...].allSatisfy { $0.failure == .inferenceFailed },
+                      "a delayed healthy snapshot must never erase a terminal failure")
+        XCTAssertEqual(delivered.last?.cleanupComplete, true)
+        f.finish()
+    }
+
     func testT24PauseSealsOpenSpeechWithoutWaitingForSlowInferenceAndSuppressesLatePartial() async throws {
         let f = try T19Fixture()
         await f.start(); try f.send(2_000)
@@ -435,7 +462,8 @@ private final class T19Fixture: @unchecked Sendable {
     init(capacity: Int = 4, mode: LanguageMode = .korean, journalFailure: Bool = false,
          journalGate: T14Gate? = nil, cancelGate: T14Gate? = nil,
          startGate: T14Gate? = nil, startFailure: STTErrorCode? = nil,
-         converter: any SpeechPCMConverting = T19Passthrough()) throws {
+         converter: any SpeechPCMConverting = T19Passthrough(),
+         publish: @escaping @Sendable (LiveSTTSnapshot) async -> Void = { _ in }) throws {
         session = try STTTestFixture.session(mode: mode)
         engine = try T19ControlledEngine(cancelGate: cancelGate, startGate: startGate, startFailure: startFailure)
         repository = T19Repository(failure: journalFailure, gate: journalGate)
@@ -444,7 +472,7 @@ private final class T19Fixture: @unchecked Sendable {
         let observed = observed
         coordinator = LiveSTTCoordinator(engine: engine, session: session, repository: repository,
             location: location, converter: converter, detector: T19Detector(),
-            maximumPendingFinals: capacity, publish: { await observed.append($0) })
+            maximumPendingFinals: capacity, publish: { await publish($0); await observed.append($0) })
         let pair = AsyncThrowingStream<CaptureSpeechInput, Error>.makeStream()
         continuation = pair.continuation
         handle = CaptureHandle(generation: 1, device: .init(identity: "test", displayName: "test"),
@@ -462,6 +490,26 @@ private final class T19Fixture: @unchecked Sendable {
         frame += Int64(ms * 16); self.sequence += 1
     }
     func finish() { continuation.finish() }
+}
+
+private actor T19PublicationProbe {
+    let gate: T14Gate
+    let prematureFailure: XCTestExpectation
+    private var held = false
+    private var released = false
+    var values: [LiveSTTSnapshot] = []
+    init(gate: T14Gate, prematureFailure: XCTestExpectation) {
+        self.gate = gate; self.prematureFailure = prematureFailure
+    }
+    func append(_ value: LiveSTTSnapshot) async {
+        if !held, value.inputMilliseconds >= 2_000, value.failure == nil {
+            held = true
+            await gate.hold()
+        }
+        if value.failure != nil, !released { prematureFailure.fulfill() }
+        values.append(value)
+    }
+    func release() async { released = true; await gate.release() }
 }
 
 private actor T19Observations {

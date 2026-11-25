@@ -257,7 +257,13 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
         let observedFirst = expectation(description: "first UI speech state")
         let observedEnd = expectation(description: "speech cleanup complete")
         var first = false, ended = false
+        var observedFailure: STTErrorCode?
         let observer = viewModel.$snapshot.sink { value in
+            if let observedFailure {
+                XCTAssertEqual(value.speech.failure, observedFailure,
+                               "UI snapshots must retain a terminal speech failure while audio continues")
+            }
+            observedFailure = value.speech.failure ?? observedFailure
             if !first && (failSpeech ? value.speech.failure != nil : !(value.speech.partial ?? "").isEmpty) {
                 first = true
                 observedFirst.fulfill()

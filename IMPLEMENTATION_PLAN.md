@@ -935,6 +935,7 @@ fix(transcript): prevent overlap duplication (T18)
 ### G3. 기능 완성 게이트
 
 - 상태: 2026-11-25 기능 완성 검토 통과. 모델 관리 3건을 보완한 `fda22c9`를 독립 재검토하고 사용자가 dev 통합·검증·브랜치 정리를 별도 승인했다. [검토 근거](docs/G3_MODEL_MANAGEMENT_REPAIR.md). G1은 미검증이며 main 승격·태그·T26 구현은 승인 범위에 포함하지 않는다.
+- 통합 CI에서 드러난 비동기 append 대기 및 STT 상태 전달 순서 문제는 `0987cf3`에서 보완했다. 별도 diff 검토, 전체 621개 테스트, 반례 3개 x 50회, task CI가 통과했으며 최종 dev 검증·CI 후에만 브랜치를 정리한다. [보완 근거](docs/G3_MODEL_MANAGEMENT_REPAIR.md#integration-ci-repair).
 
 - 시점: T25 완료 후
 - 확인할 것:

@@ -50,6 +50,8 @@ actor LiveSTTCoordinator {
     private var owner: Task<Void, Never>?
     private var worker: Task<Void, Never>?
     private var abort: Task<Void, Never>?
+    private var publication: Task<Void, Never>?
+    private var publicationSequence: UInt64 = 0
     private var queue: [SpeechWindow] = []
     private var activeWindow: SpeechWindow?
     private var sequence: Int64 = 0
@@ -337,7 +339,20 @@ actor LiveSTTCoordinator {
 
     private func emit() async {
         updateMetrics()
-        await publish(snapshot)
+        // PCM ingestion and inference can both emit while this actor is
+        // suspended in the consumer. Preserve actor-order delivery so an
+        // older healthy snapshot cannot erase a later terminal failure.
+        let value = snapshot
+        let previous = publication
+        publicationSequence &+= 1
+        let sequence = publicationSequence
+        let next = Task { [publish] in
+            await previous?.value
+            await publish(value)
+        }
+        publication = next
+        await next.value
+        if publicationSequence == sequence { publication = nil }
     }
 
     private func diagnostic(_ kind: SessionEventKind, code: String) async {

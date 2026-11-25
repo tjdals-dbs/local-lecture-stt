@@ -1157,6 +1157,8 @@ final class RecordingSessionCoordinatorTests: XCTestCase {
         await coordinator.reset()
         let second = try await coordinator.start(.init(title: "Second", timeZone: .init(secondsFromGMT: 0)!))
         let secondRecorder = try XCTUnwrap(fixture.recorders.recorders().last)
+        // Start admits the independent PCM pump; it does not await its append.
+        await waitUntil { await secondRecorder.appendedChunks().map(\.sequence) == [0] }
         let current = await coordinator.currentSnapshot()
         let appended = await secondRecorder.appendedChunks()
         let recorderCounts = await secondRecorder.counts()
