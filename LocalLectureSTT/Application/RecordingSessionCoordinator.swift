@@ -349,6 +349,9 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     /// live recorder behind after sleep/quit has already been accepted.
     private var startInterruptionFailures: [UInt64: RecordingSessionFailure] = [:]
     private var snapshot = RecordingSessionSnapshot.idle()
+    private let diagnostics: any DiagnosticRecording
+    private var diagnosticIssues = DiagnosticIssueTracker()
+    private var diagnosticSession: SessionID?
     private var snapshotContinuations: [UUID: AsyncStream<RecordingSessionSnapshot>.Continuation] = [:]
     private var lastResult: RecordingSessionResult?
     private var interruptedWakeLocation: SessionLocation?
@@ -372,7 +375,8 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         identifiers: RecordingSessionIdentifiers = .live,
         activity: SessionActivityRegistry? = nil,
         authority: LifecycleWorkAuthority? = nil,
-        onSettlementJoin: @escaping @Sendable () -> Void = {}
+        onSettlementJoin: @escaping @Sendable () -> Void = {},
+        diagnostics: any DiagnosticRecording = NoopDiagnosticRecorder()
     ) {
         self.roots = roots
         self.permission = permission
@@ -391,6 +395,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         self.activity = activity
         self.authority = authority
         self.onSettlementJoin = onSettlementJoin
+        self.diagnostics = diagnostics
     }
 
     func snapshots() -> AsyncStream<RecordingSessionSnapshot> {
@@ -1707,6 +1712,10 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         }
         snapshot.pauseTransitionInFlight = pauseTransition != nil
         snapshot.speech = speechSnapshot
+        if diagnosticSession != snapshot.sessionID {
+            diagnosticIssues = .init(); diagnosticSession = snapshot.sessionID
+        }
+        diagnosticIssues.update(snapshot.issues(), source: .recording, sessionID: snapshot.sessionID, recorder: diagnostics)
         snapshotContinuations.values.forEach { $0.yield(snapshot) }
     }
 

@@ -3,6 +3,36 @@ import XCTest
 @testable import LocalLectureSTT
 
 final class StorageRepositoryTests: XCTestCase {
+    func testT25OnlyDurableEventsAreMirroredAndRecoveryRetriesStayIdempotent() async throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let codec = TestBookmarkCodec()
+        let manager = fixture.manager(codec: codec)
+        _ = try await manager.registerSelectedDirectory(fixture.rootA)
+        let sink = T25RepositoryDiagnostics()
+        let repository = FileSessionRepository(roots: manager, diagnostics: sink)
+        let id = SessionID()
+        let location = try await repository.createSession(sessionID: id, createdAt: .init(Date()), timeZone: .gmt)
+        let event = try SessionEventRecord(sessionId: id, eventId: SessionEventID(), occurredAt: .init(Date()),
+            kind: .recordingStarted, detail: .init(code: "PRIVATE-CODE", message: "PRIVATE-LECTURE"))
+        try await repository.appendEvent(event, at: location)
+        XCTAssertEqual(sink.entries.map(\.signal), [.sessionEvent(.recordingStarted)])
+        await codec.setAccessAllowed(false)
+        do { try await repository.appendEvent(event, at: location); XCTFail("denied event append") }
+        catch { XCTAssertNotNil(error as? StorageError) }
+        XCTAssertEqual(sink.entries.count, 1)
+        await codec.setAccessAllowed(true)
+        for _ in 0..<2 {
+            let failure = await repository.appendRecoveryEventIfSafe(at: location, kind: .sttError,
+                code: "stable-recovery-event", message: "PRIVATE-RECOVERY", occurredAt: .init(Date()))
+            XCTAssertNil(failure)
+        }
+        XCTAssertEqual(sink.entries.map(\.signal), [.sessionEvent(.recordingStarted), .sessionEvent(.sttError)])
+        let bytes = try JSONEncoder().encode(sink.entries)
+        XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("PRIVATE"))
+        let path = fixture.rootA.appendingPathComponent(location.folderName.rawValue).appendingPathComponent("events.jsonl")
+        XCTAssertEqual(try Data(contentsOf: path).split(separator: 0x0A).count, 2)
+    }
+
     func testRootRegistryPreservesHistoricalRootAndRestoresActiveRoot() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
@@ -609,4 +639,11 @@ private final class TestDirectorySelector: DirectorySelecting {
         chooseCount += 1
         return selectedURL
     }
+}
+
+private final class T25RepositoryDiagnostics: DiagnosticRecording, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [DiagnosticEntry] = []
+    var entries: [DiagnosticEntry] { lock.withLock { values } }
+    func record(_ entry: DiagnosticEntry) { lock.withLock { values.append(entry) } }
 }

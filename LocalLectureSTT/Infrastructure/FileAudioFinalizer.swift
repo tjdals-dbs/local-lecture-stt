@@ -18,6 +18,7 @@ struct FileAudioFinalizer: AudioFinalizationWorking {
     var media: any FinalizationMediaProcessing = AVFoundationFinalizationMedia()
     var hook: @Sendable (FinalizationPoint) async throws -> Void = { _ in }
     var authority = CompletionEvidenceAuthority.shared
+    var diagnostics: any DiagnosticRecording = NoopDiagnosticRecorder()
 
     func finalize(_ request: AudioFinalizationRequest, control: AudioFinalizationControl,
                   progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
@@ -268,6 +269,7 @@ private final class FinalizationRun {
                 occurredAt: AbsoluteTime(Date()), kind: .finalizationStepTransition,
                 detail: SessionEventDetail(code: step.rawValue))
             try SafeSessionEventAppender.append(event, access: files)
+            worker.diagnostics.sessionEvent(event)
         } catch { control.warning("diagnostic.\(FileAudioFinalizer.code(error).rawValue)") }
         try control.check()
     }

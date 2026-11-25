@@ -5,6 +5,50 @@ import XCTest
 @testable import LocalLectureSTT
 
 final class RecordingSessionFileIntegrationTests: XCTestCase {
+    func testT25BlockedFailedDiagnosticsDoNotDelayRecordingAndManagementPreservesRealAudio() async throws {
+        let fixture = try RecordingFileIntegrationFixture(); defer { fixture.cleanup() }
+        let base = try LocalDiagnosticLog.canonicalDirectory(fixture.base)
+        let gate = T25DiagnosticWriteGate(); defer { gate.release.signal() }
+        let log = LocalDiagnosticLog(directory: base.appendingPathComponent("Diagnostics"),
+            beforeWrite: { try gate.fail() })
+        log.record(.init(source: .app, signal: .appStarted))
+        XCTAssertEqual(gate.entered.wait(timeout: .now() + 2), .success)
+        let roots = StorageRootManager(applicationSupportDirectory: fixture.applicationSupport, bookmarkCodec: fixture.bookmarks)
+        _ = try await roots.registerSelectedDirectory(fixture.root)
+        let repository = FileSessionRepository(roots: roots, diagnostics: log)
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: fixture.applicationSupport)
+        let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: store)
+        let driver = T19IntegrationDriver()
+        let permission = AuthorizedIntegrationPermission()
+        let capture = MicrophoneCaptureController(permission: permission, driver: driver,
+            monitor: InputSignalMonitor(clock: FixedIntegrationMonotonicClock(), scheduler: NoopIntegrationSignalScheduler()))
+        let recording = RecordingSessionCoordinator(roots: roots, permission: permission, capture: capture,
+            recorders: ClosureAudioRecorderFactory { AVFoundationAudioRecorder(roots: roots) }, repository: repository,
+            catalog: catalog, environment: .init(appVersion: "T25", osVersion: "synthetic"), diagnostics: log)
+        _ = try await recording.start(.init(title: "PRIVATE-LECTURE-TITLE", timeZone: .gmt))
+        try await emitT24Tone(driver, frequency: 440, sampleRate: 16_000)
+        try await recording.pause()
+        guard case let .secured(saved) = await recording.stop() else { return XCTFail("essential save") }
+        // Essential audio save finished while the log's queue is still blocked.
+        XCTAssertFalse(gate.returned)
+        gate.release.signal()
+        let diagnosticState = try await log.summary()
+        XCTAssertEqual(diagnosticState.lastFailure, .storage)
+        XCTAssertGreaterThan(diagnosticState.droppedEntries, 1)
+        XCTAssertEqual(saved.recorderSummary.mediaDurationMilliseconds, 1_000)
+        let directory = fixture.root.appendingPathComponent(saved.location.folderName.rawValue)
+        let media = try await decodeIntegrationAsset(at: directory.appendingPathComponent("recovery/audio.recovery.mov"))
+        XCTAssertGreaterThan(media.decodedBytes, 0)
+        let events = try decodeIntegrationEvents(at: directory.appendingPathComponent("events.jsonl"))
+        XCTAssertEqual(events.filter { $0.kind == .recordingPaused }.count, 1)
+        let originals = try t25FileBytes(directory)
+        try await log.clear()
+        try await log.export(to: base.appendingPathComponent("failed-diagnostics.jsonl"))
+        for (url, bytes) in originals { XCTAssertEqual(try Data(contentsOf: url), bytes) }
+        let scopeCounts = await fixture.bookmarks.counts(); XCTAssertEqual(scopeCounts.start, scopeCounts.stop)
+        try await store.close()
+    }
+
     func testT24RealAACAndTranscriptExcludePausedAudioAcrossThreeEpochs() async throws {
         let fixture = try RecordingFileIntegrationFixture(); defer { fixture.cleanup() }
         let roots = StorageRootManager(applicationSupportDirectory: fixture.applicationSupport, bookmarkCodec: fixture.bookmarks)
@@ -1314,6 +1358,34 @@ private actor T19IntegrationAutomaticExitSpy: LifecycleTerminationRequesting {
         guard await isStillValid() else { return false }
         count += 1
         return true
+    }
+}
+
+private func t25FileBytes(_ directory: URL) throws -> [URL: Data] {
+    let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey]))
+    var originals: [URL: Data] = [:]
+    for case let url as URL in enumerator {
+        if try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+            originals[url] = try Data(contentsOf: url)
+        }
+    }
+    return originals
+}
+
+private final class T25DiagnosticWriteGate: @unchecked Sendable {
+    let entered = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var first = true
+    private var didReturn = false
+    var returned: Bool { lock.withLock { didReturn } }
+    func fail() throws {
+        let block = lock.withLock { let value = first; first = false; return value }
+        if block {
+            entered.signal(); _ = release.wait(timeout: .now() + 30)
+            lock.withLock { didReturn = true }
+        }
+        throw DiagnosticFailure.storage
     }
 }
 

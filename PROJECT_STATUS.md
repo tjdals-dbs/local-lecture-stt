@@ -7,9 +7,9 @@
 
 ## Current position
 
-- Current milestone: M4 product UI. M3 real-time STT and canonical transcript tasks are complete.
-- Next Task: T25 integrated error presentation and local diagnostic logs.
-- Latest completed Task: T24 recording pause and resume, reviewed and squash-integrated into dev under the continuous-work authorization.
+- Current milestone: M4 product UI implementation complete through T25; G3 feature-completeness review is pending.
+- Next step: G3 feature-completeness review, then T26 fault-injection and recovery integration tests. Neither is performed by T25.
+- Latest completed Task: T25 integrated error presentation and local diagnostics, reviewed and squash-integrated into dev under the continuous-work authorization.
 - Latest passed gate: G2 engine and model selection, approved on 2026-11-15 at dev `f6ba18d`
 - The recording app uses pinned whisper.cpp with verified non-quantized large-v3. After capture and speech settlement, it compacts the journal to canonical JSON, generates TXT/Markdown, and completes metadata/catalog publication. T18 segment order and times are preserved; healthy completed sessions verify on read-only roots, while missing/stale exports require repair. The single window now provides session rows, root selection, a validated model picker and model download/import/deletion management. Text-only editing is available through the repository API; active recording now has stable final/partial transcript presentation, scroll-follow controls and background progress; completed-session detail now provides playback/seek, text/title editing, derived regeneration, Finder reveal and confirmed Trash. [T23 acceptance](docs/T23_ACCEPTANCE.md). [Architecture](docs/ARCHITECTURE.md#t20-canonical-transcript-and-derived-files) · [Engine and model decision](docs/T16_ENGINE_MODEL_DECISION.md)
 
@@ -17,14 +17,14 @@
 
 - Remote: public `origin` is connected to `https://github.com/tjdals-dbs/local-lecture-stt.git`. On 2026-11-25 the user approved retaining public visibility after the code/history/Actions audit and accepted the personal email and local-path exposure.
 - GitHub default branch: `main`
-- Approved T24 source on `task/t24-recording-pause-resume`: `3de80561bd1f4a2a8034a1bc42d01fb6194ab3eb`. Separate frozen-source/repair review, full local checks and [exact-source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/45551796137) passed. The user explicitly reaffirmed integration and verified branch cleanup on 2026-11-25; G1 remains unverified.
-- `dev` integration base: `d2d96456cc149b58a5fc5cc6248634881c8e7218` (T23). The delivery handoff identifies the resulting T24 integration commit, committed-dev validation, exact-commit CI and branch cleanup.
+- Approved T25 source on `task/t25-errors-local-diagnostics`: `ccff3ebfddd745c0c3b56a5086b6ebb0b95627d1`. Separate read-only review/repairs, full local checks and [exact-source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/45560893166) passed. The 2026-11-25 continuous-work authorization includes dev integration and verified cleanup; G1 remains unverified.
+- `dev` integration base: `04b7bac2f7ce39a6f27458410a51cc3a4c7cfe7c` (T24). The delivery handoff identifies the resulting T25 integration commit, committed-dev validation, exact-commit CI and branch cleanup.
 - `main` and `origin/main`: preserved at the verified T01 baseline `38e126f92ac823d29306ea8c1f7703f7060a5818`
 - `main` policy: only buildable and runnable verified versions
 - `dev` policy: integration branch for completed Tasks
 - Task policy: one fresh implementation session and one `task/tNN-*` branch per Task; the same session handles review fixes and later authorized integration
-- Review policy: a task-branch CI-backed candidate must pass a separate acceptance/diff/test review before any completion status or dev integration; T24 has explicit authorization to continue after that review.
-- Pull Request policy: no PR for normal Tasks; reviewed work is locally squash merged into dev only with user authorization (a separate prompt by default, or an explicitly authorized continuous cycle such as T21 through T24).
+- Review policy: a task-branch CI-backed candidate must pass a separate acceptance/diff/test review before any completion status or dev integration; T25 has explicit authorization to continue after that review.
+- Pull Request policy: no PR for normal Tasks; reviewed work is locally squash merged into dev only with user authorization (a separate prompt by default, or an explicitly authorized continuous cycle such as T21 through T25).
 
 The actual Git status and remote state must be rechecked at the start of every task. This snapshot is informational and must not override Git.
 
@@ -60,11 +60,12 @@ The actual Git status and remote state must be rechecked at the start of every t
 | T22 active recording and real-time transcript UI | Complete on dev through the authorized continuous implementation/review/integration cycle. | Approved source passed 548 XCTest, 100 repeated T22 executions, SwiftPM/Python/Release checks and exact-source CI. Stable paged finals, independent partial/notices, scroll-follow policy, Stop during STT failure and operation-preserving finalization retry are covered. [Acceptance](docs/T22_ACCEPTANCE.md) |
 | T23 session detail, playback, editing and file management | Complete on dev through the authorized continuous implementation/review/integration cycle. | Approved source passed 570 XCTest, 220 repeated T23 executions, SwiftPM/Python/Release checks and exact-source CI. Text/time/original preservation, recoverable Trash, stale-scan rejection, partial-save cancellation and scope/quit safety are covered. [Acceptance](docs/T23_ACCEPTANCE.md) |
 | T24 recording pause and resume | Complete on dev through the authorized continuous implementation/review/integration cycle. | Reviewed source passed 591 XCTest, 210 initial T24 repetitions, 20 real-AAC repair repetitions and exact-source CI. Paused input exclusion, continuous media time, serialized persistence, speech boundaries and lifecycle/recovery behavior are covered. [Acceptance](docs/T24_ACCEPTANCE.md) |
+| T25 integrated errors and local diagnostics | Complete on dev through the authorized continuous implementation/review/integration cycle. | Approved source passed 607 XCTest, 160 repeated T25 executions, SwiftPM/Python/Release checks and exact-source CI. Cause/action/recovery messages, bounded private logs, safe export/delete and recording isolation are covered. [Acceptance](docs/T25_ACCEPTANCE.md) |
 | Session and context strategy | Confirmed | One Task per implementation session; coordinator session retained |
 
 ## Implementation Task status
 
-Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T24. T25 is next. G1 remains **Unverified**. G2 passed on 2026-11-15.
+Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T25. G3 review is next, followed by T26. G1 remains **Unverified**. G2 passed on 2026-11-15.
 
 ## Gate status
 
@@ -77,6 +78,8 @@ Section 9 of `IMPLEMENTATION_PLAN.md` records completion through T24. T25 is nex
 | G4 MVP complete | Pending | `v0.1.0` |
 
 ## Confirmed workflow decisions
+
+- T25 authorization (2026-11-25): after T24 integration, the user requested continuing directly with T25 under the same implementation/review/repair/test/CI/integration/cleanup workflow. G1 remains unverified, main unchanged, and official completion/checklist updates wait until integration. T26 is excluded.
 
 - T24 authorization (2026-11-25): the user authorized implementation, separate read-only review, repairs, full tests/task CI, then dev integration/full validation/CI and branch cleanup in this session. This supersedes the earlier T23-only scope for T24 only. G1 stays unverified, main unchanged, and completion/checklist updates wait until integration.
 
@@ -242,3 +245,11 @@ Keep this file concise. Detailed product requirements belong in `MVP_SPEC.md`, T
 - The initial billing-related runner block was resolved for the public retry. That retry exposed a macOS 15 AAC presentation-duration assertion inconsistent with the existing T08 tolerance. The test-only repair keeps the production policy unchanged and adds exact source/recovered packet count, compressed bytes, payload hash and timeline comparisons. The repaired tree passed all 591 XCTest and 20 repeated real-AAC integration executions locally; the original 21 T24 tests had already passed 210 repetitions.
 - Integration preserves the reviewed production/test/project tree. Only status, T24 checklist/public-visibility decision and integration evidence change. Committed-dev build/tests, SwiftPM/Python/Release checks, exact-commit CI and verified branch cleanup are required before final delivery; the delivery handoff records their actual results without a self-referential commit amendment.
 - G1 and physical microphone, signed Sandbox/TCC, lid/process-kill and long lecture checks remain unverified/manual. No product-spec deviation; main remains unchanged. T25 is next and requires its own authorization.
+
+## T25 handoff
+
+- Reviewed source: `ccff3ebfddd745c0c3b56a5086b6ebb0b95627d1`; latest dev base `04b7bac2f7ce39a6f27458410a51cc3a4c7cfe7c` was unchanged. The 2026-11-25 continuous-work authorization permits integration after the separate review and same-task repairs. [Exact-source CI](https://github.com/tjdals-dbs/local-lecture-stt/actions/runs/45560893166) passed every step, including 585 unit and 22 integration tests.
+- Common typed errors now separate cause, user action and recovery status across recording, model, storage, recovery, finalization and session detail. Local enum-only diagnostics exclude transcript/title/path/raw-error content, mirror durable session events, rotate within 30 days/100 MB and provide settings reveal/export/confirmed delete. Bounded log admission and disk failures cannot block recording; management is serialized with exclusive file publication. [Acceptance](docs/T25_ACCEPTANCE.md) · [Architecture](docs/ARCHITECTURE.md#t25-errors-and-local-diagnostics).
+- Final source passed 607 XCTest (no failures/skips), 16 tests × 10 = 160 repetitions, SwiftPM build, four Python tests and Release product-engine verification. Separate review repaired macOS path-alias handling and model-access guidance and added durable-event/idempotency and lifecycle assertions.
+- Integration preserves the approved source/test/project tree. Only status, T25 checklist and integration evidence change. Committed-dev full checks and exact-commit CI must pass before verified local/remote task cleanup and final delivery; the final delivery records actual results without amending a self-referential SHA.
+- Signed Sandbox/Finder/export dialog behavior, VoiceOver/native layout, physical devices/storage failure, lid/process-kill and long lecture checks remain manual. No product-spec deviation; G1 stays unverified and main unchanged. Next is G3 feature-completeness review, then T26 under a new authorization. No G3 pass or T26 implementation is claimed.

@@ -17,6 +17,7 @@ actor AudioFinalizationCoordinator {
     }
     private let authority: LifecycleWorkAuthority?
     private let worker: any AudioFinalizationWorking
+    private let diagnostics: any DiagnosticRecording
     private var generation: UInt64 = 0
     private var pending: [Job] = []
     private var active: Job?
@@ -25,7 +26,10 @@ actor AudioFinalizationCoordinator {
     private var waiters: [UInt64: [CheckedContinuation<AudioFinalizationResult, Never>]] = [:]
     private var observers: [UUID: AsyncStream<[AudioFinalizationSnapshot]>.Continuation] = [:]
 
-    init(worker: any AudioFinalizationWorking, authority: LifecycleWorkAuthority? = nil) { self.worker = worker; self.authority = authority }
+    init(worker: any AudioFinalizationWorking, authority: LifecycleWorkAuthority? = nil,
+         diagnostics: any DiagnosticRecording = NoopDiagnosticRecorder()) {
+        self.worker = worker; self.authority = authority; self.diagnostics = diagnostics
+    }
     private func key(_ request: AudioFinalizationRequest) -> Key {
         .init(root: request.location.rootID, session: request.location.sessionID, operation: request.operation)
     }
@@ -138,6 +142,12 @@ actor AudioFinalizationCoordinator {
             }
             let result = await task.value
             guard active?.generation == job.generation else { continue }
+            if let code = result.failure {
+                diagnostics.issue(UserIssues.finalization(code), source: .finalization, sessionID: job.request.location.sessionID)
+            }
+            if let failure = result.transcriptFailure {
+                diagnostics.issue(UserIssues.transcript(failure.code), source: .finalization, sessionID: job.request.location.sessionID)
+            }
             active = nil
             if let lease = job.lease { authority?.release(lease) }
             let key = key(job.request)

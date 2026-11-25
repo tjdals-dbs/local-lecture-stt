@@ -9,7 +9,9 @@ final class MicrophonePreviewViewModel: ObservableObject, LifecycleAuxiliaryWork
     @Published private(set) var level: Double = 0
     @Published private(set) var name = "기본 마이크"
     @Published private(set) var status = "입력 확인을 누르면 30초 동안 마이크 상태를 확인합니다."
-    @Published private(set) var noInput = false
+    @Published private(set) var noInput = false {
+        didSet { if noInput && !oldValue { diagnostics.issue(.init(code: .noInput), source: .recording) } }
+    }
     @Published private(set) var failureCode: CaptureErrorCode?
     private let permission: any MicrophonePermissionAuthorizing
     private let capture: any MicrophoneCapturing
@@ -21,10 +23,13 @@ final class MicrophonePreviewViewModel: ObservableObject, LifecycleAuxiliaryWork
     private var consumers: [Task<Void, Never>] = []
     private var observers: [UUID: AsyncStream<LifecycleAuxiliarySnapshot>.Continuation] = [:]
     private let duration: Duration
+    private let diagnostics: any DiagnosticRecording
 
     init(permission: any MicrophonePermissionAuthorizing, capture: any MicrophoneCapturing,
-         authority: LifecycleWorkAuthority? = nil, duration: Duration = .seconds(30)) {
+         authority: LifecycleWorkAuthority? = nil, duration: Duration = .seconds(30),
+         diagnostics: any DiagnosticRecording = NoopDiagnosticRecorder()) {
         self.permission = permission; self.capture = capture; self.authority = authority; self.duration = duration
+        self.diagnostics = diagnostics
     }
     func start() async {
         guard !active, stopTask == nil else { return }
@@ -95,7 +100,8 @@ final class MicrophonePreviewViewModel: ObservableObject, LifecycleAuxiliaryWork
             let invalidation = authority.admit(); authority.release(invalidation)
         }
         failureCode = code
-        status = "마이크 입력을 확인할 수 없습니다. 시스템 설정의 마이크 권한과 연결을 확인하세요. (\(code.rawValue))"
+        status = UserIssues.capture(code).message + " (\(code.rawValue))"
+        diagnostics.issue(UserIssues.capture(code), source: .recording)
         publish()
     }
     func workSnapshots() -> AsyncStream<LifecycleAuxiliarySnapshot> {

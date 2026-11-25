@@ -28,7 +28,16 @@ enum StorageRootViewState: Equatable {
 
 @MainActor
 final class StorageRootViewModel: ObservableObject {
-    @Published private(set) var state: StorageRootViewState = .loading
+    @Published private(set) var state: StorageRootViewState = .loading {
+        didSet {
+            guard state != oldValue else { return }
+            switch state {
+            case let .failed(code): diagnostics.issue(UserIssues.storage(code), source: .storage)
+            case .reauthorizationRequired: diagnostics.issue(.init(code: .storagePermission), source: .storage)
+            default: break
+            }
+        }
+    }
     /// A recovery action may target a historical root while `state` continues
     /// to describe the active root that is powering a live recording.  Keep
     /// that per-root failure available to the recovery UI instead of turning
@@ -40,11 +49,14 @@ final class StorageRootViewModel: ObservableObject {
     private let controller: any StorageRootControlling
     private let directorySelector: any DirectorySelecting
     private let onRootChanged: @MainActor @Sendable () -> Void
+    private let diagnostics: any DiagnosticRecording
 
-    init(controller: any StorageRootControlling, directorySelector: any DirectorySelecting, onRootChanged: @escaping @MainActor @Sendable () -> Void = {}) {
+    init(controller: any StorageRootControlling, directorySelector: any DirectorySelecting, onRootChanged: @escaping @MainActor @Sendable () -> Void = {},
+         diagnostics: any DiagnosticRecording = NoopDiagnosticRecorder()) {
         self.controller = controller
         self.directorySelector = directorySelector
         self.onRootChanged = onRootChanged
+        self.diagnostics = diagnostics
     }
 
     static var preview: StorageRootViewModel {
@@ -113,9 +125,11 @@ final class StorageRootViewModel: ObservableObject {
             onRootChanged()
         } catch let error as StorageError {
             historicalReauthorizationErrors[rootID] = error.code
+            diagnostics.issue(UserIssues.storage(error.code), source: .storage)
             state = stateBeforeHistoricalAttempt
         } catch {
             historicalReauthorizationErrors[rootID] = .bookmarkCreateFailed
+            diagnostics.issue(.init(code: .storagePermission), source: .storage)
             state = stateBeforeHistoricalAttempt
         }
     }

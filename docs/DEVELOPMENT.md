@@ -969,3 +969,16 @@ Manual checks, still pending (G1 remains unverified):
 3. Close/reopen the window while paused; it must keep active work. Confirm explicit Quit asks to continue or save essentials, and that completing Stop after the last window closes still follows the existing automatic-exit/error rules.
 4. Verify screen-off remains allowed and idle system sleep is prevented while paused. Lid/system sleep interrupts; wake must not resume recording. Reopen after a process kill while paused: preserve recoverable audio, mark capture interrupted, and resume finalization without starting the microphone.
 5. Disconnect the active microphone or revoke storage access during a transition. Confirm a typed failure, preserved recovery files, no stale transition restoring a terminal session, and usable controls after cleanup.
+
+## T25 diagnostic verification
+
+Use the existing unsigned arm64 Debug build/test command with a fresh result bundle in `/private/tmp/stt-t25-work`. Focus with `-only-testing:LocalLectureSTTTests/DiagnosticsTests`, `-only-testing:LocalLectureSTTTests/StorageRepositoryTests/testT25OnlyDurableEventsAreMirroredAndRecoveryRetriesStayIdempotent` and `-only-testing:LocalLectureSTTIntegrationTests/RecordingSessionFileIntegrationTests/testT25BlockedFailedDiagnosticsDoNotDelayRecordingAndManagementPreservesRealAudio`. Add `-test-iterations 10` for the export/clear/cancellation and recording-isolation repeats. SwiftPM, Python and Release bundle verification use the commands above. Fixtures are generated locally; no lecture, model download or real microphone input is required.
+
+Manual/Pending (use disposable sessions; G1 remains unverified):
+
+1. In a signed Sandbox build, open Settings → 로컬 진단 로그. Reveal the folder in Finder. Confirm it is in this app's Application Support, not a session root. Export to a user-selected folder, including an external volume and a folder reached through a macOS alias. Cancel the chooser and repeat. Files should be new JSONL reports and never overwrite an existing file.
+2. During recording, export and delete logs. Confirm meter/Stop remain usable; export contains only schema/date/source/enum signals/session UUID, with no transcript, title, prompt, raw NSError or audio. Stop and compare audio/transcript/events bytes before and after subsequent log deletion/export. Deleting app logs must preserve session events and data.
+3. On disposable copies, deny microphone permission, disconnect input, revoke root access, remove/corrupt a model or session file and provoke finalization failure. Check that cause, action and recovery label are distinct and the indicated retry/reauthorization/model controls exist. Restore access and retry; do not delete recovery data.
+4. Confirm warning layout, minimum window size, long Korean text and VoiceOver; the recording Stop control must stay visible. Close/reopen during export and request explicit Quit; cancellation should release the selected-folder scope after I/O. Real disk removal, full-volume behavior, TCC, signed Sandbox permissions and hardware/lid/long-recording tests are not established by unsigned fixtures.
+
+The retention clock/size and fault seams are test-only dependency injection. Production logging has no uploader and requires no network. [Acceptance matrix](T25_ACCEPTANCE.md) records automated results separately from these manual checks.

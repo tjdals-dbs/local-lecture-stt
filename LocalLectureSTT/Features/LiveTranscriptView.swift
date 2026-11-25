@@ -148,15 +148,14 @@ private struct SpeechNoticesView: View, Equatable {
         VStack(alignment: .leading, spacing: 4) {
             if state.phase == .finishing { ProgressView("남은 발화를 전사하는 중…") }
             if let code = state.failure {
-                Text("전사가 중단되었습니다 (\(code.rawValue)). 녹음과 오디오 저장은 별도로 계속됩니다.")
-                    .foregroundStyle(.orange).accessibilityIdentifier("transcript-failure")
+                IssueNoticeView(issue: UserIssues.speech(code)).accessibilityIdentifier("transcript-failure")
             }
-            if let warning = state.storageWarning {
-                Text("전사 저장 오류: \(warning) · 저장 상태를 확인하세요.").foregroundStyle(.orange)
+            if state.storageWarning != nil {
+                IssueNoticeView(issue: .init(code: .transcriptStorage))
             }
             if state.degraded {
-                Text("전사가 지연되어 임시 갱신을 줄였습니다 · 대기 \(state.pendingFinals)구간")
-                    .foregroundStyle(.secondary)
+                IssueNoticeView(issue: .init(code: .speechDelayed))
+                Text("대기 \(state.pendingFinals)구간").foregroundStyle(.secondary)
             }
             if state.inputDiscontinuities > 0 {
                 Text("일부 전사 입력이 누락되었습니다. 녹음 파일은 별도로 저장됩니다.").foregroundStyle(.orange)

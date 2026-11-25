@@ -3,6 +3,7 @@ import SwiftUI
 struct ModelSelectionView: View {
     @ObservedObject var models: ModelManagementViewModel
     var body: some View {
+        if models.loaded && models.choices.isEmpty { IssueNoticeView(issue: .init(code: .modelMissing)) }
         Picker("STT 모델", selection: Binding(get: { models.selectedKey }, set: { models.select($0) })) {
             if models.selectedKey == nil { Text("사용 가능한 모델 없음").tag(Optional<InstalledModelKey>.none) }
             ForEach(models.choices, id: \.key) { descriptor in
@@ -81,6 +82,7 @@ struct ModelManagementView: View {
                             Text(entry.manifest.map { "\($0.descriptor.engine.id.rawValue) · \($0.descriptor.variant)" } ?? "확인할 수 없는 모델")
                                 .font(.headline)
                             Text(Self.state(entry.state) + (entry.issue.map { " (\($0.rawValue))" } ?? ""))
+                            if let code = entry.issue { IssueNoticeView(issue: UserIssues.model(code)) }
                             if let manifest = entry.manifest {
                                 Text("\(manifest.origin == .suppliedLocal ? "가져온 모델" : "다운로드한 모델") · \(manifest.descriptor.model.revision)").font(.caption)
                                 HStack {

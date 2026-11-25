@@ -91,22 +91,28 @@ final class CatalogStartupCoordinator: ObservableObject {
         case failed(CatalogErrorCode)
     }
 
-    @Published private(set) var state: State = .idle
+    @Published private(set) var state: State = .idle {
+        didSet { if case .failed = state { diagnostics.issue(.init(code: .catalog), source: .catalog) } }
+    }
     @Published private(set) var recoverySnapshot: SessionRecoverySnapshot?
     @Published private(set) var items: [SessionCatalogItem] = []
     @Published private(set) var listFailure: CatalogErrorCode?
     private var listGeneration = 0
     private let catalog: any SessionCataloging
     private let recovery: SessionRecoveryCoordinator?
+    private let diagnostics: any DiagnosticRecording
+    private var reportedRecoveryIssues: Set<String> = []
     private var startupTask: Task<Void, Never>?
     private var recoveryObservation: Task<Void, Never>?
     private var refreshPending = false
     private var recoveryRefreshRequested = false
     private var recoveryRetryRequested = false
 
-    init(catalog: any SessionCataloging, recovery: SessionRecoveryCoordinator? = nil) {
+    init(catalog: any SessionCataloging, recovery: SessionRecoveryCoordinator? = nil,
+         diagnostics: any DiagnosticRecording = NoopDiagnosticRecorder()) {
         self.catalog = catalog
         self.recovery = recovery
+        self.diagnostics = diagnostics
     }
 
     func start() {
@@ -174,6 +180,18 @@ final class CatalogStartupCoordinator: ObservableObject {
             for await value in stream {
                 guard let self, !Task.isCancelled else { return }
                 self.recoverySnapshot = value
+                if let report = value.report {
+                    var current: Set<String> = []
+                    for item in report.items {
+                        guard let issue = UserIssues.recovery(item) else { continue }
+                        let key = item.id + "." + issue.code.rawValue
+                        current.insert(key)
+                        if !self.reportedRecoveryIssues.contains(key) {
+                            self.diagnostics.issue(issue, source: .recovery, sessionID: item.sessionID)
+                        }
+                    }
+                    self.reportedRecoveryIssues = current
+                }
                 if value.phase == .ready { await self.refreshItems() }
             }
         }
@@ -190,6 +208,7 @@ final class CatalogStartupCoordinator: ObservableObject {
         } catch {
             guard generation == listGeneration else { return }
             listFailure = (error as? CatalogError)?.code ?? .stepFailed
+            diagnostics.issue(.init(code: .catalog), source: .catalog)
         }
     }
 }

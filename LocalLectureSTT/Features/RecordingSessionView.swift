@@ -46,6 +46,10 @@ struct RecordingSessionView: View {
             if let message = viewModel.lifecycleMessage {
                 Text(message).accessibilityIdentifier("lifecycle-save-state")
             }
+            ForEach(viewModel.snapshot.issues(includeSpeech: false)) { issue in
+                IssueNoticeView(issue: issue)
+                    .accessibilityIdentifier(issue.code == .noInput ? "recording-no-input-warning" : "recording-issue-\(issue.code.rawValue)")
+            }
             if viewModel.snapshot.speech.phase != .idle {
                 LiveTranscriptView(presentation: viewModel.transcript).equatable()
             }
@@ -92,11 +96,7 @@ struct RecordingSessionView: View {
             }
 
             if let failure = viewModel.snapshot.failure {
-                if case .speechModel = failure {
-                    Text("기본 STT 모델을 열 수 없습니다. 모델 설치와 파일 상태를 확인하세요.")
-                }
-                Label(failure.stableCode, systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.orange)
+                Text("진단 코드: \(failure.stableCode)").font(.caption)
                     .accessibilityIdentifier("recording-error-code")
             }
 
@@ -120,11 +120,9 @@ struct RecordingSessionView: View {
                      ? "기록 마무리 실패 · 오디오 보존" : RecordingSessionViewModel.finalizationText(value.phase))
             }
             if let result = value.result {
-                if let failure = result.failure { Text("오류: \(failure.rawValue)").monospaced() }
+                if let failure = result.failure { IssueNoticeView(issue: UserIssues.finalization(failure)) }
                 if let failure = result.transcriptFailure {
-                    Text(failure.code == .repairRequired ? "기록 파일을 복구하려면 저장 폴더의 쓰기 권한이 필요합니다." :
-                         "기록 오류: \(failure.code.rawValue)" + (failure.line.map { " · journal \($0)번째 줄" } ?? ""))
-                        .font(.caption)
+                    IssueNoticeView(issue: UserIssues.transcript(failure.code))
                 }
                 ForEach(Array(result.warnings.enumerated()), id: \.offset) { _, warning in
                     Text("추가 경고: \(warning)").font(.caption)
@@ -174,12 +172,6 @@ struct RecordingSessionView: View {
                     .accessibilityIdentifier("recording-input-level")
             }
 
-            if viewModel.snapshot.noInputWarning {
-                Label("마이크 입력이 감지되지 않습니다. 녹음은 계속됩니다.", systemImage: "waveform.slash")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .accessibilityIdentifier("recording-no-input-warning")
-            }
         }
     }
 
@@ -215,8 +207,8 @@ private struct MicrophonePreviewView: View {
     var body: some View {
         LabeledContent("마이크", value: preview.name)
         ProgressView(value: preview.level, total: 1).accessibilityLabel("시작 전 마이크 입력 레벨")
-        Text(preview.noInput ? "마이크 입력이 감지되지 않습니다. 연결과 음소거 상태를 확인하세요." : preview.status)
-            .font(.caption).foregroundStyle(preview.noInput ? .orange : .secondary)
+        if preview.noInput { IssueNoticeView(issue: .init(code: .noInput)) }
+        else { Text(preview.status).font(.caption).foregroundStyle(.secondary) }
         Button(preview.active ? "입력 확인 중지" : "마이크 입력 확인") {
             Task { await toggle() }
         }.accessibilityIdentifier("microphone-preview")

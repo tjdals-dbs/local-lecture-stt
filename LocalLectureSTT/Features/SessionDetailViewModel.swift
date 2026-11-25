@@ -16,6 +16,7 @@ final class SessionDetailViewModel: ObservableObject, LifecycleAuxiliaryWorking 
     private let player: any SessionPlaybackControlling
     private let authority: LifecycleWorkAuthority?
     private let changed: @MainActor () async -> Void
+    private let diagnostics: any DiagnosticRecording
     private var operation: Task<Void, Never>?
     private var playbackObservation: Task<Void, Never>?
     private var lease: UUID?
@@ -24,8 +25,10 @@ final class SessionDetailViewModel: ObservableObject, LifecycleAuxiliaryWorking 
     private var observers: [UUID: AsyncStream<LifecycleAuxiliarySnapshot>.Continuation] = [:]
 
     init(store: any SessionDetailStoring, player: any SessionPlaybackControlling,
-         authority: LifecycleWorkAuthority? = nil, changed: @escaping @MainActor () async -> Void = {}) {
+         authority: LifecycleWorkAuthority? = nil, changed: @escaping @MainActor () async -> Void = {},
+         diagnostics: any DiagnosticRecording = NoopDiagnosticRecorder()) {
         self.store = store; self.player = player; self.authority = authority; self.changed = changed
+        self.diagnostics = diagnostics
     }
     static var preview: SessionDetailViewModel {
         .init(store: UnavailableSessionDetailStore(), player: UnavailableSessionPlayback())
@@ -44,7 +47,9 @@ final class SessionDetailViewModel: ObservableObject, LifecycleAuxiliaryWorking 
                 if let failure = value.failure {
                     let invalidation = self.authority?.admit()
                     self.attention = true
-                    self.message = "오디오를 재생할 수 없습니다. (\(failure.rawValue))"
+                    let issue = UserIssues.detail(failure)
+                    self.message = issue.message + " (\(failure.rawValue))"
+                    self.diagnostics.issue(issue, source: .sessionDetail, sessionID: self.item?.sessionID)
                     if let invalidation { self.authority?.release(invalidation) }
                 }
                 self.publishWork()
@@ -59,6 +64,9 @@ final class SessionDetailViewModel: ObservableObject, LifecycleAuxiliaryWorking 
             self.playback = .init(); self.item = item; self.document = nil; self.deletion = nil
             guard let location = self.location else { return }
             self.document = try await self.store.load(location)
+            for value in self.document?.issues ?? [] {
+                self.diagnostics.issue(UserIssues.artifact(value), source: .sessionDetail, sessionID: location.sessionID)
+            }
         }
         return self.item?.sessionID == item.sessionID
     }
@@ -163,7 +171,9 @@ final class SessionDetailViewModel: ObservableObject, LifecycleAuxiliaryWorking 
             catch {
                 let invalidation = self.authority?.admit()
                 self.attention = true
-                self.message = "작업을 마치지 못했습니다. 자료를 보존했습니다. 저장 중 오류라면 내용을 확인한 뒤 재시도하세요. (\(SessionDetailDiagnostics.code(error)))"
+                let issue = UserIssues.error(error)
+                self.message = issue.message + " (\(SessionDetailDiagnostics.code(error)))"
+                self.diagnostics.issue(issue, source: .sessionDetail, sessionID: self.item?.sessionID)
                 if let invalidation { self.authority?.release(invalidation) }
             }
             self.busy = false; self.operation = nil; self.publishWork()

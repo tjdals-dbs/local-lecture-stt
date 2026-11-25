@@ -31,10 +31,14 @@ final class ModelManagementViewModel: ObservableObject, LifecycleAuxiliaryWorkin
     private var needsAttention = false { didSet { publishWork() } }
     private var previousAttention = false
 
+    private let diagnostics: any DiagnosticRecording
+
     init(repository: any ModelRepository, downloader: any ModelDownloading,
          authority: LifecycleWorkAuthority? = nil,
+         diagnostics: any DiagnosticRecording = NoopDiagnosticRecorder(),
          supports: @escaping @Sendable (ModelPackageDescriptor) -> Bool,
          importFolder: @escaping @MainActor (ModelPackageDescriptor?) async throws -> ModelImportResult? = { _ in nil }) {
+        self.diagnostics = diagnostics
         self.repository = repository; self.downloader = downloader
         self.supports = supports; self.importFolder = importFolder; self.authority = authority
     }
@@ -86,7 +90,7 @@ final class ModelManagementViewModel: ObservableObject, LifecycleAuxiliaryWorkin
             try await reloadInventory()
             // Persisted transferring work after a restart is NOT auto-resumed.
             // This presentation-only paused state never changes the persisted journal.
-        } catch { inventoryIsCurrent = false; needsAttention = !quiescing; message = Self.errorMessage(error) }
+        } catch { inventoryIsCurrent = false; needsAttention = !quiescing; message = reportError(error) }
     }
     private func reloadInventory() async throws {
         inventoryIsCurrent = false
@@ -102,7 +106,7 @@ final class ModelManagementViewModel: ObservableObject, LifecycleAuxiliaryWorkin
         operation = "모델 파일을 검증하는 중…"; message = nil; inventoryIsCurrent = false
         defer { operation = nil }
         do { _ = try await cancellable { try await self.repository.validate(key) }; try await reloadInventory() }
-        catch { needsAttention = !quiescing; message = Self.errorMessage(error) }
+        catch { needsAttention = !quiescing; message = reportError(error) }
     }
     func importModel(_ descriptor: ModelPackageDescriptor?) async {
         guard !busy, !recordingLocked else { return }
@@ -115,7 +119,7 @@ final class ModelManagementViewModel: ObservableObject, LifecycleAuxiliaryWorkin
                 message = result.warning.map { "설치 완료 · 확인 필요: \($0.rawValue)" } ?? "모델 가져오기 완료"
                 needsAttention = result.warning != nil
             }
-        } catch { needsAttention = !quiescing; message = Self.errorMessage(error) }
+        } catch { needsAttention = !quiescing; message = reportError(error) }
     }
     private func selectInstalled(_ key: InstalledModelKey) {
         if choices.contains(where: { $0.key == key }) { selectedKey = key }
@@ -128,7 +132,7 @@ final class ModelManagementViewModel: ObservableObject, LifecycleAuxiliaryWorkin
         do {
             let id = try await cancellable { try await self.downloader.start(key) }
             setDownload(try await downloader.snapshot(id)); watch(id)
-        } catch { needsAttention = !quiescing; message = Self.errorMessage(error) }
+        } catch { needsAttention = !quiescing; message = reportError(error) }
     }
     enum DownloadAction { case pause, resume, retry, cancel }
     func controlDownload(_ id: ModelDownloadID, action: DownloadAction) async {
@@ -157,7 +161,7 @@ final class ModelManagementViewModel: ObservableObject, LifecycleAuxiliaryWorkin
                 try await reloadInventory(); selectInstalled(value.key)
                 needsAttention = value.result?.warning != nil || value.failure != nil
             }
-        } catch { needsAttention = !quiescing; message = Self.errorMessage(error) }
+        } catch { needsAttention = !quiescing; message = reportError(error) }
         // Even a failed pause/cancel must keep observing the actual transfer.
         if shouldWatch { watch(currentID) }
     }
@@ -180,14 +184,14 @@ final class ModelManagementViewModel: ObservableObject, LifecycleAuxiliaryWorkin
                             try await self.reloadInventory(); self.selectInstalled(value.key)
                             self.message = value.result?.warning.map { "설치 완료 · 확인 필요: \($0.rawValue)" } ?? "모델 설치 완료"
                             self.needsAttention = value.result?.warning != nil || value.failure != nil
-                        } else if let failure = value.failure { self.needsAttention = true; self.message = Self.errorMessage(failure) }
+                        } else if let failure = value.failure { self.needsAttention = true; self.message = self.reportError(failure) }
                         return
                     }
                     try await Task.sleep(for: .milliseconds(350))
                 } catch is CancellationError { return }
                 catch {
                     guard let self, self.monitorGeneration == generation else { return }
-                    self.needsAttention = !self.quiescing; self.message = Self.errorMessage(error); return
+                    self.needsAttention = !self.quiescing; self.message = self.reportError(error); return
                 }
             }
         }
@@ -198,7 +202,7 @@ final class ModelManagementViewModel: ObservableObject, LifecycleAuxiliaryWorkin
         operation = "이 모델을 사용한 세션을 확인하는 중…"; message = nil
         defer { operation = nil }
         do { deletion = try await cancellable { try await self.repository.prepareDeletion(key) } }
-        catch { needsAttention = !quiescing; message = Self.errorMessage(error) }
+        catch { needsAttention = !quiescing; message = reportError(error) }
     }
     func cancelDeletion() { guard operation == nil else { return }; deletion = nil }
     func confirmDeletion(acknowledgeReferences: Bool, acknowledgeIncompleteCoverage: Bool) async {
@@ -213,7 +217,7 @@ final class ModelManagementViewModel: ObservableObject, LifecycleAuxiliaryWorkin
                 acknowledgeReferences: acknowledgeReferences, acknowledgeIncompleteCoverage: acknowledgeIncompleteCoverage)) }
             try await reloadInventory(); message = "모델을 삭제했습니다. 녹음과 기록은 보존됩니다."
         } catch {
-            needsAttention = !quiescing; message = Self.errorMessage(error)
+            needsAttention = !quiescing; message = reportError(error)
             // A partial delete can invalidate the previously selected package.
             do { try await reloadInventory() } catch { inventoryIsCurrent = false }
         }
@@ -266,29 +270,24 @@ final class ModelManagementViewModel: ObservableObject, LifecycleAuxiliaryWorkin
         monitorGeneration += 1; monitor?.cancel(); monitor = nil
         for value in downloads where value.phase == .transferring || value.phase == .installing {
             do { setDownload(try await downloader.pause(value.id)) }
-            catch { needsAttention = true; message = Self.errorMessage(error) }
+            catch { needsAttention = true; message = reportError(error) }
         }
         quiescing = false; publishWork()
     }
 
+    private func reportError(_ error: Error) -> String {
+        diagnostics.issue(UserIssues.error(error), source: .models)
+        return Self.errorMessage(error)
+    }
     static func errorMessage(_ error: Error) -> String {
+        let code: String
         if let value = error as? ModelDownloadFailure {
-            let detail: String
-            switch value.code {
-            case .insufficientCapacity: detail = "모델 설치에 필요한 저장 공간이 부족합니다."
-            case .capacityUnknown: detail = "사용 가능한 저장 공간을 확인하지 못했습니다."
-            case .transport, .httpStatus: detail = "다운로드에 실패했습니다. 인터넷 연결을 확인하고 다시 시도하세요."
-            case .install: detail = "모델 검증 또는 설치에 실패했습니다."
-            default: detail = "다운로드 상태를 확인하고 다시 시도하세요."
-            }
-            return "\(detail) (\(value.code.rawValue))" + (value.repository.map { " · \(errorMessage($0))" } ?? "")
-                + (value.cleanup.map { " · 정리 오류: \($0.rawValue)" } ?? "")
-        }
-        let failure = (error as? ModelOperationFailure) ?? ModelOperationFailure((error as? ModelRepositoryCode) ?? .storageUnavailable)
-        let detail = failure.cause == .busy ? "다른 작업에서 모델을 사용 중입니다. 작업이 끝난 뒤 다시 시도하세요." :
-            failure.cause == .integrityMismatch ? "모델 파일이 손상되었거나 선택한 모델과 다릅니다." :
-            failure.cause == .scopeDenied ? "모델 폴더 접근 권한이 필요합니다. 폴더를 다시 선택하세요." :
-            failure.cause == .staleAssessment ? "모델 상태가 바뀌었습니다. 삭제 요청을 다시 확인하세요." : "모델 작업을 완료하지 못했습니다."
-        return "\(detail) (\(failure.cause.rawValue))" + (failure.cleanupIssue.map { " · 정리 오류: \($0.rawValue)" } ?? "")
+            code = value.code.rawValue + (value.repository.map { " / " + $0.cause.rawValue } ?? "")
+                + (value.cleanup.map { " / " + $0.rawValue } ?? "")
+        } else if let value = error as? ModelOperationFailure {
+            code = value.cause.rawValue + (value.cleanupIssue.map { " / " + $0.rawValue } ?? "")
+        } else if let value = error as? ModelRepositoryCode { code = value.rawValue }
+        else { code = "model.operation" }
+        return UserIssues.error(error).message + " (\(code))"
     }
 }

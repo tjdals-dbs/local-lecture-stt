@@ -50,11 +50,13 @@ struct MainWindowView: View {
                     }
                 }.listStyle(.sidebar)
                 if case let .failed(code) = catalogStartup.state {
-                    Text("세션 검색 실패: \(code.rawValue)").font(.caption).foregroundStyle(.orange)
+                    IssueNoticeView(issue: .init(code: .catalog))
+                    Text("진단 코드: \(code.rawValue)").font(.caption)
                     Button("세션 다시 검색") { catalogStartup.start() }
                 }
                 if let code = catalogStartup.listFailure {
-                    Text("목록 갱신 실패: \(code.rawValue)").font(.caption).foregroundStyle(.orange)
+                    IssueNoticeView(issue: .init(code: .catalog))
+                    Text("진단 코드: \(code.rawValue)").font(.caption)
                 }
                 Button("목록 새로고침") { Task { await catalogStartup.refreshItems() } }
                     .padding(12)
@@ -137,7 +139,7 @@ struct MainWindowView: View {
         case let .failed(code):
             ContentUnavailableView {
                 Label("저장 폴더 오류", systemImage: "exclamationmark.triangle")
-            } description: { Text("저장 폴더에 접근할 수 없습니다. (\(code.rawValue))") }
+            } description: { IssueNoticeView(issue: UserIssues.storage(code)) }
               actions: { Button("다시 선택") { Task { await storageRoots.chooseActiveRoot() } } }
         }
     }
@@ -197,6 +199,7 @@ private struct RecoveryStatusView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("\(item.issue.folderName ?? item.issue.rootID.rawValue.uuidString): \(item.title)")
                             .font(.caption).foregroundStyle(.secondary)
+                        if let issue = UserIssues.recovery(item.issue) { IssueNoticeView(issue: issue) }
                         if let firstError = item.firstError { Text("최초 오류: \(firstError)").font(.caption2) }
                         if !item.warnings.isEmpty { Text("후속 경고: \(item.warnings.joined(separator: ", "))").font(.caption2) }
                         if let action = item.action {
@@ -211,12 +214,13 @@ private struct RecoveryStatusView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("\(notice.rootID.rawValue.uuidString): 저장 폴더 재승인 실패")
                             .font(.caption).foregroundStyle(.secondary)
-                        Text("저장 폴더 오류: \(notice.error.rawValue)").font(.caption2)
+                        IssueNoticeView(issue: UserIssues.storage(notice.error))
                         Button("이 폴더 재승인") { Task { await reauthorize(notice.rootID) } }
                     }
                 }
-                if let catalogWarning = presentation.catalogWarning { Text("카탈로그 경고: \(catalogWarning.rawValue)").font(.caption) }
-                if let discoveryWarning = presentation.discoveryWarning { Text("검색 경고: \(discoveryWarning)").font(.caption) }
+                if presentation.catalogWarning != nil || presentation.discoveryWarning != nil {
+                    IssueNoticeView(issue: .init(code: .catalog))
+                }
             }
         }
         .padding(.horizontal, 20)

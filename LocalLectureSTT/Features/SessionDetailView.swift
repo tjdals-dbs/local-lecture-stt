@@ -38,6 +38,7 @@ struct SessionDetailView: View {
                         DisclosureGroup("누락되거나 확인이 필요한 파일 \(document.issues.count)개") {
                             ForEach(Array(document.issues.enumerated()), id: \.offset) { _, issue in
                                 Text("\(issue.artifact): \(issue.code)").font(.caption)
+                                IssueNoticeView(issue: UserIssues.artifact(issue))
                             }
                         }.foregroundStyle(.orange)
                     }

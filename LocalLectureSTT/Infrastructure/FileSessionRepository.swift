@@ -4,11 +4,14 @@ actor FileSessionRepository: SessionRepository {
     private let roots: StorageRootManager
     private let atomicWriter: AtomicFileWriter
     private let jsonlWriter: JSONLWriter
+    private let diagnostics: any DiagnosticRecording
 
-    init(roots: StorageRootManager, atomicWriter: AtomicFileWriter = AtomicFileWriter(), jsonlWriter: JSONLWriter = JSONLWriter()) {
+    init(roots: StorageRootManager, atomicWriter: AtomicFileWriter = AtomicFileWriter(), jsonlWriter: JSONLWriter = JSONLWriter(),
+         diagnostics: any DiagnosticRecording = NoopDiagnosticRecorder()) {
         self.roots = roots
         self.atomicWriter = atomicWriter
         self.jsonlWriter = jsonlWriter
+        self.diagnostics = diagnostics
     }
 
     func createSession(sessionID: SessionID, createdAt: AbsoluteTime, timeZone: TimeZone) async throws -> SessionLocation {
@@ -64,6 +67,7 @@ actor FileSessionRepository: SessionRepository {
         try verify(record.sessionId, matches: location)
         let writer = jsonlWriter
         try await withArtifact(.events, at: location) { try writer.append(record, to: $0) }
+        diagnostics.sessionEvent(record)
     }
 
     func appendTranscriptJournal(_ record: TranscriptJournalRecord, at location: SessionLocation) async throws {
@@ -159,6 +163,7 @@ extension FileSessionRepository: SessionRecoveryPersisting {
             try jsonlWriter.append(event, to: access.url(eventPath))
             try access.validateDirectories()
             await lease.release()
+            diagnostics.sessionEvent(event)
             return nil
         } catch let error as AudioFinalizationCode {
             await lease.release()
