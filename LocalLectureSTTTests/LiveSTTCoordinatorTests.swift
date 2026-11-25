@@ -2,6 +2,64 @@ import XCTest
 @testable import LocalLectureSTT
 
 final class LiveSTTCoordinatorTests: XCTestCase {
+    func testT24PauseSealsOpenSpeechWithoutWaitingForSlowInferenceAndSuppressesLatePartial() async throws {
+        let f = try T19Fixture()
+        await f.start(); try f.send(2_000)
+        _ = try await f.engine.request(0)
+        try await f.engine.respond(0, .partial, "멈추기 전 임시")
+        _ = try await f.observed.wait { $0.partial != nil }
+        f.pause()
+        let paused = try await f.observed.wait { $0.inputPaused && $0.pendingFinals == 1 }
+        XCTAssertNil(paused.partial)
+        try await f.engine.respond(0, .final, "늦은 임시")
+        let sealed = try await f.engine.request(1)
+        XCTAssertEqual(sealed.audio.duration.rawValue, 2_000)
+        let current = await f.coordinator.currentSnapshot(); XCTAssertNil(current.partial)
+        try await f.engine.respond(1, .final, "정지 전 확정")
+        _ = try await f.observed.wait { $0.finals.count == 1 }
+        try f.send(400); f.pause()
+        let resumed = try await f.engine.request(2)
+        XCTAssertEqual(resumed.context.mediaStart.rawValue, 2_000)
+        XCTAssertEqual(resumed.context.session, sealed.context.session)
+        try await f.engine.respond(2, .final, "재개 후 확정")
+        f.finish(); await f.coordinator.waitUntilSettled()
+        let result = await f.coordinator.currentSnapshot()
+        XCTAssertNil(result.failure); XCTAssertEqual(result.inputDiscontinuities, 0)
+        XCTAssertEqual(result.finals.map(\.text), ["정지 전 확정", "재개 후 확정"])
+        XCTAssertEqual(result.finals.map(\.startMs.rawValue), [0, 2_000])
+        let counts = await f.engine.counts; XCTAssertEqual(counts, [1, 1, 0, 1])
+    }
+
+    func testT24LostPauseMarkerStillSeparatesSpeechThroughPCMGenerationEpoch() async throws {
+        let f = try T19Fixture()
+        await f.start(); try f.send(400)
+        _ = try await f.observed.wait { $0.inputMilliseconds == 400 }
+        f.pause(marker: false); try f.send(400)
+        let old = try await f.engine.request(0)
+        XCTAssertEqual(old.audio.duration.rawValue, 400)
+        try await f.engine.respond(0, .final, "앞 문장")
+        f.finish()
+        let new = try await f.engine.request(1)
+        XCTAssertEqual(new.context.mediaStart.rawValue, 400)
+        XCTAssertEqual(new.audio.duration.rawValue, 400)
+        try await f.engine.respond(1, .final, "뒤 문장")
+        await f.coordinator.waitUntilSettled()
+        let result = await f.coordinator.currentSnapshot()
+        XCTAssertEqual(result.finals.map(\.text), ["앞 문장", "뒤 문장"])
+        XCTAssertNil(result.failure)
+    }
+
+    func testT24EmptyPauseCyclesDoNotInventSpeechOrRestartEngine() async throws {
+        let f = try T19Fixture()
+        await f.start()
+        for _ in 0..<10 { f.pause() }
+        f.finish(); await f.coordinator.waitUntilSettled()
+        let result = await f.coordinator.currentSnapshot()
+        XCTAssertTrue(result.finals.isEmpty); XCTAssertNil(result.failure)
+        let requests = await f.engine.requests; XCTAssertTrue(requests.isEmpty)
+        let counts = await f.engine.counts; XCTAssertEqual(counts, [1, 1, 0, 1])
+    }
+
     func testConverterTailAtStopGoesDirectlyToFinalInference() async throws {
         let f = try T19Fixture(converter: T19TailConverter())
         await f.start()
@@ -366,9 +424,14 @@ private final class T19Fixture: @unchecked Sendable {
     let session: STTSessionConfiguration
     let coordinator: LiveSTTCoordinator
     let handle: CaptureHandle
-    let continuation: AsyncThrowingStream<PCMChunk, Error>.Continuation
+    let continuation: AsyncThrowingStream<CaptureSpeechInput, Error>.Continuation
     private var frame: Int64 = 0
     private var sequence: UInt64 = 0
+    private var epoch: UInt64 = 0
+    func pause(marker: Bool = true) {
+        epoch += 1
+        if marker { continuation.yield(.pause(.init(epoch: epoch, recordingChunkCount: sequence, mediaMilliseconds: UInt64(frame / 16)))) }
+    }
     init(capacity: Int = 4, mode: LanguageMode = .korean, journalFailure: Bool = false,
          journalGate: T14Gate? = nil, cancelGate: T14Gate? = nil,
          startGate: T14Gate? = nil, startFailure: STTErrorCode? = nil,
@@ -382,10 +445,10 @@ private final class T19Fixture: @unchecked Sendable {
         coordinator = LiveSTTCoordinator(engine: engine, session: session, repository: repository,
             location: location, converter: converter, detector: T19Detector(),
             maximumPendingFinals: capacity, publish: { await observed.append($0) })
-        let pair = AsyncThrowingStream<PCMChunk, Error>.makeStream()
+        let pair = AsyncThrowingStream<CaptureSpeechInput, Error>.makeStream()
         continuation = pair.continuation
         handle = CaptureHandle(generation: 1, device: .init(identity: "test", displayName: "test"),
-            recordingPCM: .init { $0.finish() }, speechPCM: pair.stream,
+            recordingPCM: .init { $0.finish() }, speechInputs: pair.stream,
             events: .init { $0.finish() }, inputSignalStates: .init { $0.finish() })
         handle.timeline.recordOrigin(0)
     }
@@ -393,9 +456,9 @@ private final class T19Fixture: @unchecked Sendable {
     func send(_ ms: Int, voice: Bool = true, at: Int64? = nil, sequence: UInt64? = nil) throws {
         frame = at ?? frame
         self.sequence = sequence ?? self.sequence
-        continuation.yield(try PCMChunk(generation: 1, sequence: self.sequence,
+        continuation.yield(.pcm(try PCMChunk(generation: 1, sequence: self.sequence,
             format: PCMFormatDescription(sampleRate: 16_000, channelCount: 1), frameCount: ms * 16,
-            sourceSampleTime: frame, samples: Array(repeating: voice ? 0.2 : 0, count: ms * 16)))
+            sourceSampleTime: frame, samples: Array(repeating: voice ? 0.2 : 0, count: ms * 16), segmentEpoch: epoch)))
         frame += Int64(ms * 16); self.sequence += 1
     }
     func finish() { continuation.finish() }

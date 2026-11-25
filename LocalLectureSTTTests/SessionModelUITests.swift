@@ -400,18 +400,18 @@ private actor UIPreviewCapture: MicrophoneCapturing {
     var running = false
     var inputs: AsyncStream<InputSignalSample>.Continuation?
     var recording: AsyncThrowingStream<PCMChunk, Error>.Continuation?
-    var speech: AsyncThrowingStream<PCMChunk, Error>.Continuation?
+    var speech: AsyncThrowingStream<CaptureSpeechInput, Error>.Continuation?
     var events: AsyncStream<CaptureEvent>.Continuation?
     func currentLifecycle() -> CaptureLifecycle { running ? .running : .idle }
     func start() -> CaptureHandle {
         starts += 1; running = true
         let r = AsyncThrowingStream<PCMChunk, Error>.makeStream()
-        let s = AsyncThrowingStream<PCMChunk, Error>.makeStream()
+        let s = AsyncThrowingStream<CaptureSpeechInput, Error>.makeStream()
         let e = AsyncStream<CaptureEvent>.makeStream()
         let i = AsyncStream<InputSignalSample>.makeStream()
         recording = r.continuation; speech = s.continuation; events = e.continuation; inputs = i.continuation
         return .init(generation: 1, device: .init(identity: "fixture", displayName: "Synthetic microphone"),
-            recordingPCM: r.stream, speechPCM: s.stream, events: e.stream, inputSignalStates: i.stream)
+            recordingPCM: r.stream, speechInputs: s.stream, events: e.stream, inputSignalStates: i.stream)
     }
     func stop() async {
         if shouldHoldStop {

@@ -78,6 +78,7 @@ final class InputSignalMonitor: @unchecked Sendable {
     private var signalState: InputSignalState = .stopped
     private var lastActiveAt: TimeInterval = 0
     private var lastPublicationAt: TimeInterval?
+    private var paused = false
 
     init(clock: any MonotonicClock = SystemMonotonicClock(), scheduler: any InputSignalScheduling = DispatchInputSignalScheduler(), configuration: InputSignalMonitorConfiguration = .production) {
         self.clock = clock
@@ -95,6 +96,7 @@ final class InputSignalMonitor: @unchecked Sendable {
         continuation = streamContinuation
         self.generation = generation
         signalState = .observing
+        paused = false
         lastActiveAt = now
         lastPublicationAt = now
         streamContinuation.yield(InputSignalSample(generation: generation, sequence: nil, monotonicSeconds: now, normalizedLevel: 0, rmsDBFS: configuration.floorDBFS, peakDBFS: configuration.floorDBFS, state: .observing))
@@ -108,7 +110,7 @@ final class InputSignalMonitor: @unchecked Sendable {
         let now = clock.now()
         lock.lock()
         defer { lock.unlock() }
-        guard generation == chunk.generation, signalState != .stopped else { return }
+        guard generation == chunk.generation, signalState != .stopped, !paused else { return }
         let isRecovery = stats.rmsDBFS >= configuration.recoveryThresholdDBFS
         let isSignificant = stats.rmsDBFS >= configuration.inactiveThresholdDBFS
         if isSignificant { lastActiveAt = now }
@@ -117,6 +119,15 @@ final class InputSignalMonitor: @unchecked Sendable {
         else if signalState == .observing && isSignificant { signalState = .active }
         // A transition must be visible immediately; otherwise normal active frames remain throttled.
         publishIfNeeded(sequence: chunk.sequence, now: now, stats: stats, force: signalState != previousState)
+    }
+
+    func setPaused(_ value: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard generation != nil, signalState != .stopped else { return }
+        paused = value
+        lastActiveAt = clock.now()
+        signalState = .observing
+        publishIfNeeded(sequence: nil, now: lastActiveAt, stats: .silence(floor: configuration.floorDBFS), force: true)
     }
 
     func stop() {
@@ -137,7 +148,7 @@ final class InputSignalMonitor: @unchecked Sendable {
         let now = clock.now()
         lock.lock()
         defer { lock.unlock() }
-        guard let generation, signalState != .stopped, now - lastActiveAt >= configuration.noInputAfter else { return }
+        guard let generation, !paused, signalState != .stopped, now - lastActiveAt >= configuration.noInputAfter else { return }
         guard signalState != .noInput else { return }
         signalState = .noInput
         publishIfNeeded(sequence: nil, now: now, stats: LevelStatistics.silence(floor: configuration.floorDBFS), force: true, generation: generation)

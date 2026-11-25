@@ -4,6 +4,90 @@ import XCTest
 @testable import LocalLectureSTT
 
 final class MicrophoneCaptureTests: XCTestCase {
+    func testT24RepeatedPauseRemovesPCMAndWallGapsFromBothStreams() async throws {
+        let driver = SyntheticCaptureDriver()
+        let capture = MicrophoneCaptureController(permission: FakePermission(status: .authorized), driver: driver,
+            buffers: .init(recordingCapacity: 16, speechCapacity: 16), monitor: testMonitor())
+        let handle = try await capture.start()
+        let format = try PCMFormatDescription(sampleRate: 48_000, channelCount: 1)
+        func send(_ sequence: UInt64, _ frame: Int64, _ value: Float) async throws {
+            await driver.emit(try PCMChunk(generation: handle.generation, sequence: sequence, format: format,
+                frameCount: 480, sourceSampleTime: frame, samples: Array(repeating: value, count: 480)))
+        }
+        try await send(0, 100, 0.1)
+        let first = try await capture.pause()
+        XCTAssertEqual(first, .init(epoch: 1, recordingChunkCount: 1, mediaMilliseconds: 10))
+        try await send(1, 580, 0.9); try await send(2, 1_060, 0.9)
+        try await capture.resume()
+        try await send(3, 480_100, 0.2)
+        let second = try await capture.pause()
+        XCTAssertEqual(second.mediaMilliseconds, 20)
+        try await send(4, 480_580, 0.9)
+        try await capture.resume()
+        try await send(5, 960_100, 0.3)
+        await capture.stop()
+        let audio = try await collect(handle.recordingPCM)
+        let speech = try await collect(handle.speechInputs)
+        XCTAssertEqual(audio.map(\.sourceSampleTime), [100, 580, 1_060])
+        XCTAssertEqual(audio.map(\.sequence), [0, 1, 2])
+        XCTAssertEqual(audio.map(\.segmentEpoch), [0, 1, 2])
+        XCTAssertEqual(audio.map { $0.samples[0] }, [0.1, 0.2, 0.3])
+        XCTAssertEqual(speech, [.pcm(audio[0]), .pause(first), .pcm(audio[1]), .pause(second), .pcm(audio[2])])
+        let counts = await driver.counts
+        XCTAssertEqual(counts.prepare, 1); XCTAssertEqual(counts.start, 1); XCTAssertEqual(counts.stop, 1)
+    }
+
+    func testT24EmptyPausesAndDroppedSpeechMarkerKeepEpochAndInitialOrigin() async throws {
+        let driver = SyntheticCaptureDriver()
+        let capture = MicrophoneCaptureController(permission: FakePermission(status: .authorized), driver: driver,
+            buffers: .init(recordingCapacity: 4, speechCapacity: 1), monitor: testMonitor())
+        let handle = try await capture.start()
+        for _ in 0..<3 { _ = try await capture.pause(); try await capture.resume() }
+        _ = try await capture.pause()
+        await driver.emit(try chunk(sequence: 0, generation: handle.generation))
+        try await capture.resume()
+        await driver.emit(try chunk(sequence: 1, generation: handle.generation))
+        await capture.stop()
+        let audio = try await collect(handle.recordingPCM)
+        let speech = try await collect(handle.speechInputs)
+        XCTAssertEqual(audio.count, 1); XCTAssertEqual(audio.first?.sequence, 0)
+        XCTAssertEqual(audio.first?.segmentEpoch, 4)
+        XCTAssertEqual(handle.timeline.sourceOrigin(), 1)
+        XCTAssertEqual(speech, audio.map { .pcm($0) })
+    }
+
+    func testT24MonitorIgnoresPausedInputAndRestartsNoInputGrace() async throws {
+        let clock = ManualClock(); let scheduler = ManualScheduler()
+        let monitor = InputSignalMonitor(clock: clock, scheduler: scheduler)
+        let stream = monitor.start(generation: 1)
+        monitor.setPaused(true)
+        clock.advance(by: 100); scheduler.tick()
+        monitor.receive(try chunk(sequence: 0, generation: 1, samples: [1]))
+        monitor.setPaused(false)
+        clock.advance(by: 4.9); scheduler.tick()
+        clock.advance(by: 0.1); scheduler.tick()
+        monitor.stop()
+        let values = await collect(stream)
+        XCTAssertEqual(values.map(\.state), [.observing, .observing, .observing, .noInput, .stopped])
+        XCTAssertEqual(values[3].monotonicSeconds, 105, accuracy: 0.001)
+        XCTAssertTrue(values.allSatisfy { $0.normalizedLevel == 0 })
+    }
+
+    func testT24DeviceFailureWhilePausedClosesOnceAndRejectsResume() async throws {
+        let driver = SyntheticCaptureDriver()
+        let capture = MicrophoneCaptureController(permission: FakePermission(status: .authorized), driver: driver, monitor: testMonitor())
+        let handle = try await capture.start()
+        _ = try await capture.pause()
+        await driver.emitRuntime(.activeDeviceDisconnected)
+        await waitForLifecycle(capture, .failed(.activeDeviceDisconnected))
+        do { try await capture.resume(); XCTFail("must not reopen failed input") }
+        catch let failure as CaptureError { XCTAssertEqual(failure.code, .startInterrupted) }
+        await capture.stop()
+        let events = await collect(handle.events)
+        XCTAssertEqual(events.filter { if case .terminalFailure = $0 { true } else { false } }.count, 1)
+        let counts = await driver.counts; XCTAssertEqual(counts.stop, 1)
+    }
+
     func testAVFoundationAuthorizationStatusesMapToStableApplicationStates() {
         XCTAssertEqual(AVFoundationMicrophonePermissionAuthorizer.map(.notDetermined), .notDetermined)
         XCTAssertEqual(AVFoundationMicrophonePermissionAuthorizer.map(.authorized), .authorized)
@@ -166,7 +250,7 @@ final class MicrophoneCaptureTests: XCTestCase {
         let handle = try await controller.start()
         await driver.emit(try chunk(sequence: 0, generation: handle.generation))
         do {
-            var speechIterator = handle.speechPCM.makeAsyncIterator()
+            var speechIterator = handle.speechInputs.makeAsyncIterator()
             let firstSpeech = try await speechIterator.next()
             XCTAssertNotNil(firstSpeech)
         } // Releasing a speech subscription must not stop the owner or recording stream.

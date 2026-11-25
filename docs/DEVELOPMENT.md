@@ -957,3 +957,15 @@ Manual/Pending (use disposable sessions; G1 remains unverified):
 5. Move or corrupt copies of individual files outside the app and reopen/refresh the session. Missing audio disables seeking; invalid audio fails without deleting it; corrupt JSON disables editing while other files stay accessible. Reauthorize an unavailable root using existing settings and retry. Exercise restoration/read-only behavior on the actual storage volume as filesystem permissions and Sandbox behavior are not proved by the unsigned tests.
 
 [Acceptance matrix](T23_ACCEPTANCE.md) distinguishes real media/filesystem tests from controlled driver/Trash adapters and manual platform checks.
+
+## T24 pause and resume verification
+
+Use the existing arm64 Debug `xcodebuild ... build test`, SwiftPM/Python comparison checks and Release product-engine verification commands above. T24 tests are in MicrophoneCaptureTests, RecordingSessionCoordinatorTests, LiveSTTCoordinatorTests, AppLifecycleTests and RecordingSessionFileIntegrationTests; [acceptance matrix](T24_ACCEPTANCE.md) lists exact names. Synthetic fixtures need no model downloads, microphone permission or network. Add `-only-testing:<target>/<class>/<test>` to select them; `-test-iterations 10` repeats race coverage.
+
+Manual checks, still pending (G1 remains unverified):
+
+1. In a signed Sandbox build with an installed model, record a short phrase, pause, say a distinct excluded phrase, resume and say a third phrase. Repeat, including a pause before the first sound and a long pause. Stop while paused. Check audio playback and transcript timestamps omit the paused phrases/time. Final text for the last open utterance may finish asynchronously during pause.
+2. Confirm the active timer freezes, the input meter/no-input warning resets, Resume/Stop remain available, and model/language/transcript editing remain locked. The OS microphone indicator can remain on because the capture device stays owned while input is discarded.
+3. Close/reopen the window while paused; it must keep active work. Confirm explicit Quit asks to continue or save essentials, and that completing Stop after the last window closes still follows the existing automatic-exit/error rules.
+4. Verify screen-off remains allowed and idle system sleep is prevented while paused. Lid/system sleep interrupts; wake must not resume recording. Reopen after a process kill while paused: preserve recoverable audio, mark capture interrupted, and resume finalization without starting the microphone.
+5. Disconnect the active microphone or revoke storage access during a transition. Confirm a typed failure, preserved recovery files, no stale transition restoring a terminal session, and usable controls after cleanup.

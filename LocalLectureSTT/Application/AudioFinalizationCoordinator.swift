@@ -198,6 +198,8 @@ actor RecordingFinalizationCoordinator: RecordingSessionCoordinating {
         if let interruption { throw RecordingSessionFailure.interrupted(interruption) }
         return try await recording.start(configuration)
     }
+    func pause() async throws { try await recording.pause() }
+    func resume() async throws { try await recording.resume() }
     func stop() async -> RecordingSessionResult {
         if let stopTask { return await stopTask.value }
         let lease = authority?.admit(invalidating: false)

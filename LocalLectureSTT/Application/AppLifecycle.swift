@@ -257,7 +257,7 @@ actor AppLifecycleCoordinator {
                 // A normal Stop already owns `.securing`; sleep/power-off joins
                 // its resource settlement below and must not rewrite that
                 // capture outcome as interrupted.
-                if before.phase == .preparing || before.phase == .recording || before.phase == .securing || before.phase == .securedAwaitingFinalization {
+                if before.phase == .preparing || before.phase == .recording || before.phase == .paused || before.phase == .securing || before.phase == .securedAwaitingFinalization {
                     _ = await recording.interruptForLifecycle(reason, admission: admission)
                 }
                 // Never wait for export; cancellation waits only for owned
@@ -296,7 +296,7 @@ actor AppLifecycleCoordinator {
         let evidence = await recording.essentialSaveEvidence()
         let decision: AppTerminationDecision
         switch recordingSnapshot.phase {
-        case .preparing, .recording: decision = .needsRecordingChoice
+        case .preparing, .recording, .paused: decision = .needsRecordingChoice
         case .securing: decision = .terminateLater
         case .error, .interrupted: decision = evidence?.mayTerminate == true && !snapshot.hasRelevantWork && !snapshot.blocksExplicitTermination ? .terminateNow : .terminateCancel
         case .idle, .securedAwaitingFinalization:
@@ -339,7 +339,7 @@ actor AppLifecycleCoordinator {
         let initial = await recording.currentSnapshot()
         var evidence = await recording.essentialSaveEvidence()
         var firstFailure: RecordingSessionFailure?
-        if initial.phase == .preparing || initial.phase == .recording || initial.phase == .securing || initial.phase == .securedAwaitingFinalization {
+        if initial.phase == .preparing || initial.phase == .recording || initial.phase == .paused || initial.phase == .securing || initial.phase == .securedAwaitingFinalization {
             let result = await recording.interruptForLifecycle(.applicationQuit, admission: admission)
             if case let .error(failure) = result {
                 if case .interrupted = failure {} else { firstFailure = failure }
@@ -419,7 +419,7 @@ actor AppLifecycleCoordinator {
         }
         let recordingWork: Bool
         switch recordingValue.phase {
-        case .preparing, .recording, .securing:
+        case .preparing, .recording, .paused, .securing:
             recordingWork = true
         case .securedAwaitingFinalization:
             // T07 publishes this state just before T08 is enqueued.  Treat a
@@ -481,7 +481,7 @@ actor AppLifecycleCoordinator {
                                         autoExitReserved: snapshot.autoExitReserved)
         let readiness: AppTerminationDecision
         switch recordingValue.phase {
-        case .preparing, .recording: readiness = .needsRecordingChoice
+        case .preparing, .recording, .paused: readiness = .needsRecordingChoice
         case .securing: readiness = .terminateLater
         case .error, .interrupted: readiness = saveEvidence?.mayTerminate == true && !snapshot.hasRelevantWork && !snapshot.blocksExplicitTermination ? .terminateNow : .terminateCancel
         case .idle, .securedAwaitingFinalization:

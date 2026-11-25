@@ -49,7 +49,7 @@ final class MicrophonePreviewViewModel: ObservableObject, LifecycleAuxiliaryWork
                     self.level = Double(sample.normalizedLevel); self.noInput = sample.state == .noInput
                 } },
                 Task { do { for try await _ in handle.recordingPCM {} } catch {} },
-                Task { do { for try await _ in handle.speechPCM {} } catch {} },
+                Task { do { for try await _ in handle.speechInputs {} } catch {} },
                 Task { for await event in handle.events {
                     guard self.generation == token, !Task.isCancelled else { return }
                     if case let .terminalFailure(code) = event {

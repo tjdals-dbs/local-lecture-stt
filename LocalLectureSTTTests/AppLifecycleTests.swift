@@ -135,6 +135,29 @@ final class AppLifecycleTests: XCTestCase {
         XCTAssertEqual(recoveryCalls, 1)
     }
 
+    func testT24PausedExplicitQuitJoinsOneEssentialSave() async {
+        let gate = LifecycleGate()
+        let recording = LifecycleRecordingStub(snapshot: .lifecycle(.paused), interruptGate: gate)
+        let finalization = LifecycleFinalizationStub()
+        let recovery = LifecycleRecoveryStub()
+        let lifecycle = AppLifecycleCoordinator(recording: recording, finalization: finalization, recovery: recovery,
+                                                activity: LifecycleActivitySpy(), termination: LifecycleTerminationSpy())
+        let first = Task { await lifecycle.resolveTermination(AppTerminationChoice.essentialSaveAndQuit) }
+        await gate.waitEntered()
+        let second = Task { await lifecycle.resolveTermination(AppTerminationChoice.essentialSaveAndQuit) }
+        await gate.release()
+        let firstAllowed = await first.value
+        let secondAllowed = await second.value
+        let interrupts = await recording.interruptCount()
+        let finalizationCalls = await finalization.quiesceCount()
+        let recoveryCalls = await recovery.cancelCount()
+        XCTAssertTrue(firstAllowed)
+        XCTAssertTrue(secondAllowed)
+        XCTAssertEqual(interrupts, 1)
+        XCTAssertEqual(finalizationCalls, 1)
+        XCTAssertEqual(recoveryCalls, 1)
+    }
+
     func testEssentialQuitFailureIsDeniedAndRetainsFirstTypedFailure() async {
         let recording = LifecycleRecordingStub(snapshot: .lifecycle(.recording),
                                                 interruptResult: RecordingSessionResult.error(.recorder(.writerFinishFailed)))
@@ -144,6 +167,18 @@ final class AppLifecycleTests: XCTestCase {
         let interrupts = await recording.interruptCount()
         XCTAssertFalse(allowed)
         XCTAssertEqual(interrupts, 1)
+    }
+
+    func testT24PausedSleepAndWakeInterruptWithoutAutomaticResume() async {
+        let recording = LifecycleRecordingStub(snapshot: .lifecycle(.paused))
+        let recovery = LifecycleRecoveryStub()
+        let lifecycle = AppLifecycleCoordinator(recording: recording, finalization: LifecycleFinalizationStub(),
+            recovery: recovery, activity: LifecycleActivitySpy(), termination: LifecycleTerminationSpy())
+        await lifecycle.handlePowerEvent(.willSleep)
+        await lifecycle.handlePowerEvent(.didWake)
+        let snapshot = await recording.currentSnapshot(); XCTAssertEqual(snapshot.phase, .interrupted)
+        let interrupts = await recording.interruptCount(); XCTAssertEqual(interrupts, 1)
+        let refreshes = await recovery.refreshCount(); XCTAssertEqual(refreshes, 1)
     }
 
     func testWakeWaitsForTheOwnedSleepCleanupBeforeRefreshingRecovery() async {
@@ -204,6 +239,20 @@ final class AppLifecycleTests: XCTestCase {
         let lifecycle = AppLifecycleCoordinator(recording: recording, finalization: LifecycleFinalizationStub(),
                                                 recovery: LifecycleRecoveryStub(), activity: LifecycleActivitySpy(), termination: LifecycleTerminationSpy())
         _ = await lifecycle.terminationDecision()
+        await lifecycle.userWindowCountChanged(0)
+        let interrupts = await recording.interruptCount()
+        let snapshot = await lifecycle.currentSnapshot()
+        XCTAssertEqual(interrupts, 0)
+        XCTAssertTrue(snapshot.hasRelevantWork)
+        XCTAssertTrue(snapshot.autoExitReserved)
+    }
+
+    func testT24PausedWindowRetainsActivityAndRequiresExplicitQuitChoice() async {
+        let recording = LifecycleRecordingStub(snapshot: .lifecycle(.paused))
+        let lifecycle = AppLifecycleCoordinator(recording: recording, finalization: LifecycleFinalizationStub(),
+                                                recovery: LifecycleRecoveryStub(), activity: LifecycleActivitySpy(), termination: LifecycleTerminationSpy())
+        let decision = await lifecycle.terminationDecision()
+        XCTAssertEqual(decision, .needsRecordingChoice)
         await lifecycle.userWindowCountChanged(0)
         let interrupts = await recording.interruptCount()
         let snapshot = await lifecycle.currentSnapshot()

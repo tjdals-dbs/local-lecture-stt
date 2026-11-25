@@ -15,6 +15,7 @@ enum LiveSTTPhase: String, Sendable { case idle, listening, finishing, finished,
 struct LiveSTTSnapshot: Sendable, Equatable {
     var phase: LiveSTTPhase = .idle
     var cleanupComplete = false
+    var inputPaused = false
     var finals: [TranscriptSegment] = []
     var partial: String?
     var language: LanguageCode?
@@ -103,8 +104,20 @@ actor LiveSTTCoordinator {
             var origin: Int64?
             var expectedSequence: UInt64?
             var expectedSample: Int64?
-            for try await chunk in handle.speechPCM {
+            var epoch: UInt64 = 0
+            for try await input in handle.speechInputs {
                 try checkRunning()
+                if case let .pause(boundary) = input {
+                    guard boundary.epoch >= epoch else { throw STTEngineError(.invalidInput) }
+                    if boundary.epoch > epoch { try await sealPauseBoundary() }
+                    epoch = boundary.epoch
+                    continue
+                }
+                guard case let .pcm(chunk) = input, chunk.segmentEpoch >= epoch else { throw STTEngineError(.invalidInput) }
+                // A bounded newest stream can drop a marker. Every resumed PCM
+                // carries its epoch so old/new speech can never be joined silently.
+                if chunk.segmentEpoch > epoch { try await sealPauseBoundary(); epoch = chunk.segmentEpoch }
+                snapshot.inputPaused = false
                 guard chunk.generation == handle.generation else { throw STTEngineError(.sessionMismatch) }
                 var discontinuity = false
                 if let expectedSequence, chunk.sequence != expectedSequence {
@@ -157,6 +170,18 @@ actor LiveSTTCoordinator {
         if let failure = snapshot.failure { await diagnostic(.sttError, code: "speech.\(failure.rawValue)") }
         cleaned = true
         snapshot.cleanupComplete = true
+        await emit()
+    }
+
+    private func sealPauseBoundary() async throws {
+        snapshot.inputPaused = true
+        snapshot.partial = nil
+        let tail = try await converter.drain()
+        try checkRunning()
+        try ingest(tail, allowsPartial: false)
+        for window in try segmenter.flush() { try enqueue(window) }
+        sealedEnd = max(sealedEnd, latestFrame)
+        startWorker()
         await emit()
     }
 
@@ -235,13 +260,13 @@ actor LiveSTTCoordinator {
                 }
                 switch response.kind {
                 case .partial:
-                    if window.boundary != .open || window.endFrame > sealedEnd {
+                    if !snapshot.inputPaused, window.boundary != .open || window.endFrame > sealedEnd {
                         snapshot.partial = response.segments.map(\.text).joined(separator: " ")
                     }
                 case .final:
                     terminal = true
                     if window.boundary == .open {
-                        if window.endFrame > sealedEnd {
+                        if !snapshot.inputPaused, window.endFrame > sealedEnd {
                             snapshot.partial = response.segments.map(\.text).joined(separator: " ")
                         }
                     } else {

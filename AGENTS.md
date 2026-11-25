@@ -26,6 +26,8 @@ If these disagree, do not silently choose one. Preserve data, stop at a safe poi
 
 ### Explicit continuous-work authorization
 
+On 2026-11-25 the user separately authorized T24 through implementation, a separate read-only review, repairs, full tests/task CI, dev integration/full tests/CI and branch cleanup in this session. This replaces the separate integration prompt for T24 only. G1 remains unverified, main unchanged, and completion/checklist updates wait until integration. T25 and later Tasks are excluded.
+
 On 2026-11-25 the user separately authorized T23 through implementation, separate read-only review, repairs, full tests/task CI, dev integration/full tests/CI and branch cleanup in this session. The separate integration prompt is replaced by that advance conditional authorization. G1 stays unverified and main unchanged; completion/checklist updates wait until integration. T24 and later Tasks are excluded.
 
 On 2026-11-25 the user separately authorized the same continuous cycle for T22: implementation, separate read-only review, same-Task repairs, full tests and exact-commit task CI, then dev integration, full integration validation/CI and branch cleanup. No further integration prompt is required for T22 after those checks pass. Completion/checklist updates still wait until integration. G1 remains unverified, main unchanged, and T23 or later Tasks are not authorized.

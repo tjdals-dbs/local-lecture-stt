@@ -18,7 +18,7 @@ struct RecordingSessionView: View {
                 case .preparing:
                     ProgressView("녹음을 안전하게 준비하는 중…")
                         .accessibilityIdentifier("recording-preparing")
-                case .recording:
+                case .recording, .paused:
                     activeRecordingView
                 case .securing:
                     ProgressView("안전하게 저장 중…")
@@ -140,12 +140,21 @@ struct RecordingSessionView: View {
     private var activeRecordingView: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Label("녹음 중", systemImage: "record.circle.fill")
+                Label(viewModel.snapshot.phase == .paused ? "일시정지" : "녹음 중",
+                      systemImage: viewModel.snapshot.phase == .paused ? "pause.circle.fill" : "record.circle.fill")
                     .font(.headline).foregroundStyle(.red)
                 Text(viewModel.elapsedText).monospacedDigit()
                     .accessibilityLabel("경과 시간 \(viewModel.elapsedText)")
                     .accessibilityIdentifier("recording-elapsed")
                 Spacer()
+                Button(viewModel.snapshot.phase == .paused ? "녹음 재개" : "일시정지") {
+                    Task { await viewModel.togglePause() }
+                }
+                .disabled(!viewModel.actions.canPause && !viewModel.actions.canResume)
+                .accessibilityIdentifier("recording-pause-resume")
+                if viewModel.snapshot.pauseTransitionInFlight {
+                    ProgressView().controlSize(.small).accessibilityLabel("녹음 상태 저장 중")
+                }
                 Button("녹음 종료") { Task { await viewModel.stopRecording() } }
                     .buttonStyle(.borderedProminent)
                     .disabled(!viewModel.actions.canStop)

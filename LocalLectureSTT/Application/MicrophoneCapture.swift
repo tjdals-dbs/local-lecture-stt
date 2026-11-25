@@ -41,8 +41,9 @@ struct PCMChunk: Sendable, Equatable {
     let sourceSampleTime: Int64
     /// An owned Float32 copy. No AVFoundation buffer or unsafe pointer escapes here.
     let samples: [Float]
+    let segmentEpoch: UInt64
 
-    init(generation: UInt64, sequence: UInt64, format: PCMFormatDescription, frameCount: Int, sourceSampleTime: Int64, samples: [Float]) throws {
+    init(generation: UInt64, sequence: UInt64, format: PCMFormatDescription, frameCount: Int, sourceSampleTime: Int64, samples: [Float], segmentEpoch: UInt64 = 0) throws {
         guard frameCount > 0, sourceSampleTime >= 0 else { throw CaptureError(.invalidPCM) }
         let expected = frameCount.multipliedReportingOverflow(by: format.channelCount)
         guard !expected.overflow, expected.partialValue == samples.count, samples.allSatisfy(\.isFinite) else {
@@ -54,6 +55,7 @@ struct PCMChunk: Sendable, Equatable {
         self.frameCount = frameCount
         self.sourceSampleTime = sourceSampleTime
         self.samples = samples
+        self.segmentEpoch = segmentEpoch
     }
 }
 
@@ -145,11 +147,22 @@ final class CaptureTimeline: @unchecked Sendable {
     func sourceOrigin() -> Int64? { lock.withLock { origin } }
 }
 
+struct CapturePauseBoundary: Codable, Sendable, Equatable {
+    let epoch: UInt64
+    let recordingChunkCount: UInt64
+    let mediaMilliseconds: UInt64
+}
+
+enum CaptureSpeechInput: Sendable, Equatable {
+    case pcm(PCMChunk)
+    case pause(CapturePauseBoundary)
+}
+
 struct CaptureHandle: Sendable {
     let generation: UInt64
     let device: InputDeviceSnapshot
     let recordingPCM: AsyncThrowingStream<PCMChunk, Error>
-    let speechPCM: AsyncThrowingStream<PCMChunk, Error>
+    let speechInputs: AsyncThrowingStream<CaptureSpeechInput, Error>
     let events: AsyncStream<CaptureEvent>
     let inputSignalStates: AsyncStream<InputSignalSample>
     var timeline = CaptureTimeline()
@@ -244,7 +257,7 @@ actor MicrophoneCaptureController {
                 generation: currentAttempt,
                 device: device,
                 recordingPCM: distributor.recordingStream,
-                speechPCM: distributor.speechStream,
+                speechInputs: distributor.speechStream,
                 events: distributor.eventStream,
                 inputSignalStates: signalStates,
                 timeline: distributor.timeline
@@ -256,6 +269,19 @@ actor MicrophoneCaptureController {
             let typed = CaptureError(.engineStartFailed)
             throw await rollbackStart(typed, attempt: currentAttempt)
         }
+    }
+
+    func pause() async throws -> CapturePauseBoundary {
+        guard lifecycle == .running, let distributor else { throw CaptureError(.startInterrupted) }
+        let boundary = try distributor.pause()
+        monitor.setPaused(true)
+        return boundary
+    }
+
+    func resume() async throws {
+        guard lifecycle == .running, let distributor else { throw CaptureError(.startInterrupted) }
+        monitor.setPaused(false)
+        try distributor.resume()
     }
 
     func stop() async {
@@ -343,16 +369,25 @@ extension CaptureError {
 /// AVFoundation object, does no I/O, and never waits for a consumer.
 private final class PCMDistributor: @unchecked Sendable {
     let recordingStream: AsyncThrowingStream<PCMChunk, Error>
-    let speechStream: AsyncThrowingStream<PCMChunk, Error>
+    let speechStream: AsyncThrowingStream<CaptureSpeechInput, Error>
     let eventStream: AsyncStream<CaptureEvent>
 
     private let lock = NSLock()
     private var recording: AsyncThrowingStream<PCMChunk, Error>.Continuation!
-    private var speech: AsyncThrowingStream<PCMChunk, Error>.Continuation!
+    private var speech: AsyncThrowingStream<CaptureSpeechInput, Error>.Continuation!
     private var events: AsyncStream<CaptureEvent>.Continuation!
     private var acceptsInput = true
     private var finished = false
     private var speechDropped: UInt64 = 0
+    private var paused = false
+    private var epoch: UInt64 = 0
+    private var skippedChunks: UInt64 = 0
+    private var removedFrames: Int64 = 0
+    private var lastRawEnd: Int64?
+    private var remapNext = false
+    private var acceptedChunks: UInt64 = 0
+    private var acceptedFrames: Int64 = 0
+    private var sampleRate: Double = 48_000
     let timeline = CaptureTimeline()
     private let terminal: @Sendable (CaptureError) -> Void
 
@@ -363,7 +398,7 @@ private final class PCMDistributor: @unchecked Sendable {
             recordingContinuation = $0
         }
         recording = recordingContinuation
-        var speechContinuation: AsyncThrowingStream<PCMChunk, Error>.Continuation!
+        var speechContinuation: AsyncThrowingStream<CaptureSpeechInput, Error>.Continuation!
         speechStream = AsyncThrowingStream(bufferingPolicy: .bufferingNewest(configuration.speechCapacity)) {
             speechContinuation = $0
         }
@@ -377,10 +412,43 @@ private final class PCMDistributor: @unchecked Sendable {
         }
     }
 
-    func accept(_ chunk: PCMChunk) -> Bool {
+    func accept(_ input: PCMChunk) -> Bool {
         var terminalError: CaptureError?
         lock.lock()
         guard acceptsInput, !finished else { lock.unlock(); return false }
+        if paused {
+            guard skippedChunks < UInt64.max else {
+                let failure = CaptureError(.invalidPCM)
+                finishLocked(event: .terminalFailure(failure.code), error: failure)
+                lock.unlock(); terminal(failure); return false
+            }
+            skippedChunks += 1
+            lock.unlock(); return false
+        }
+        let chunk: PCMChunk
+        do {
+            if remapNext, let lastRawEnd {
+                guard input.sourceSampleTime >= lastRawEnd else { throw CaptureError(.invalidPCM) }
+                let removed = removedFrames.addingReportingOverflow(input.sourceSampleTime - lastRawEnd)
+                guard !removed.overflow else { throw CaptureError(.invalidPCM) }
+                removedFrames = removed.partialValue
+            }
+            remapNext = false
+            let end = input.sourceSampleTime.addingReportingOverflow(Int64(input.frameCount))
+            let frames = acceptedFrames.addingReportingOverflow(Int64(input.frameCount))
+            guard !end.overflow, !frames.overflow, acceptedChunks < UInt64.max,
+                  input.sequence >= skippedChunks, input.sourceSampleTime >= removedFrames else { throw CaptureError(.invalidPCM) }
+            chunk = try PCMChunk(generation: input.generation, sequence: input.sequence - skippedChunks,
+                format: input.format, frameCount: input.frameCount, sourceSampleTime: input.sourceSampleTime - removedFrames,
+                samples: input.samples, segmentEpoch: epoch)
+            lastRawEnd = end.partialValue
+            acceptedFrames = frames.partialValue
+            sampleRate = input.format.sampleRate
+        } catch {
+            let failure = CaptureError(.invalidPCM)
+            finishLocked(event: .terminalFailure(failure.code), error: failure)
+            lock.unlock(); terminal(failure); return false
+        }
         timeline.recordOrigin(chunk.sourceSampleTime)
         switch recording.yield(chunk) {
         case .enqueued: break
@@ -409,7 +477,8 @@ private final class PCMDistributor: @unchecked Sendable {
             terminal(terminalError)
             return false
         }
-        switch speech.yield(chunk) {
+        acceptedChunks += 1
+        switch speech.yield(.pcm(chunk)) {
         case .enqueued: break
         case .dropped:
             speechDropped &+= 1
@@ -419,6 +488,28 @@ private final class PCMDistributor: @unchecked Sendable {
         }
         lock.unlock()
         return true
+    }
+
+    func pause() throws -> CapturePauseBoundary {
+        lock.lock(); defer { lock.unlock() }
+        guard acceptsInput, !finished else { throw CaptureError(.startInterrupted) }
+        let milliseconds = Double(acceptedFrames) * 1_000 / sampleRate
+        guard milliseconds.isFinite, milliseconds < Double(UInt64.max), epoch < UInt64.max else { throw CaptureError(.invalidPCM) }
+        if !paused {
+            paused = true; epoch += 1
+            let boundary = CapturePauseBoundary(epoch: epoch, recordingChunkCount: acceptedChunks, mediaMilliseconds: UInt64(milliseconds))
+            if case .dropped = speech.yield(.pause(boundary)) {
+                speechDropped &+= 1
+                events.yield(.speechDiscontinuity(droppedCount: speechDropped))
+            }
+        }
+        return .init(epoch: epoch, recordingChunkCount: acceptedChunks, mediaMilliseconds: UInt64(milliseconds))
+    }
+
+    func resume() throws {
+        lock.lock(); defer { lock.unlock() }
+        guard acceptsInput, !finished else { throw CaptureError(.startInterrupted) }
+        if paused { paused = false; remapNext = true }
     }
 
     func closeIntake() {
@@ -446,6 +537,10 @@ private final class PCMDistributor: @unchecked Sendable {
     private func finish(event: CaptureEvent, error: CaptureError?) {
         lock.lock()
         defer { lock.unlock() }
+        finishLocked(event: event, error: error)
+    }
+
+    private func finishLocked(event: CaptureEvent, error: CaptureError?) {
         guard !finished else { return }
         acceptsInput = false
         finished = true

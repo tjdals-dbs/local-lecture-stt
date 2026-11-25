@@ -5,6 +5,130 @@ import XCTest
 @testable import LocalLectureSTT
 
 final class RecordingSessionFileIntegrationTests: XCTestCase {
+    func testT24RealAACAndTranscriptExcludePausedAudioAcrossThreeEpochs() async throws {
+        let fixture = try RecordingFileIntegrationFixture(); defer { fixture.cleanup() }
+        let roots = StorageRootManager(applicationSupportDirectory: fixture.applicationSupport, bookmarkCodec: fixture.bookmarks)
+        _ = try await roots.registerSelectedDirectory(fixture.root)
+        let repository = FileSessionRepository(roots: roots)
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: fixture.applicationSupport)
+        let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: store)
+        let driver = T19IntegrationDriver(sampleRate: 44_100)
+        let permission = AuthorizedIntegrationPermission()
+        let capture = MicrophoneCaptureController(permission: permission, driver: driver,
+            monitor: InputSignalMonitor(clock: FixedIntegrationMonotonicClock(), scheduler: NoopIntegrationSignalScheduler()))
+        let models = FileModelRepository(storeURL: { fixture.applicationSupport.appendingPathComponent("Models") },
+            sources: ModelImportSources(), validator: WhisperCppModelValidator(), references: SessionModelReferenceChecker(roots: roots))
+        let selected = try ProductionSpeechModel.make(repository: models)
+        let fake = try FakeSTTEngine(engine: selected.configuration.engine, capabilities: selected.engine.capabilities,
+            scenario: .init(requests: [
+                [.init(after: 0, kind: .final, text: "첫 발화")],
+                [.init(after: 0, kind: .final, text: "둘째 발화")],
+                [.init(after: 0, kind: .final, text: "셋째 발화")]
+            ]))
+        let speech = RecordingSpeechModel(engine: fake, configuration: selected.configuration, settings: selected.settings)
+        let recording = RecordingSessionCoordinator(roots: roots, permission: permission, capture: capture,
+            recorders: ClosureAudioRecorderFactory { AVFoundationAudioRecorder(roots: roots) }, repository: repository,
+            catalog: catalog, environment: .init(appVersion: "T24", osVersion: "synthetic"),
+            makeSpeechModel: { speech }, makeSpeechConverter: { SpeechPCMConverter() })
+        let worker = SessionFinalizationWorker(audio: FileAudioFinalizer(roots: roots, catalog: catalog),
+            transcripts: FileTranscriptRepository(roots: roots, catalog: catalog),
+            settleSpeech: { location, control in try await recording.settleSpeechForTranscript(at: location, control: control) })
+        let finalization = AudioFinalizationCoordinator(worker: worker)
+        let app = RecordingFinalizationCoordinator(recording: recording, finalization: finalization)
+        _ = try await app.start(.init(title: "T24 pause", timeZone: .gmt))
+        for frequency in [440.0, 880.0, 1_320.0] {
+            try await emitT24Tone(driver, frequency: frequency, sampleRate: 44_100)
+            try await app.pause()
+            try await emitT24Tone(driver, frequency: 3_000, sampleRate: 44_100)
+            if frequency != 1_320 { try await app.resume() }
+        }
+        guard case let .secured(saved) = await app.stop() else { return XCTFail("essential save") }
+        XCTAssertEqual(saved.recorderSummary.mediaDurationMilliseconds, 3_000)
+        let finished = await finalization.waitForResult(at: saved.location)
+        XCTAssertNil(finished?.failure); XCTAssertNil(finished?.transcriptFailure)
+        let document = try await repository.readMetadata(at: saved.location)
+        XCTAssertEqual(document.status, .completed)
+        XCTAssertEqual(document.activeDurationMs.rawValue, 3_000)
+        XCTAssertEqual(document.model, selected.configuration.model)
+        let transcript = try await repository.readTranscript(at: saved.location)
+        XCTAssertEqual(transcript.segments.map(\.text), ["첫 발화", "둘째 발화", "셋째 발화"])
+        XCTAssertEqual(transcript.segments.map(\.startMs.rawValue), [0, 1_000, 2_000])
+        XCTAssertTrue(transcript.segments.allSatisfy { $0.endMs.rawValue <= 3_000 })
+        let directory = fixture.root.appendingPathComponent(saved.location.folderName.rawValue)
+        let file = try AVAudioFile(forReading: directory.appendingPathComponent("audio.m4a"))
+        XCTAssertEqual(file.processingFormat.sampleRate, 48_000); XCTAssertEqual(file.processingFormat.channelCount, 1)
+        let pcm = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)))
+        try file.read(into: pcm)
+        let values = Array(UnsafeBufferPointer(start: try XCTUnwrap(pcm.floatChannelData)[0], count: Int(pcm.frameLength)))
+        XCTAssertEqual(Double(values.count) / 48_000, 3, accuracy: 0.025)
+        for (index, frequency) in [440.0, 880.0, 1_320.0].enumerated() {
+            let middle = Array(values[(index * 48_000 + 9_600)..<(index * 48_000 + 38_400)])
+            XCTAssertGreaterThan(t24ToneEnergy(middle, frequency: frequency), 0.9, "wrong epoch audio")
+            XCTAssertLessThan(t24ToneEnergy(middle, frequency: 3_000), 0.01, "paused audio leaked")
+        }
+        let events = try decodeIntegrationEvents(at: directory.appendingPathComponent("events.jsonl"))
+        XCTAssertEqual(events.filter { $0.kind == .recordingPaused }.map { $0.mediaPositionMs?.rawValue }, [1_000, 2_000, 3_000])
+        XCTAssertEqual(events.filter { $0.kind == .recordingResumed }.map { $0.mediaPositionMs?.rawValue }, [1_000, 2_000])
+        let scopes = await fixture.bookmarks.counts(); XCTAssertEqual(scopes.start, scopes.stop)
+        try await store.close()
+    }
+
+    func testT24PersistedPausedSessionRestartsAsInterruptedWithoutResumingCapture() async throws {
+        let fixture = try RecordingFileIntegrationFixture(); defer { fixture.cleanup() }
+        let roots = StorageRootManager(applicationSupportDirectory: fixture.applicationSupport, bookmarkCodec: fixture.bookmarks)
+        _ = try await roots.registerSelectedDirectory(fixture.root)
+        let repository = FileSessionRepository(roots: roots)
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: fixture.applicationSupport)
+        let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: roots), store: store)
+        let driver = T19IntegrationDriver()
+        let permission = AuthorizedIntegrationPermission()
+        let capture = MicrophoneCaptureController(permission: permission, driver: driver,
+            monitor: InputSignalMonitor(clock: FixedIntegrationMonotonicClock(), scheduler: NoopIntegrationSignalScheduler()))
+        let recording = RecordingSessionCoordinator(roots: roots, permission: permission, capture: capture,
+            recorders: ClosureAudioRecorderFactory { AVFoundationAudioRecorder(roots: roots) }, repository: repository,
+            catalog: catalog, environment: .init(appVersion: "T24", osVersion: "synthetic"))
+        _ = try await recording.start(.init(title: "paused predecessor", timeZone: .gmt))
+        try await emitT24Tone(driver, frequency: 440, sampleRate: 16_000)
+        try await recording.pause()
+        let directory = try XCTUnwrap(try FileManager.default.contentsOfDirectory(at: fixture.root,
+            includingPropertiesForKeys: nil).first { $0.hasDirectoryPath })
+        let pausedBytes = try Data(contentsOf: directory.appendingPathComponent("metadata.json"))
+        // Keep the actually persisted paused metadata and a closed recoverable MOV.
+        // Physical process kill and active-writer fragments remain G1 manual checks.
+        guard case let .secured(saved) = await recording.stop() else { return XCTFail("fixture close") }
+        let paused = try JSONDecoder().decode(SessionMetadataDocument.self, from: pausedBytes)
+        XCTAssertEqual(paused.status, .paused)
+        XCTAssertEqual(paused.activeDurationMs.rawValue, 1_000)
+        let media = AVFoundationFinalizationMedia()
+        let source = try await media.inspect(directory.appendingPathComponent("recovery/audio.recovery.mov"),
+            requiresM4A: false, control: .init())
+        try await repository.writeMetadata(paused, at: saved.location)
+        let finalization = AudioFinalizationCoordinator(worker: FileAudioFinalizer(roots: roots, catalog: catalog))
+        let recovery = SessionRecoveryCoordinator(scanner: SessionFileScanner(roots: roots), persistence: repository,
+            finalization: finalization, catalog: catalog)
+        await recovery.start(); await recovery.waitForCurrentPassSettlement()
+        let recovered = try await repository.readMetadata(at: saved.location)
+        XCTAssertEqual(recovered.captureOutcome, .interrupted)
+        XCTAssertNotEqual(recovered.status, .recording); XCTAssertNotEqual(recovered.status, .paused)
+        let state = await capture.currentLifecycle(); XCTAssertEqual(state, .idle)
+        let audio = try await decodeIntegrationAsset(at: directory.appendingPathComponent("audio.m4a"))
+        // AVAsset presentation duration includes platform-dependent AAC edit-list
+        // trimming (0.956 s for this one-second fixture on the macOS 15 CI runner).
+        // Use the established T08 duration contract and independently require every
+        // compressed packet, byte and timeline boundary to survive recovery.
+        XCTAssertEqual(audio.durationSeconds, 1, accuracy: AudioFinalizationPolicy.durationToleranceSeconds)
+        XCTAssertGreaterThan(audio.sampleBufferCount, 0)
+        XCTAssertGreaterThan(audio.decodedBytes, 0)
+        let restored = try await media.inspect(directory.appendingPathComponent("audio.m4a"),
+            requiresM4A: true, control: .init())
+        XCTAssertEqual(restored.packetCount, source.packetCount)
+        XCTAssertEqual(restored.compressedBytes, source.compressedBytes)
+        XCTAssertEqual(restored.payloadSHA256, source.payloadSHA256)
+        XCTAssertEqual(restored.timelineStartSeconds, source.timelineStartSeconds, accuracy: 1.0 / 48_000)
+        XCTAssertEqual(restored.timelineEndSeconds, source.timelineEndSeconds, accuracy: 1.0 / 48_000)
+        try await store.close()
+    }
+
     @MainActor func testT20NormalStopCompletesCanonicalDerivedAndCatalogAfterSpeech() async throws {
         try await runT19Integration(failSpeech: false, completeTranscript: true)
     }
@@ -568,7 +692,8 @@ final class RecordingSessionFileIntegrationTests: XCTestCase {
         await capture.stop()
         var segmenter = UtteranceSegmenter()
         var finals: [SpeechWindow] = []
-        for try await chunk in handle.speechPCM {
+        for try await input in handle.speechInputs {
+            guard case let .pcm(chunk) = input else { continue }
             finals += try segmenter.append(chunk.samples, at: chunk.sourceSampleTime)
         }
         finals += try segmenter.flush()
@@ -830,6 +955,8 @@ private struct IntegrationDriverCounts: Sendable, Equatable {
 }
 
 private actor T19IntegrationDriver: MicrophoneCaptureDriving {
+    private let sampleRate: Double
+    init(sampleRate: Double = 16_000) { self.sampleRate = sampleRate }
     private var callback: (@Sendable (PCMChunk) -> Void)?
     private var generation: UInt64 = 0
     private var frame: Int64 = 0
@@ -844,7 +971,7 @@ private actor T19IntegrationDriver: MicrophoneCaptureDriving {
     func emit(_ samples: [Float]) throws {
         guard let callback else { throw CaptureError(.runtimeFailure) }
         callback(try PCMChunk(generation: generation, sequence: sequence,
-            format: PCMFormatDescription(sampleRate: 16_000, channelCount: 1), frameCount: samples.count,
+            format: PCMFormatDescription(sampleRate: sampleRate, channelCount: 1), frameCount: samples.count,
             sourceSampleTime: frame, samples: samples))
         frame += Int64(samples.count); sequence += 1
     }
@@ -1188,4 +1315,22 @@ private actor T19IntegrationAutomaticExitSpy: LifecycleTerminationRequesting {
         count += 1
         return true
     }
+}
+
+private func emitT24Tone(_ driver: T19IntegrationDriver, frequency: Double, sampleRate: Double) async throws {
+    let count = Int(sampleRate / 10)
+    for _ in 0..<10 {
+        let samples = (0..<count).map { Float(0.4 * sin(Double($0) * 2 * .pi * frequency / sampleRate)) }
+        try await driver.emit(samples)
+    }
+}
+
+private func t24ToneEnergy(_ samples: [Float], frequency: Double) -> Double {
+    var sine = 0.0, cosine = 0.0, total = 0.0
+    for (i, sample) in samples.enumerated() {
+        let angle = Double(i) * 2 * .pi * frequency / 48_000
+        let x = Double(sample)
+        sine += x * sin(angle); cosine += x * cos(angle); total += x * x
+    }
+    return 2 * (sine * sine + cosine * cosine) / (Double(samples.count) * max(total, 1e-12))
 }

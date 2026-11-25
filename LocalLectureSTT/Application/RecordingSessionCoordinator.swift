@@ -4,6 +4,13 @@ protocol MicrophoneCapturing: Sendable {
     func currentLifecycle() async -> CaptureLifecycle
     func start() async throws -> CaptureHandle
     func stop() async
+    func pause() async throws -> CapturePauseBoundary
+    func resume() async throws
+}
+
+extension MicrophoneCapturing {
+    func pause() async throws -> CapturePauseBoundary { throw CaptureError(.startInterrupted) }
+    func resume() async throws { throw CaptureError(.startInterrupted) }
 }
 
 protocol RecordingStorageRootChecking: Sendable {
@@ -148,6 +155,7 @@ enum RecordingSessionPhase: String, Sendable, Equatable {
     case idle
     case preparing
     case recording
+    case paused
     case securing
     case securedAwaitingFinalization
     case interrupted
@@ -173,6 +181,9 @@ struct RecordingSessionSnapshot: Sendable, Equatable {
     let canStop: Bool
     let canReset: Bool
     var speech: LiveSTTSnapshot = .idle
+    var pauseTransitionInFlight = false
+    var canPause: Bool { phase == .recording && canStop && !pauseTransitionInFlight }
+    var canResume: Bool { phase == .paused && canStop && !pauseTransitionInFlight }
 
     static func idle(permissionStatus: MicrophonePermissionStatus? = nil) -> RecordingSessionSnapshot {
         RecordingSessionSnapshot(
@@ -214,6 +225,8 @@ protocol RecordingSessionCoordinating: Sendable {
     func currentSnapshot() async -> RecordingSessionSnapshot
     func refreshPermissionStatus() async
     func start(_ configuration: RecordingStartConfiguration) async throws -> RecordingSessionSnapshot
+    func pause() async throws
+    func resume() async throws
     func stop() async -> RecordingSessionResult
     func interrupt(_ reason: RecordingInterruptionReason) async -> RecordingSessionResult
     func recordSystemWakeIfApplicable() async
@@ -226,6 +239,8 @@ protocol RecordingSessionCoordinating: Sendable {
 }
 
 extension RecordingSessionCoordinating {
+    func pause() async throws { throw RecordingSessionFailure.busy }
+    func resume() async throws { throw RecordingSessionFailure.busy }
     func essentialSaveEvidence() async -> EssentialTerminationSaveResult? { nil }
     func interruptForLifecycle(_ reason: RecordingInterruptionReason, admission: UInt64?) async -> RecordingSessionResult { await interrupt(reason) }
     func invalidatePendingStart(_ reason: RecordingInterruptionReason, admission: UInt64?) async {}
@@ -265,6 +280,15 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         var eventKeys: Set<String> = []
         var primaryPumpDrainAuthorized = false
         var primaryPumpStartWaiters: [CheckedContinuation<Bool, Never>] = []
+        var appendedChunks: UInt64 = 0
+        var pumpEnded = false
+        var cutoffWaiters: [(UInt64, CheckedContinuation<Bool, Never>)] = []
+        var isPaused = false
+        var pauseEpoch: UInt64 = 0
+        var pauseCutoff: UInt64?
+        var elapsedBaseMilliseconds: UInt64 = 0
+        var resumedMonotonic: TimeInterval?
+        var signalAcceptAfter: TimeInterval = 0
         var pumpTask: Task<PumpOutcome, Never>?
         var captureEventTask: Task<Void, Never>?
         var recorderEventTask: Task<Void, Never>?
@@ -317,6 +341,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     private var active: ActiveSession?
     private var startOperation: StartOperation?
     private var settlementOperation: SettlementOperation?
+    private var pauseTransition: Task<Result<Void, RecordingSessionFailure>, Never>?
     private var cancelledStartTokens: Set<UInt64> = []
     /// An interruption is a durable policy decision for a start attempt.  It
     /// must be recorded before awaiting the start task: the task can be
@@ -391,7 +416,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     }
 
     func start(_ configuration: RecordingStartConfiguration) async throws -> RecordingSessionSnapshot {
-        guard startOperation == nil, settlementOperation == nil, active == nil,
+        guard startOperation == nil, settlementOperation == nil, pauseTransition == nil, active == nil,
               speechSnapshot.phase == .idle || speechSnapshot.cleanupComplete else {
             throw RecordingSessionFailure.busy
         }
@@ -441,6 +466,109 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
             if let workLease { authority?.release(workLease); self.workLease = nil }
             throw failure
         }
+    }
+
+    func pause() async throws { try await changePauseState(to: true) }
+    func resume() async throws { try await changePauseState(to: false) }
+
+    private func changePauseState(to paused: Bool) async throws {
+        guard startOperation == nil, settlementOperation == nil, pauseTransition == nil,
+              let session = active, session.startedDurably, !session.expectedStop,
+              session.firstFailure == nil, session.isPaused != paused else { throw RecordingSessionFailure.busy }
+        // App-owned work survives a caller/view task cancellation. Stop can close
+        // capture immediately, then joins this writer before terminal persistence.
+        let task = Task { await self.performPauseTransition(to: paused, token: session.token) }
+        pauseTransition = task
+        publishSnapshot()
+        let result = await task.value
+        pauseTransition = nil
+        publishSnapshot()
+        try result.get()
+    }
+
+    private func performPauseTransition(to paused: Bool, token: UInt64) async -> Result<Void, RecordingSessionFailure> {
+        do {
+            guard let session = active, session.token == token, !session.expectedStop else { return .failure(.busy) }
+            let position: UInt64
+            if paused {
+                let boundary: CapturePauseBoundary
+                do { boundary = try await capture.pause() }
+                catch { throw Self.captureFailure(error) }
+                guard active?.token == token else { return .failure(.cancelled) }
+                active?.isPaused = true
+                active?.pauseEpoch = boundary.epoch
+                active?.pauseCutoff = boundary.recordingChunkCount
+                position = boundary.mediaMilliseconds
+                active?.elapsedBaseMilliseconds = position
+                active?.resumedMonotonic = nil
+                active?.lastMediaPositionMilliseconds = position
+            } else {
+                do { try await capture.resume() }
+                catch { throw Self.captureFailure(error) }
+                guard active?.token == token else { return .failure(.cancelled) }
+                position = active?.elapsedBaseMilliseconds ?? 0
+                active?.isPaused = false
+                active?.resumedMonotonic = clock.monotonicNow()
+            }
+            let occurredAt = clock.wallNow()
+            active?.noInputActive = false
+            active?.signalAcceptAfter = clock.monotonicNow()
+            snapshot = replacingSnapshot(elapsedMilliseconds: position, normalizedInputLevel: 0, noInputWarning: false)
+            publishSnapshot()
+            if paused {
+                // capture.pause returned an atomic count of the accepted prefix.
+                // Joining that prefix (not STT) makes flush independent of actor scheduling.
+                guard await waitForPauseCutoff(token: token) else {
+                    throw active?.firstFailure ?? RecordingSessionFailure.recordingStreamEnded
+                }
+                do { try await session.recorder.flush() }
+                catch { throw Self.recorderFailure(error) }
+            }
+            guard let current = active, current.token == token else { return .failure(.cancelled) }
+            if let failure = current.firstFailure { throw failure }
+            do {
+                let metadata = try makeMetadata(sessionID: current.location.sessionID, title: current.title,
+                    status: paused ? .paused : .recording, outcome: .inProgress, createdAt: current.createdAt,
+                    startedAt: current.recordingStartedAt, endedAt: nil, durationMilliseconds: position,
+                    languageMode: current.languageMode, audio: current.metadata.audio, updatedAt: occurredAt)
+                try await repository.writeMetadata(metadata, at: current.location)
+                active?.metadata = metadata
+                try await appendEventOnce(key: "pause.\(current.pauseEpoch).\(paused)",
+                    kind: paused ? .recordingPaused : .recordingResumed, detailCode: nil,
+                    occurredAt: occurredAt, mediaPositionMilliseconds: position, token: token)
+            } catch { throw Self.persistenceFailure(error) }
+            if active?.expectedStop == false, active?.firstFailure == nil, settlementOperation == nil {
+                snapshot = replacingSnapshot(phase: paused ? .paused : .recording,
+                    persistedStatus: paused ? .paused : .recording, elapsedMilliseconds: position)
+                publishSnapshot()
+            }
+            return .success(())
+        } catch {
+            let failure = (error as? RecordingSessionFailure) ?? .unknown
+            // Closing input for an already admitted Stop can win the gate call.
+            // It does not turn a normal user stop into an operational error.
+            if failure == .capture(.startInterrupted), active?.expectedStop == true, active?.firstFailure == nil {
+                return .failure(.busy)
+            }
+            requestAbnormalSettlement(token: token, failure: failure)
+            return .failure(failure)
+        }
+    }
+
+    private func waitForPauseCutoff(token: UInt64) async -> Bool {
+        guard let session = active, session.token == token, let cutoff = session.pauseCutoff else { return false }
+        if session.appendedChunks >= cutoff { return true }
+        if session.pumpEnded { return false }
+        return await withCheckedContinuation { active?.cutoffWaiters.append((cutoff, $0)) }
+    }
+
+    private func resolveCutoffWaiters(token: UInt64, ended: Bool = false) {
+        guard active?.token == token else { return }
+        if ended { active?.pumpEnded = true }
+        let count = active?.appendedChunks ?? 0
+        let waiters = active?.cutoffWaiters ?? []
+        active?.cutoffWaiters = waiters.filter { $0.0 > count && !ended }
+        for (cutoff, waiter) in waiters where cutoff <= count || ended { waiter.resume(returning: cutoff <= count) }
     }
 
     func stop() async -> RecordingSessionResult {
@@ -509,7 +637,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     }
 
     func reset() async {
-        guard startOperation == nil, settlementOperation == nil, active == nil,
+        guard startOperation == nil, settlementOperation == nil, pauseTransition == nil, active == nil,
               speechSnapshot.phase == .idle || speechSnapshot.cleanupComplete else { return }
         // A new recording must not load another large model while old speech
         // inference is still active. Ordinary reset never discards pending finals.
@@ -965,6 +1093,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         requestCaptureStop(token: token)
         await waitForCaptureStop(token: token)
         authorizePrimaryPumpDrain(token: token)
+        _ = await pauseTransition?.value
 
         let pumpOutcome = await active?.pumpTask?.value
         if case let .failed(failure) = pumpOutcome {
@@ -1271,6 +1400,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         recorder: any AudioRecorder,
         token: UInt64
     ) async -> PumpOutcome {
+        defer { resolveCutoffWaiters(token: token, ended: true) }
         guard await waitForPrimaryPumpDrainAuthorization(token: token) else {
             return .failed(.cancelled)
         }
@@ -1284,6 +1414,8 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
                     return .failed(failure)
                 }
                 guard active?.token == token else { return .failed(.cancelled) }
+                active?.appendedChunks += 1
+                resolveCutoffWaiters(token: token)
             }
             guard active?.token == token else { return .failed(.cancelled) }
             if active?.expectedStop == true { return .drained }
@@ -1324,7 +1456,9 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
 
     private func handleInputSignal(_ sample: InputSignalSample, token: UInt64) async {
         guard active?.token == token,
-              sample.generation == active?.captureHandle?.generation else { return }
+              sample.generation == active?.captureHandle?.generation,
+              active?.isPaused == false, pauseTransition == nil, active?.expectedStop == false,
+              sample.monotonicSeconds >= (active?.signalAcceptAfter ?? 0) else { return }
         let noInput = sample.state == .noInput
         snapshot = replacingSnapshot(
             normalizedInputLevel: min(1, max(0, sample.normalizedLevel)),
@@ -1470,10 +1604,11 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     private func currentElapsedMilliseconds(token: UInt64, stopRequested: Bool) -> UInt64 {
         guard let session = active, session.token == token,
               let started = session.recordingStartedMonotonic else { return 0 }
+        if session.isPaused { return session.elapsedBaseMilliseconds }
         let end = stopRequested
             ? (session.stopRequestedMonotonic ?? clock.monotonicNow())
             : clock.monotonicNow()
-        return UInt64(max(0, (end - started) * 1_000))
+        return session.elapsedBaseMilliseconds + UInt64(max(0, (end - (session.resumedMonotonic ?? started)) * 1_000))
     }
 
     private func makeMetadata(
@@ -1568,8 +1703,9 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
 
     private func publishSnapshot() {
         if snapshot.sessionID != nil, [.securedAwaitingFinalization, .interrupted, .error].contains(snapshot.phase) {
-            snapshot = replacingSnapshot(canReset: speechSnapshot.phase == .idle || speechSnapshot.cleanupComplete)
+            snapshot = replacingSnapshot(canReset: pauseTransition == nil && (speechSnapshot.phase == .idle || speechSnapshot.cleanupComplete))
         }
+        snapshot.pauseTransitionInFlight = pauseTransition != nil
         snapshot.speech = speechSnapshot
         snapshotContinuations.values.forEach { $0.yield(snapshot) }
     }

@@ -5,6 +5,172 @@ import AppKit
 @testable import LocalLectureSTT
 
 final class RecordingSessionCoordinatorTests: XCTestCase {
+    func testT24PauseResumePersistsWallEventsAndFreezesActiveClock() async throws {
+        let clock = TestRecordingClock(); let ticker = ManualRecordingTicker()
+        let f = CoordinatorFixture(prebufferedFrameCounts: [4_800], clock: clock.value, ticker: ticker)
+        let c = f.makeCoordinator()
+        _ = try await c.start(.init(title: "T24", timeZone: .gmt))
+        clock.advanceWall(by: 1)
+        try await c.pause()
+        let paused = await c.currentSnapshot()
+        XCTAssertEqual(paused.phase, .paused); XCTAssertEqual(paused.elapsedMilliseconds, 100)
+        XCTAssertTrue(paused.canResume); XCTAssertTrue(paused.canStop); XCTAssertFalse(paused.canStart)
+        clock.advanceMonotonic(by: 900); clock.advanceWall(by: 900); ticker.tick()
+        try await f.capture.emit(frameCount: 48_000)
+        try await c.resume()
+        let resumed = await c.currentSnapshot()
+        XCTAssertEqual(resumed.phase, .recording); XCTAssertEqual(resumed.elapsedMilliseconds, 100)
+        clock.advanceMonotonic(by: 0.2); ticker.tick()
+        await waitUntil { await c.currentSnapshot().elapsedMilliseconds == 300 }
+        try await f.capture.emit(frameCount: 4_800)
+        try await c.pause()
+        let again = await c.currentSnapshot(); XCTAssertEqual(again.elapsedMilliseconds, 200)
+        guard case .secured = await c.stop() else { return XCTFail("paused stop must save") }
+        let documents = await f.repository.metadataDocuments()
+        XCTAssertEqual(documents.map(\.status), [.preparing, .recording, .paused, .recording, .paused, .securing])
+        let events = await f.repository.events()
+        XCTAssertEqual(events.map(\.kind), [.recordingStarted, .recordingPaused, .recordingResumed, .recordingPaused, .recordingEnded])
+        XCTAssertEqual(events[1].mediaPositionMs?.rawValue, 100); XCTAssertEqual(events[2].mediaPositionMs?.rawValue, 100)
+        XCTAssertEqual(events[2].occurredAt.value.timeIntervalSince(events[1].occurredAt.value), 900)
+        let chunks = await f.recorders.recorders()[0].appendedChunks()
+        XCTAssertEqual(chunks.map(\.sequence), [0, 1])
+    }
+
+    func testT24PauseCutoffWaitsForBufferedWriterButStopRemainsAvailable() async throws {
+        let gate = ControlledTestGate(); let trace = TestTrace()
+        let f = CoordinatorFixture(prebufferedFrameCounts: [480, 480], recorderAppendGate: (0, gate), trace: trace)
+        let c = f.makeCoordinator()
+        _ = try await c.start(.init(title: "T24", timeZone: .gmt))
+        await gate.waitForArrival()
+        let pause = Task { try await c.pause() }
+        await waitUntil { await c.currentSnapshot().pauseTransitionInFlight }
+        let pending = await c.currentSnapshot(); XCTAssertTrue(pending.canStop); XCTAssertFalse(pending.canPause)
+        do { try await c.resume(); XCTFail("concurrent transition must be rejected") }
+        catch { XCTAssertEqual(error as? RecordingSessionFailure, .busy) }
+        await waitUntil { await f.capture.isPausedForTest() }
+        let stop = Task { await c.stop() }
+        await waitUntil { await c.currentSnapshot().phase == .securing }
+        let before = await f.repository.metadataDocuments(); XCTAssertEqual(before.last?.status, .recording)
+        await gate.release()
+        try await pause.value
+        guard case .secured = await stop.value else { return XCTFail("stop must join pause") }
+        let entries = await trace.values()
+        XCTAssertLessThan(try XCTUnwrap(entries.firstIndex(of: "recorder.append.1.end")), try XCTUnwrap(entries.firstIndex(of: "metadata.paused")))
+        XCTAssertLessThan(try XCTUnwrap(entries.firstIndex(of: "event.recordingPaused")), try XCTUnwrap(entries.firstIndex(of: "event.recordingEnded")))
+    }
+
+    func testT24CancelledCallerCannotAbandonPausePersistenceOrAllowLateTerminalOverwrite() async throws {
+        let gate = ControlledTestGate()
+        let f = CoordinatorFixture(prebufferedFrameCounts: [480], repositoryGate: .metadataWrite(3, gate))
+        let c = f.makeCoordinator()
+        _ = try await c.start(.init(title: "T24", timeZone: .gmt))
+        let pause = Task { try await c.pause() }
+        await gate.waitForArrival(); pause.cancel()
+        let stop = Task { await c.stop() }
+        await waitUntil { await c.currentSnapshot().phase == .securing }
+        await gate.release(); try await pause.value
+        guard case .secured = await stop.value else { return XCTFail("essential save") }
+        let docs = await f.repository.metadataDocuments()
+        XCTAssertEqual(docs.map(\.status), [.preparing, .recording, .paused, .securing])
+        let snapshot = await c.currentSnapshot(); XCTAssertEqual(snapshot.phase, .securedAwaitingFinalization)
+    }
+
+    func testT24ResumePersistenceJoinsSleepWithoutRestoringRecording() async throws {
+        let gate = ControlledTestGate()
+        let f = CoordinatorFixture(prebufferedFrameCounts: [480], repositoryGate: .eventWrite(3, gate))
+        let c = f.makeCoordinator()
+        _ = try await c.start(.init(title: "T24", timeZone: .gmt)); try await c.pause()
+        let resume = Task { try await c.resume() }
+        await gate.waitForArrival()
+        let sleep = Task { await c.interrupt(.systemSleep) }
+        await waitUntil { await c.currentSnapshot().phase == .securing }
+        await gate.release(); try await resume.value
+        let result = await sleep.value; XCTAssertEqual(result, .interrupted(.interrupted(.systemSleep)))
+        await c.recordSystemWakeIfApplicable()
+        let snapshot = await c.currentSnapshot(); XCTAssertEqual(snapshot.phase, .interrupted)
+        let docs = await f.repository.metadataDocuments(); XCTAssertEqual(docs.last?.status, .interrupted)
+        let events = await f.repository.events()
+        XCTAssertEqual(events.filter { $0.kind == .recordingResumed }.count, 1)
+        XCTAssertEqual(events.last?.kind, .systemWake)
+        let captures = await f.capture.counts(); XCTAssertEqual(captures.start, 1)
+    }
+
+    func testT24PauseAndResumePersistenceFaultsPreserveRecoveryAndTypedError() async throws {
+        for fault in [TestRepositoryFault.metadataWrite(3), .eventWrite(2), .metadataWrite(4), .eventWrite(3)] {
+            let f = CoordinatorFixture(prebufferedFrameCounts: [480], repositoryFault: fault)
+            let c = f.makeCoordinator()
+            _ = try await c.start(.init(title: "T24", timeZone: .gmt))
+            do {
+                try await c.pause(); try await c.resume()
+                XCTFail("injected persistence failure")
+            } catch {
+                let expected: RecordingSessionFailure
+                switch fault { case .eventWrite: expected = .persistence(.jsonlAppendFailed)
+                default: expected = .persistence(.temporaryWriteFailed) }
+                XCTAssertEqual(error as? RecordingSessionFailure, expected)
+            }
+            _ = await c.stop()
+            let snapshot = await c.currentSnapshot(); XCTAssertEqual(snapshot.phase, .interrupted)
+            let retained = await f.recorders.recorders()[0].hasRecoveryArtifact(); XCTAssertTrue(retained)
+            let evidence = await c.essentialSaveEvidence(); XCTAssertTrue(evidence?.requiresUserAttention == true)
+        }
+    }
+
+    func testT24AppendFailureWhilePauseWaitsCannotDeadlockOrHideTypedError() async throws {
+        let gate = ControlledTestGate()
+        let f = CoordinatorFixture(prebufferedFrameCounts: [480], recorderAppendFailureSequence: 0, recorderAppendGate: (0, gate))
+        let c = f.makeCoordinator()
+        _ = try await c.start(.init(title: "T24", timeZone: .gmt))
+        await gate.waitForArrival()
+        let pause = Task { try await c.pause() }
+        await waitUntil { await f.capture.isPausedForTest() }
+        await gate.release()
+        do { try await pause.value; XCTFail("append should fail") }
+        catch { XCTAssertEqual(error as? RecordingSessionFailure, .recorder(.writerAppendFailed)) }
+        let result = await c.stop(); XCTAssertEqual(result, .interrupted(.recorder(.writerAppendFailed)))
+        let captures = await f.capture.counts(); XCTAssertEqual(captures.stop, 1)
+    }
+
+    func testT24PauseCaptureAndFlushFailuresSettleOnce() async throws {
+        for captureFails in [true, false] {
+            let f = CoordinatorFixture(prebufferedFrameCounts: [480], recorderFlushFailure: captureFails ? nil : .writerAppendFailed)
+            let c = f.makeCoordinator()
+            _ = try await c.start(.init(title: "T24", timeZone: .gmt))
+            if captureFails { await f.capture.setPauseFailure(.runtimeFailure) }
+            do { try await c.pause(); XCTFail("injected failure") } catch {}
+            _ = await c.stop()
+            let value = await c.currentSnapshot()
+            XCTAssertEqual(value.failure, captureFails ? .capture(.runtimeFailure) : .recorder(.writerAppendFailed))
+            let counts = await f.capture.counts(); XCTAssertEqual(counts.stop, 1)
+        }
+    }
+
+    func testT24ZeroSamplePauseResumeAndStopRetainsExistingNoAudioPolicy() async throws {
+        let f = CoordinatorFixture(prebufferedFrameCounts: [])
+        let c = f.makeCoordinator()
+        _ = try await c.start(.init(title: "T24", timeZone: .gmt))
+        for _ in 0..<5 { try await c.pause(); try await c.resume() }
+        try await c.pause()
+        let value = await c.currentSnapshot(); XCTAssertEqual(value.elapsedMilliseconds, 0)
+        let result = await c.stop(); XCTAssertEqual(result, .interrupted(.recorder(.noAudioSamples)))
+        let retained = await f.recorders.recorders()[0].hasRecoveryArtifact(); XCTAssertTrue(retained)
+    }
+
+    @MainActor func testT24PausedUIKeepsModelLockedAndShowsOnlyResumeAndStop() async throws {
+        let coordinator = ViewModelRecordingCoordinator()
+        let view = RecordingSessionViewModel(coordinator: coordinator)
+        view.startObserving()
+        coordinator.emit(snapshotForView(phase: .paused, sessionID: SessionID(), canStart: false, canStop: true, canReset: false))
+        await waitUntil { await MainActor.run { view.displayState == .paused } }
+        XCTAssertTrue(view.actions.canResume); XCTAssertTrue(view.actions.canStop)
+        XCTAssertFalse(view.actions.canPause); XCTAssertFalse(view.actions.canEditConfiguration)
+        var value = await coordinator.currentSnapshot(); value.pauseTransitionInFlight = true; coordinator.emit(value)
+        await waitUntil { await MainActor.run { !view.actions.canResume } }
+        XCTAssertTrue(view.actions.canStop)
+        _ = NSHostingView(rootView: RecordingSessionView(viewModel: view)).fittingSize
+        view.stopObserving()
+    }
+
     @MainActor
     func testT21StartUIRequiresValidatedSelectionAndHidesChangesWhileRecording() async throws {
         let repo = try UIModelRepository(); let models = ModelManagementViewModel(repository: repo, downloader: UIDownloader(), supports: { _ in true })
@@ -237,12 +403,12 @@ final class RecordingSessionCoordinatorTests: XCTestCase {
         for required in [
             "recording-title", "recording-language", "microphone-permission-status", "recording-start",
             "recording-preparing", "active-recording-title", "recording-elapsed", "recording-input-level",
-            "recording-no-input-warning", "recording-stop", "recording-securing", "recording-reset",
+            "recording-no-input-warning", "recording-stop", "recording-pause-resume", "recording-securing", "recording-reset",
             "녹음 종료 · 필수 저장 완료"
         ] {
             XCTAssertTrue(recordingView.contains(required), "Missing minimal UI state/action: \(required)")
         }
-        for prohibited in ["recording-pause", "transcript-control", "model-picker"] {
+        for prohibited in [ "transcript-control", "model-picker"] {
             XCTAssertFalse(recordingView.contains(prohibited), "Out-of-scope UI leaked: \(prohibited)")
         }
         for rootState in ["case .noRoot", "case let .available", "case .reauthorizationRequired", "case let .failed"] {
@@ -1468,9 +1634,27 @@ private actor TestCapture: MicrophoneCapturing {
     private var value = DependencyCounts.zero
     private var generation: UInt64 = 0
     private var nextSequence: UInt64 = 0
+    private var acceptedFrames = 0
+    private var paused = false
+    private var epoch: UInt64 = 0
+    private var pauseFailure: CaptureErrorCode?
+    func isPausedForTest() -> Bool { paused }
+    func setPauseFailure(_ code: CaptureErrorCode?) { pauseFailure = code }
+    func pause() async throws -> CapturePauseBoundary {
+        if let pauseFailure { throw CaptureError(pauseFailure) }
+        guard lifecycle == .running else { throw CaptureError(.startInterrupted) }
+        paused = true; epoch += 1
+        let boundary = CapturePauseBoundary(epoch: epoch, recordingChunkCount: nextSequence, mediaMilliseconds: UInt64(acceptedFrames / 48))
+        speechContinuation?.yield(.pause(boundary))
+        return boundary
+    }
+    func resume() async throws {
+        guard lifecycle == .running else { throw CaptureError(.startInterrupted) }
+        paused = false
+    }
     private var lifecycle: CaptureLifecycle = .idle
     private var recordingContinuation: AsyncThrowingStream<PCMChunk, Error>.Continuation?
-    private var speechContinuation: AsyncThrowingStream<PCMChunk, Error>.Continuation?
+    private var speechContinuation: AsyncThrowingStream<CaptureSpeechInput, Error>.Continuation?
     private var eventContinuation: AsyncStream<CaptureEvent>.Continuation?
     private var levelContinuation: AsyncStream<InputSignalSample>.Continuation?
     private var observerTerminations = CaptureObserverTerminationCounts()
@@ -1492,10 +1676,10 @@ private actor TestCapture: MicrophoneCapturing {
             throw CaptureError(startFailure)
         }
         generation += 1
-        nextSequence = 0
+        nextSequence = 0; acceptedFrames = 0; paused = false; epoch = 0
         lifecycle = .running
         let recording = AsyncThrowingStream<PCMChunk, Error>.makeStream(bufferingPolicy: .unbounded)
-        let speech = AsyncThrowingStream<PCMChunk, Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let speech = AsyncThrowingStream<CaptureSpeechInput, Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let events = AsyncStream<CaptureEvent>.makeStream(bufferingPolicy: .unbounded)
         let levels = AsyncStream<InputSignalSample>.makeStream(bufferingPolicy: .unbounded)
         events.continuation.onTermination = { [weak self] _ in
@@ -1513,7 +1697,7 @@ private actor TestCapture: MicrophoneCapturing {
             generation: generation,
             device: InputDeviceSnapshot(identity: "synthetic", displayName: "Synthetic Microphone"),
             recordingPCM: recording.stream,
-            speechPCM: speech.stream,
+            speechInputs: speech.stream,
             events: events.stream,
             inputSignalStates: levels.stream
         )
@@ -1569,18 +1753,19 @@ private actor TestCapture: MicrophoneCapturing {
     private func recordLevelStreamTermination() { observerTerminations.level += 1 }
 
     private func emitChunk(frameCount: Int) throws {
+        guard !paused else { return }
         let format = try PCMFormatDescription(sampleRate: 48_000, channelCount: 1)
         let chunk = try PCMChunk(
             generation: generation,
             sequence: nextSequence,
             format: format,
             frameCount: frameCount,
-            sourceSampleTime: Int64(nextSequence) * Int64(frameCount),
-            samples: Array(repeating: 0.25, count: frameCount)
+            sourceSampleTime: Int64(acceptedFrames),
+            samples: Array(repeating: 0.25, count: frameCount), segmentEpoch: epoch
         )
-        nextSequence += 1
+        nextSequence += 1; acceptedFrames += frameCount
         recordingContinuation?.yield(chunk)
-        speechContinuation?.yield(chunk)
+        speechContinuation?.yield(.pcm(chunk))
     }
 }
 
@@ -1666,7 +1851,13 @@ private actor TestAudioRecorder: AudioRecorder {
     func flush() async throws {
         value.flush += 1
         await trace.append("recorder.flush")
-        if let flushFailure { throw AudioRecorderError(flushFailure) }
+        if let flushFailure {
+            if case .failed = state {} else {
+                state = .failed(flushFailure)
+                eventPair.continuation.yield(.terminalFailure(kind: .fileWriteError, code: flushFailure, mediaPositionMilliseconds: 0))
+            }
+            throw AudioRecorderError(flushFailure)
+        }
         if case let .failed(code) = state { throw AudioRecorderError(code) }
     }
 
@@ -1889,6 +2080,7 @@ private final class TestRecordingClock: @unchecked Sendable {
         )
     }
     func advanceMonotonic(by value: TimeInterval) { lock.withLock { monotonic += value } }
+    func advanceWall(by value: TimeInterval) { lock.withLock { wall.addTimeInterval(value) } }
 }
 
 @MainActor

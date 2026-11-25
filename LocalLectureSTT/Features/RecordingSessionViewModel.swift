@@ -6,6 +6,7 @@ enum RecordingSessionViewDisplayState: Sendable, Equatable {
     case configuration
     case preparing
     case recording
+    case paused
     case securing
     case secured
     case interrupted
@@ -17,6 +18,8 @@ struct RecordingSessionViewActions: Sendable, Equatable {
     let canStart: Bool
     let canStop: Bool
     let canReset: Bool
+    var canPause = false
+    var canResume = false
 }
 
 @MainActor
@@ -154,6 +157,17 @@ final class RecordingSessionViewModel: ObservableObject {
         models?.recordingLocked = !snapshot.canStart && !snapshot.canReset
     }
 
+    func togglePause() async {
+        guard snapshot.canPause || snapshot.canResume else { return }
+        do {
+            if snapshot.canPause { try await coordinator.pause() }
+            else { try await coordinator.resume() }
+        } catch {
+            // The owner publishes operational failures and joins essential save.
+        }
+        snapshot = await coordinator.currentSnapshot()
+    }
+
     func stopRecording() async {
         _ = await coordinator.stop()
     }
@@ -207,6 +221,7 @@ final class RecordingSessionViewModel: ObservableObject {
         case .idle: .configuration
         case .preparing: .preparing
         case .recording: .recording
+        case .paused: .paused
         case .securing: .securing
         case .securedAwaitingFinalization: .secured
         case .interrupted: .interrupted
@@ -219,7 +234,9 @@ final class RecordingSessionViewModel: ObservableObject {
             canEditConfiguration: !startInFlight && snapshot.canStart,
             canStart: !startInFlight && snapshot.canStart && (models?.readyToRecord ?? true),
             canStop: snapshot.canStop,
-            canReset: snapshot.canReset
+            canReset: snapshot.canReset,
+            canPause: snapshot.canPause,
+            canResume: snapshot.canResume
         )
     }
 
