@@ -6,6 +6,7 @@ enum AtomicWriteStep: Sendable, Equatable {
     case beforeWrite
     case beforeFlush
     case beforeRename
+    case afterRename
 }
 
 struct AtomicFileWriter: Sendable {
@@ -73,6 +74,8 @@ struct AtomicFileWriter: Sendable {
             throw StorageError(.atomicRenameFailed)
         }
         shouldCleanTemporary = false
+        do { try fault(.afterRename) }
+        catch { throw StorageError(.atomicRenameFailed) }
         try synchronizeDirectory(directory)
     }
 

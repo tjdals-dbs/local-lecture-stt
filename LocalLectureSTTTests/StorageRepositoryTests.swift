@@ -314,6 +314,23 @@ final class StorageRepositoryTests: XCTestCase {
         XCTAssertThrowsError(try writer.write(Data("{}".utf8), to: destination))
     }
 
+    func testT26PostRenameFaultKeepsWholePublishedDocumentAndRetryIsIdempotent() throws {
+        let fixture = try Fixture(); defer { fixture.cleanup() }
+        let destination = fixture.rootA.appendingPathComponent("document.json")
+        let original = Data("{\"version\":1}".utf8), replacement = Data("{\"version\":2}".utf8)
+        try original.write(to: destination)
+        let writer = AtomicFileWriter { step in
+            if step == .afterRename { throw StorageError(.temporaryFlushFailed) }
+        }
+        XCTAssertThrowsError(try writer.write(replacement, to: destination)) { error in
+            XCTAssertEqual((error as? StorageError)?.code, .atomicRenameFailed)
+        }
+        XCTAssertEqual(try Data(contentsOf: destination), replacement)
+        try AtomicFileWriter().write(replacement, to: destination)
+        XCTAssertEqual(try Data(contentsOf: destination), replacement)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.rootA.path), ["document.json"])
+    }
+
     func testJSONLAppendRetainsPriorBytesAndEachLineDecodes() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }

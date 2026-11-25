@@ -120,6 +120,10 @@ struct BenchmarkMain {
     }
     static func execute(_ args: [String]) async throws {
         guard let command = args.first else { throw STTEngineError(.invalidInput) }
+        if command == "recovery-probe" {
+            try await RecoveryProbe.execute(Array(args.dropFirst()))
+            return
+        }
         if command == "prepare", args.count == 5 {
             let source = url(args[1]); let file = try AVAudioFile(forReading: source, commonFormat: .pcmFormatFloat32, interleaved: false)
             guard file.processingFormat.sampleRate == 16_000, file.processingFormat.channelCount == 1,

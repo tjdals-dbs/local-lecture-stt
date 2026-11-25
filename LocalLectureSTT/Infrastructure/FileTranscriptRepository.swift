@@ -3,7 +3,7 @@ import Foundation
 /// All hooks are infrastructure-only side-effect boundaries for crash-window tests.
 enum TranscriptWritePoint: String, Sendable, CaseIterable {
     case opened, beforeCanonical, afterCanonical, beforeText, afterText, beforeMarkdown, afterMarkdown
-    case beforeMetadata, afterMetadata, beforeCatalog, afterCatalog, beforeCheckpoint
+    case beforeMetadata, afterMetadata, beforeCatalog, afterCatalog, beforeCheckpoint, afterCheckpoint
 }
 
 actor FileTranscriptRepository: TranscriptFinalizing, TranscriptEditing, RemainingFinalizationVerifying {
@@ -269,6 +269,7 @@ private final class TranscriptFileTransaction {
         let next = try checkpoint.markingCompleted(step, at: AbsoluteTime(Date()))
         try write(next, path: FinalizationFileAccess.checkpoint)
         checkpoint = next
+        try await reach(.afterCheckpoint)
     }
     func completedMetadata(count: Int, duration: MediaMilliseconds, edited: Bool = false) throws -> SessionMetadataDocument {
         let m = metadata

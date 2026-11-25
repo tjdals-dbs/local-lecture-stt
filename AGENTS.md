@@ -26,6 +26,8 @@ If these disagree, do not silently choose one. Preserve data, stop at a safe poi
 
 ### Explicit continuous-work authorization
 
+On 2026-11-26 the user authorized reducing intermediate instructions for T26: separate read-only review of the candidate, same-Task repairs if needed, full tests/task CI, dev integration/full tests/CI and branch cleanup in this session. This replaces a separate integration prompt for T26 only. Completion/checklist updates occur in the integration commit. G1 remains unverified, main unchanged, and T27 is excluded.
+
 On 2026-11-25, after T24 integration and cleanup, the user requested continuing directly with T25 in the same continuous workflow: implementation, separate read-only review, repairs, task tests/CI, dev integration/tests/CI and branch cleanup. G1 remains unverified, main unchanged, and completion/checklist updates wait until integration. T26 and later Tasks are excluded.
 
 On 2026-11-25 the user separately authorized T24 through implementation, a separate read-only review, repairs, full tests/task CI, dev integration/full tests/CI and branch cleanup in this session. This replaces the separate integration prompt for T24 only. G1 remains unverified, main unchanged, and completion/checklist updates wait until integration. T25 and later Tasks are excluded.

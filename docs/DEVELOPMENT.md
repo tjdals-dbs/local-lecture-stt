@@ -1003,3 +1003,18 @@ xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
 Omit the `-only-testing` options for the full suite. Use a fresh `-resultBundlePath` on each run. [Acceptance](G3_MODEL_MANAGEMENT_REPAIR.md) records the actual results and evidence paths. The shared SwiftPM target, four Python tests and Release product-engine verifier use the existing commands above.
 
 Manual (pending): with a signed app and disposable copies of a model package, import via the general manifest-folder button and the catalog-specific weight-folder button; cancel the picker and verify no operation remains active. In a disposable installed copy only, corrupt/remove its manifest, refresh the model list, cancel the preservation sheet once, then acknowledge and confirm. Verify the original bytes remain in the model store's `.preserved-<UUID>` directory (Finder Show Hidden Files), an unaffected revision and session stay intact, and explicit reimport succeeds. A future-schema or symlink package must remain untouched. Never use a real lecture/session or the only copy of a model for destructive fixture preparation. Real filesystem capacity exhaustion, native sheets and Sandbox behavior remain manual; injected capacity and filesystem races are covered automatically. G1 remains unverified.
+
+## T26 fault injection and process recovery
+
+The process suite is a separate required check after building the existing developer benchmark. It kills only its own acknowledged child processes and creates only synthetic data in marked `/private/tmp/T26-*` directories. No installed model, microphone, network or application user store is needed. It does not silently skip a missing helper.
+
+```sh
+swift build --disable-automatic-resolution
+probe_bin_dir="$(swift build --show-bin-path --disable-automatic-resolution)"
+validation_dir="$(mktemp -d /private/tmp/stt-t26.XXXXXX)"
+python3 -B tools/t26/test_recovery_process.py \
+  --probe "$probe_bin_dir/stt-benchmark" \
+  --results "$validation_dir/process.json"
+```
+
+The helper is never compiled into the GUI app. CI runs this command after the SwiftPM/Python checks and before Release verification, and prints its measurements. A custom SwiftPM scratch path must be used consistently for both build and executable lookup. XCTest full/focused/repeated commands, 17.6 scenario mapping, loss measurements, known harness failures and pending physical procedures are in [T26 acceptance](T26_ACCEPTANCE.md). G1 remains unverified. Do not treat a generated result file or an active-prefix snapshot as a claim of real hardware/power-loss validation.

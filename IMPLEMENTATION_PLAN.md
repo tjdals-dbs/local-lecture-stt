@@ -865,6 +865,8 @@ fix(transcript): prevent overlap duplication (T18)
 
 ### T26. 장애 주입과 복구 통합 시험
 
+2026-11-26 사용자 승인: T26 후보의 별도 읽기 전용 검토·필요한 보완·전체 테스트/task CI·dev 통합/검증/CI·브랜치 정리까지 중간 지시 없이 이어서 진행한다. 완료/체크리스트 갱신은 통합 커밋에 포함하며 G1 미검증, main 유지, T27 제외 원칙을 유지한다. [검토와 검증 근거](docs/T26_ACCEPTANCE.md#independent-review-and-authorized-dev-integration).
+
 - 우선순위: `P1`
 - 선행 작업: T09, T10, T19, T20, T25
 - 관련 명세: 14장, 17.6절
@@ -1013,5 +1015,5 @@ fix(transcript): prevent overlap duplication (T18)
 - [x] T24 일시정지·재개
 - [x] T25 오류와 진단 로그
 - [x] G3 기능 완성 검토 및 모델 관리 보완 (G1 미검증 유지)
-- [ ] T26 장애 주입과 복구 시험
+- [x] T26 장애 주입과 복구 시험 (자동 검증 및 명시적 수동 절차 연결; G1 실기기 미검증 유지)
 - [ ] T27 장시간·오프라인·배포 검증

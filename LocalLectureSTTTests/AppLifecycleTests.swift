@@ -333,6 +333,63 @@ final class AppLifecycleTests: XCTestCase {
         XCTAssertEqual(afterCount, 1)
     }
 
+    func testT26ClosedWindowWaitsForRealAudioTranscriptAndCatalogBeforeAutomaticExit() async throws {
+        try await verifyT26ClosedWindow(failTranscript: false)
+    }
+
+    func testT26ClosedWindowKeepsAppOpenAfterRealTranscriptWriteFailureAndPreservesAudio() async throws {
+        try await verifyT26ClosedWindow(failTranscript: true)
+    }
+
+    private func verifyT26ClosedWindow(failTranscript: Bool) async throws {
+        let f = try await FinalizationFixture.make(); defer { f.clean() }
+        let source = try Data(contentsOf: f.url(FinalizationFileAccess.source))
+        let store = try SQLiteSessionCatalogStore(applicationSupportDirectory: f.base.appendingPathComponent("catalog"))
+        let catalog = SessionCatalogReconciler(scanner: SessionFileScanner(roots: f.roots), store: store)
+        let export = FinalizationGate()
+        var audio = FileAudioFinalizer(roots: f.roots, catalog: catalog)
+        audio.hook = { if $0 == .beforeExport { await export.blockOnce() } }
+        let transcript = FileTranscriptRepository(roots: f.roots, catalog: catalog, hook: {
+            if failTranscript, $0 == .beforeCanonical { throw AudioFinalizationCode.diskFull }
+        })
+        let authority = LifecycleWorkAuthority()
+        let queue = AudioFinalizationCoordinator(worker: SessionFinalizationWorker(audio: audio, transcripts: transcript), authority: authority)
+        await queue.enqueue(.init(location: f.location))
+        await export.waitEntered()
+        let exited = expectation(description: "automatic termination after durable completion")
+        exited.isInverted = failTranscript
+        let termination = T26TerminationObserver(event: exited)
+        let lifecycle = AppLifecycleCoordinator(recording: LifecycleRecordingStub(), finalization: queue,
+            recovery: LifecycleRecoveryStub(), activity: LifecycleActivitySpy(), termination: termination, authority: authority)
+        await lifecycle.start()
+        await lifecycle.userWindowCountChanged(0)
+        let before = await termination.count
+        XCTAssertEqual(before, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.url("audio.m4a").path))
+        await export.open()
+        let settled = await queue.waitForResult(at: f.location)
+        let result = try XCTUnwrap(settled)
+        await fulfillment(of: [exited], timeout: failTranscript ? 0.2 : 8)
+        let count = await termination.count
+        XCTAssertEqual(count, failTranscript ? 0 : 1)
+        XCTAssertEqual(try Data(contentsOf: f.url(FinalizationFileAccess.source)), source)
+        let media = try await AVFoundationFinalizationMedia().inspect(f.url("audio.m4a"), requiresM4A: true, control: .init())
+        XCTAssertGreaterThan(media.first.byteCount, 0); XCTAssertGreaterThan(media.last.byteCount, 0)
+        if failTranscript {
+            XCTAssertEqual(result.failure, .diskFull)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: f.url("transcript.json").path))
+        } else {
+            XCTAssertNil(result.failure)
+            XCTAssertEqual(result.phase, .sessionReady)
+            let cp = try await f.repository.readFinalizationCheckpoint(at: f.location)
+            XCTAssertEqual(cp.completedSteps, Array(FinalizationStep.allCases.prefix(7)))
+            let rows = try await store.orderedItems()
+            XCTAssertEqual(rows.map(\.metadataStatus), [.completed])
+            XCTAssertTrue(FileManager.default.fileExists(atPath: f.url("transcript.md").path))
+        }
+        try await store.close()
+    }
+
     func testStaleWorkRefreshCannotReleaseANewerActivityGeneration() async {
         let gate = LifecycleGate()
         let recording = LifecycleRecordingStub(snapshot: .idle(), currentGate: gate)
@@ -466,6 +523,17 @@ extension RecordingSessionSnapshot {
                                  canReset: phase == .error || phase == .interrupted)
     }
 }
+private actor T26TerminationObserver: LifecycleTerminationRequesting {
+    let event: XCTestExpectation
+    private(set) var count = 0
+    init(event: XCTestExpectation) { self.event = event }
+    func requestAutomaticTermination(isStillValid: @escaping @Sendable () async -> Bool) async -> Bool {
+        guard await isStillValid() else { return false }
+        count += 1; event.fulfill()
+        return true
+    }
+}
+
 actor LifecycleTerminationSpy: LifecycleTerminationRequesting {
     private var value = 0
     func requestAutomaticTermination(isStillValid: @escaping @Sendable () async -> Bool) async -> Bool {
