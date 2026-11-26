@@ -463,6 +463,7 @@ private final class T19Fixture: @unchecked Sendable {
          journalGate: T14Gate? = nil, cancelGate: T14Gate? = nil,
          startGate: T14Gate? = nil, startFailure: STTErrorCode? = nil,
          converter: any SpeechPCMConverting = T19Passthrough(),
+         recovery: (any SpeechRecoveryRecording)? = nil, timeout: Duration = .seconds(60),
          publish: @escaping @Sendable (LiveSTTSnapshot) async -> Void = { _ in }) throws {
         session = try STTTestFixture.session(mode: mode)
         engine = try T19ControlledEngine(cancelGate: cancelGate, startGate: startGate, startFailure: startFailure)
@@ -472,7 +473,7 @@ private final class T19Fixture: @unchecked Sendable {
         let observed = observed
         coordinator = LiveSTTCoordinator(engine: engine, session: session, repository: repository,
             location: location, converter: converter, detector: T19Detector(),
-            maximumPendingFinals: capacity, publish: { await publish($0); await observed.append($0) })
+            maximumPendingFinals: capacity, recovery: recovery, requestTimeout: timeout, publish: { await publish($0); await observed.append($0) })
         let pair = AsyncThrowingStream<CaptureSpeechInput, Error>.makeStream()
         continuation = pair.continuation
         handle = CaptureHandle(generation: 1, device: .init(identity: "test", displayName: "test"),
@@ -536,6 +537,8 @@ private actor T19Observations {
 private actor T19ControlledEngine: STTEngine {
     nonisolated let capabilities: STTCapabilities
     var requests: [STTInferenceRequest] = []
+    var loaded: [STTModelConfiguration] = []
+    var sessions: [STTSessionConfiguration] = []
     var counts = [0, 0, 0, 0] // start, end, cancel, unload
     private var feeds: [STTEventFeed] = []
     private var revisions: [Int64] = []
@@ -547,9 +550,10 @@ private actor T19ControlledEngine: STTEngine {
         capabilities = try STTTestFixture.capabilities()
         self.cancelGate = cancelGate; self.startGate = startGate; self.startFailure = startFailure
     }
-    func load(_ model: STTModelConfiguration) async throws {}
+    func load(_ model: STTModelConfiguration) async throws { loaded.append(model) }
     func start(_ session: STTSessionConfiguration) async throws {
         counts[0] += 1
+        sessions.append(session)
         await startGate?.hold()
         if let startFailure { throw STTEngineError(startFailure) }
     }
@@ -627,4 +631,207 @@ private actor T19Repository: SessionRepository {
     func writeFinalizationCheckpoint(_ document: FinalizationCheckpointDocument, at location: SessionLocation) async throws { fatalError("unused") }
     func readFinalizationCheckpoint(at location: SessionLocation) async throws -> FinalizationCheckpointDocument { fatalError("unused") }
     nonisolated func artifactOwnership(_ artifact: SessionArtifact) -> SessionArtifactOwnership { artifact.ownership }
+}
+
+extension LiveSTTCoordinatorTests {
+    func testT27FinalRetriesThenReloadsSameModelWithPinnedLanguageAndOneJournalCommit() async throws {
+        let recovery = T27MemoryRecovery(), gate = T14Gate()
+        let f = try T19Fixture(mode: .automatic, cancelGate: gate, recovery: recovery)
+        await f.start(); try f.send(400); f.pause()
+        _ = try await f.engine.request(0)
+        try await f.engine.respond(0, .partial, "임시", language: "ko")
+        try await f.engine.fail(0, .inferenceFailed)
+        _ = try await f.engine.request(1)
+        try await f.engine.fail(1, .invalidResponse)
+        try await gate.wait()
+        let before = await f.engine.requests.count; XCTAssertEqual(before, 2)
+        let loading = await f.engine.loaded; XCTAssertTrue(loading.isEmpty)
+        await gate.release()
+        let restarted = try await f.engine.request(2)
+        XCTAssertEqual(restarted.context.session.model, f.session.model)
+        XCTAssertEqual(restarted.context.session.languageMode, .korean)
+        XCTAssertNotEqual(restarted.context.session.operationID, f.session.operationID)
+        try await f.engine.respond(2, .final, "복구된 문장", language: "ko")
+        _ = try await f.observed.wait { $0.finals.count == 1 }
+        f.finish(); await f.coordinator.waitUntilSettled()
+        let result = await f.coordinator.currentSnapshot()
+        XCTAssertEqual(result.phase, .finished); XCTAssertEqual(result.automaticRestarts, 1)
+        XCTAssertEqual(result.recovery?.pending, 0)
+        let records = await f.repository.records; XCTAssertEqual(records.count, 1)
+        let model = await f.engine.loaded; XCTAssertEqual(model, [f.session.model])
+        let ledger = await recovery.document; XCTAssertEqual(ledger?.language?.rawValue, "ko")
+    }
+
+    func testT27PartialFailureIsDiscardedAndSilentFinalIsDurableCoverage() async throws {
+        let recovery = T27MemoryRecovery()
+        let f = try T19Fixture(mode: .automatic, recovery: recovery)
+        await f.start(); try f.send(2_000)
+        _ = try await f.engine.request(0); try await f.engine.fail(0, .inferenceFailed)
+        f.pause(); _ = try await f.engine.request(1); try await f.engine.empty(1)
+        _ = try await f.observed.wait { $0.recovery?.pending == 0 }
+        f.finish(); await f.coordinator.waitUntilSettled()
+        let result = await f.coordinator.currentSnapshot()
+        XCTAssertNil(result.failure); XCTAssertEqual(result.automaticRestarts, 0)
+        let recorded = await recovery.value()
+        let doc = try XCTUnwrap(recorded)
+        XCTAssertEqual(doc.entries.count, 1); XCTAssertEqual(doc.entries[0].state, .complete)
+        XCTAssertTrue(doc.entries[0].segments.isEmpty); XCTAssertNil(doc.language)
+    }
+
+    func testT27CircuitBreakerKeepsIngestingAndRecordsAllFailedWindows() async throws {
+        let recovery = T27MemoryRecovery()
+        let f = try T19Fixture(recovery: recovery)
+        await f.start()
+        var request = 0
+        for window in 0..<3 {
+            try f.send(400); f.pause()
+            let attempts = window < 2 ? 3 : 2
+            for _ in 0..<attempts {
+                _ = try await f.engine.request(request)
+                try await f.engine.fail(request, .inferenceFailed); request += 1
+            }
+            if window < 2 { _ = try await f.observed.wait { $0.phase == .listening && $0.pendingFinals == 0 } }
+        }
+        _ = try await f.observed.wait { $0.phase == .failed }
+        try f.send(400); f.pause()
+        _ = try await f.observed.wait { $0.inputMilliseconds == 1_600 && $0.recovery?.pending == 4 }
+        f.finish(); await f.coordinator.waitUntilSettled()
+        let state = await f.coordinator.currentSnapshot()
+        XCTAssertEqual(state.automaticRestarts, 2); XCTAssertEqual(state.failure, .inferenceFailed)
+        let count = await f.engine.requests.count; XCTAssertEqual(count, 8)
+        XCTAssertTrue(state.cleanupComplete)
+    }
+
+    func testT27BackpressureDefersOldQueuedWindowButPreservesCurrentSpeech() async throws {
+        let recovery = T27MemoryRecovery()
+        let f = try T19Fixture(capacity: 1, recovery: recovery)
+        await f.start(); try f.send(400); f.pause(); _ = try await f.engine.request(0)
+        try f.send(400); f.pause(); try f.send(400); f.pause()
+        _ = try await f.observed.wait { $0.recovery?.pending == 3 }
+        try await f.engine.respond(0, .final, "처음")
+        let current = try await f.engine.request(1)
+        XCTAssertEqual(current.context.mediaStart.rawValue, 800)
+        try await f.engine.respond(1, .final, "현재")
+        _ = try await f.observed.wait { $0.finals.count == 2 }
+        f.finish(); await f.coordinator.waitUntilSettled()
+        let state = await f.coordinator.currentSnapshot()
+        XCTAssertNil(state.failure); XCTAssertEqual(state.recovery?.pending, 1)
+        let recorded = await recovery.value()
+        let doc = try XCTUnwrap(recorded)
+        XCTAssertEqual(doc.entries.filter { $0.state == .pending }.map(\.range.start), [400])
+    }
+
+    func testT27StorageFailureNeverRetriesAmbiguousJournalAppend() async throws {
+        let recovery = T27MemoryRecovery()
+        let f = try T19Fixture(journalFailure: true, recovery: recovery)
+        await f.start(); try f.send(400); f.pause()
+        _ = try await f.engine.request(0); try await f.engine.respond(0, .final, "저장할 문장")
+        await f.coordinator.waitUntilSettled(); f.finish()
+        let state = await f.coordinator.currentSnapshot()
+        XCTAssertNotNil(state.storageWarning); XCTAssertEqual(state.automaticRestarts, 0)
+        let attempts = await f.repository.appendAttempts; XCTAssertEqual(attempts, 1)
+        let recorded = await recovery.value()
+        let doc = try XCTUnwrap(recorded)
+        XCTAssertEqual(doc.entries[0].state, .prepared)
+        XCTAssertEqual(doc.entries[0].segments.map(\.text), ["저장할 문장"])
+    }
+
+    func testT27TimeoutWaitsForNativeCleanupAndIgnoresLateResult() async throws {
+        let recovery = T27MemoryRecovery(), gate = T14Gate()
+        let f = try T19Fixture(cancelGate: gate, recovery: recovery, timeout: .milliseconds(100))
+        await f.start(); try f.send(400); f.pause(); _ = try await f.engine.request(0)
+        try await gate.wait()
+        try f.send(400); f.pause()
+        _ = try await f.observed.wait { $0.inputMilliseconds == 800 }
+        try await f.engine.respond(0, .final, "늦은 응답")
+        f.finish()
+        let before = await f.coordinator.currentSnapshot(); XCTAssertFalse(before.cleanupComplete)
+        let loaded = await f.engine.loaded; XCTAssertTrue(loaded.isEmpty)
+        await gate.release(); await f.coordinator.waitUntilSettled()
+        let state = await f.coordinator.currentSnapshot()
+        XCTAssertTrue(state.finals.isEmpty); XCTAssertEqual(state.recovery?.pending, 2)
+        XCTAssertEqual(state.phase, .failed); XCTAssertTrue(state.cleanupComplete)
+    }
+
+    func testT27ExplicitCancellationLeavesPendingWithoutReload() async throws {
+        let recovery = T27MemoryRecovery()
+        let f = try T19Fixture(recovery: recovery)
+        await f.start(); try f.send(400); f.pause(); _ = try await f.engine.request(0)
+        await f.coordinator.cancel(); f.finish()
+        let state = await f.coordinator.currentSnapshot()
+        XCTAssertEqual(state.phase, .cancelled); XCTAssertEqual(state.recovery?.pending, 1)
+        let count = await f.engine.requests.count; XCTAssertEqual(count, 1)
+        XCTAssertEqual(state.automaticRestarts, 0)
+    }
+}
+
+extension LiveSTTCoordinatorTests {
+    func testT27SlowJournalAfterFinalIsNotMisclassifiedAsInferenceTimeout() async throws {
+        let recovery = T27MemoryRecovery(), gate = T14Gate()
+        let f = try T19Fixture(journalGate: gate, recovery: recovery, timeout: .milliseconds(100))
+        await f.start(); try f.send(400); f.pause(); _ = try await f.engine.request(0)
+        try await f.engine.respond(0, .final, "저장 대기")
+        try await gate.wait(); try await Task.sleep(for: .milliseconds(180))
+        let during = await f.coordinator.currentSnapshot(); XCTAssertNil(during.failure)
+        let counts = await f.engine.counts; XCTAssertEqual(counts[2], 0)
+        await gate.release()
+        _ = try await f.observed.wait { $0.finals.count == 1 }
+        f.finish(); await f.coordinator.waitUntilSettled()
+        let done = await f.coordinator.currentSnapshot(); XCTAssertNil(done.failure)
+    }
+
+    func testT27DroppedInputIsPersistedSeparatelyFromSuccessfulWindow() async throws {
+        let recovery = T27MemoryRecovery()
+        let f = try T19Fixture(recovery: recovery)
+        await f.start(); try f.send(400); f.pause(); _ = try await f.engine.request(0)
+        try await f.engine.respond(0, .final, "앞")
+        _ = try await f.observed.wait { $0.finals.count == 1 }
+        try f.send(400, at: 16_000, sequence: 3); f.pause()
+        _ = try await f.engine.request(1); try await f.engine.respond(1, .final, "뒤")
+        _ = try await f.observed.wait { $0.finals.count == 2 }
+        f.finish(); await f.coordinator.waitUntilSettled()
+        let recorded = await recovery.value(), doc = try XCTUnwrap(recorded)
+        XCTAssertEqual(doc.entries.filter { $0.state == .pending }.map(\.range), [try .init(400, 1_000)])
+        XCTAssertEqual(doc.entries.filter { $0.state == .complete }.count, 2)
+    }
+
+    func testT27LedgerFailureStopsSpeechWithoutPublishingOrRetrying() async throws {
+        let recovery = T27MemoryRecovery(failPrepare: true)
+        let f = try T19Fixture(recovery: recovery)
+        await f.start(); try f.send(400); f.pause(); _ = try await f.engine.request(0)
+        try await f.engine.respond(0, .final, "보존해야 할 오디오")
+        await f.coordinator.waitUntilSettled(); f.finish()
+        let state = await f.coordinator.currentSnapshot()
+        XCTAssertNotNil(state.storageWarning); XCTAssertTrue(state.finals.isEmpty)
+        let records = await f.repository.records; XCTAssertTrue(records.isEmpty)
+        let requests = await f.engine.requests; XCTAssertEqual(requests.count, 1)
+    }
+}
+
+private actor T27MemoryRecovery: SpeechRecoveryRecording {
+    let failPrepare: Bool
+    init(failPrepare: Bool = false) { self.failPrepare = failPrepare }
+    var document: SpeechRecoveryDocument?
+    func value() -> SpeechRecoveryDocument? { document }
+    func initialize(_ session: STTSessionConfiguration, at: SessionLocation) throws {
+        document = SpeechRecoveryDocument(session: session, language: session.languageMode == .automatic ? nil : try .init(session.languageMode == .korean ? "ko" : "en"))
+    }
+    func observe(windows: [SpeechRecoveryRange], missing: [SpeechRecoveryRange], through: Int64, ended: Bool, at: SessionLocation) throws -> SpeechRecoverySummary {
+        for range in windows { document!.register(range) }
+        for range in missing { try document!.addMissing(range) }
+        document!.scannedThrough = through
+        return document!.summary
+    }
+    func pinLanguage(_ language: LanguageCode, at: SessionLocation) { document!.language = language }
+    func prepare(_ segments: [TranscriptSegment], range: SpeechRecoveryRange, language: LanguageCode?, at: SessionLocation) throws {
+        if failPrepare { throw StorageError(.jsonlAppendFailed) }
+        let i = try XCTUnwrap(document!.entries.firstIndex { $0.range == range })
+        document!.entries[i].segments = segments; document!.entries[i].state = .prepared
+        if let language { document!.language = language }
+    }
+    func complete(_ range: SpeechRecoveryRange, at: SessionLocation) throws -> SpeechRecoverySummary {
+        let i = try XCTUnwrap(document!.entries.firstIndex { $0.range == range })
+        document!.entries[i].state = .complete
+        return document!.summary
+    }
 }

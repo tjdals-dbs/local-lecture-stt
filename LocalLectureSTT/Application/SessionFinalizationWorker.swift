@@ -7,6 +7,8 @@ struct SessionFinalizationWorker: AudioFinalizationWorking {
     let audio: any AudioFinalizationWorking
     let transcripts: any TranscriptFinalizing
     var settleSpeech: @Sendable (SessionLocation, AudioFinalizationControl) async throws -> Void = { _, _ in }
+    var gapRepair: (any SpeechGapRepairing)? = nil
+    var didRepairSpeech: @Sendable (SessionLocation, SpeechRecoverySummary) async -> Void = { _, _ in }
 
     func finalize(_ request: AudioFinalizationRequest, control: AudioFinalizationControl,
                   progress: @escaping @Sendable (AudioFinalizationPhase) async -> Void) async -> AudioFinalizationResult {
@@ -16,8 +18,15 @@ struct SessionFinalizationWorker: AudioFinalizationWorking {
             await progress(.compactingTranscript)
             try await settleSpeech(request.location, control)
             try control.check()
+            let speech = try await gapRepair?.repair(at: request.location, audio: result, control: control)
+            if let speech { await didRepairSpeech(request.location, speech) }
+            try control.check()
             let steps = try await transcripts.finalize(at: request.location, audio: result, control: control)
             try control.check()
+            if let speech, speech.pending > 0 || speech.unresolved > 0 {
+                return replacing(result, phase: .failed, failure: .transcript, steps: steps,
+                                 transcriptFailure: .init(code: .speechIncomplete))
+            }
             return replacing(result, phase: .sessionReady, failure: nil, steps: steps)
         } catch {
             let typed = error as? TranscriptFailure

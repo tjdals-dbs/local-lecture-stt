@@ -147,6 +147,20 @@ private struct SpeechNoticesView: View, Equatable {
         let state = presentation.state
         VStack(alignment: .leading, spacing: 4) {
             if state.phase == .finishing { ProgressView("남은 발화를 전사하는 중…") }
+            if state.phase == .recovering {
+                ProgressView("전사 복구 중 · 녹음은 계속됩니다")
+                    .accessibilityIdentifier("transcript-recovering")
+            }
+            if let recovery = state.recovery, recovery.pending > 0 {
+                Text("미처리 전사 \(recovery.pending)구간 · 누락분은 녹음 종료 후 복구합니다")
+                    .foregroundStyle(.orange).accessibilityIdentifier("transcript-recovery-pending")
+            }
+            if let recovery = state.recovery {
+                SpeechRecoveryRangesView(recovery: recovery)
+                if recovery.pending == 0, recovery.unresolved == 0, recovery.recovered > 0 {
+                    Text("누락 구간 복구 완료 · 완성된 전사는 세션 상세에서 확인하세요")
+                }
+            }
             if let code = state.failure {
                 IssueNoticeView(issue: UserIssues.speech(code)).accessibilityIdentifier("transcript-failure")
             }
@@ -161,5 +175,31 @@ private struct SpeechNoticesView: View, Equatable {
                 Text("일부 전사 입력이 누락되었습니다. 녹음 파일은 별도로 저장됩니다.").foregroundStyle(.orange)
             }
         }.font(.caption).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+struct SpeechRecoveryRangesView: View {
+    let recovery: SpeechRecoverySummary
+    var body: some View {
+        let pending = recovery.pendingRanges ?? []
+        let unresolved = recovery.unresolvedRanges ?? []
+        if !pending.isEmpty || !unresolved.isEmpty {
+            DisclosureGroup("미처리 구간 시간 보기") {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(pending.enumerated()), id: \.offset) { _, range in
+                            Text("복구 대기 · \(label(range))")
+                        }
+                        ForEach(Array(unresolved.enumerated()), id: \.offset) { _, range in
+                            Text("미복구 · \(label(range))").foregroundStyle(.orange)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(maxHeight: 160)
+            }.accessibilityIdentifier("speech-recovery-ranges")
+        }
+    }
+    private func label(_ range: SpeechRecoveryRange) -> String {
+        func clock(_ value: Int64) -> String { String(format: "%02lld:%02lld:%02lld.%03lld", value / 3_600_000, value / 60_000 % 60, value / 1_000 % 60, value % 1_000) }
+        return "\(clock(range.start))–\(clock(range.end))"
     }
 }

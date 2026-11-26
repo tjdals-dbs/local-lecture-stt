@@ -324,6 +324,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     private let prepareCapture: @Sendable () async -> Void
     private var speechModel: RecordingSpeechModel?
     private let makeSpeechConverter: (@Sendable () -> any SpeechPCMConverting)?
+    private let speechRecovery: (any SpeechRecoveryRecording)?
     private var speechOwnsModel = false
     private var speechJobs: [SessionID: LiveSTTCoordinator] = [:]
     private var speechSettlements: [SessionID: Task<Void, Never>] = [:]
@@ -372,6 +373,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         makeSelectedSpeechModel: (@Sendable (ModelPackageDescriptor) throws -> RecordingSpeechModel)? = nil,
         prepareCapture: @escaping @Sendable () async -> Void = {},
         makeSpeechConverter: (@Sendable () -> any SpeechPCMConverting)? = nil,
+        speechRecovery: (any SpeechRecoveryRecording)? = nil,
         identifiers: RecordingSessionIdentifiers = .live,
         activity: SessionActivityRegistry? = nil,
         authority: LifecycleWorkAuthority? = nil,
@@ -390,6 +392,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         self.makeSelectedSpeechModel = makeSelectedSpeechModel
         self.prepareCapture = prepareCapture
         self.makeSpeechConverter = makeSpeechConverter
+        self.speechRecovery = speechRecovery
         self.environment = environment
         self.identifiers = identifiers
         self.activity = activity
@@ -934,7 +937,7 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
         let session = STTSessionConfiguration(sessionID: location.sessionID, operationID: .init(UUID()),
             model: model.configuration, languageMode: language)
         let job = LiveSTTCoordinator(engine: model.engine, session: session, repository: repository,
-            location: location, converter: makeSpeechConverter()) { [weak self] value in
+            location: location, converter: makeSpeechConverter(), recovery: speechRecovery) { [weak self] value in
                 await self?.receiveSpeech(value, sessionID: location.sessionID)
             }
         speechOwnsModel = true
@@ -952,6 +955,16 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
     private func receiveSpeech(_ value: LiveSTTSnapshot, sessionID: SessionID) {
         guard snapshot.sessionID == sessionID else { return }
         speechSnapshot = value
+        publishSnapshot()
+    }
+
+    func didRepairSpeech(at location: SessionLocation, summary: SpeechRecoverySummary) {
+        guard snapshot.sessionID == location.sessionID, speechSnapshot.cleanupComplete else { return }
+        speechSnapshot.recovery = summary
+        if summary.pending == 0 && summary.unresolved == 0 && speechSnapshot.storageWarning == nil {
+            speechSnapshot.failure = nil
+            speechSnapshot.phase = .finished
+        }
         publishSnapshot()
     }
 
@@ -1644,7 +1657,8 @@ actor RecordingSessionCoordinator: RecordingSessionCoordinating {
             model: speechModel?.configuration.model,
             modelSettings: speechModel?.settings,
             audio: audio,
-            transcript: TranscriptSummary(segmentCount: try TranscriptSegmentCount(0)),
+            transcript: TranscriptSummary(segmentCount: try TranscriptSegmentCount(0),
+                recovery: speechRecovery != nil && speechModel != nil ? .init(pending: 0, unresolved: 0, recovered: 0) : nil),
             appVersion: environment.appVersion,
             osVersion: environment.osVersion,
             lastUpdatedAt: updatedAt

@@ -29,6 +29,29 @@ struct AudioDescription: Codable, Sendable, Equatable {
 
 struct TranscriptSummary: Codable, Sendable, Equatable {
     let segmentCount: TranscriptSegmentCount
+    var recovery: SpeechRecoverySummary? = nil
+}
+
+struct SpeechRecoveryRange: Codable, Sendable, Hashable {
+    let start: Int64
+    let end: Int64
+    init(_ start: Int64, _ end: Int64) throws {
+        guard start >= 0, end > start else { throw STTEngineError(.invalidInput) }
+        self.start = start; self.end = end
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(c.decode(Int64.self, forKey: .start), c.decode(Int64.self, forKey: .end))
+    }
+}
+
+struct SpeechRecoverySummary: Codable, Sendable, Equatable {
+    let pending: Int
+    let unresolved: Int
+    let recovered: Int
+    var pendingRanges: [SpeechRecoveryRange]? = nil
+    var unresolvedRanges: [SpeechRecoveryRange]? = nil
+    var requiresWork: Bool { pending > 0 }
 }
 
 /// The model identity carries the package checksum. This digest identifies the weight file itself.

@@ -3,7 +3,7 @@ import Foundation
 enum TranscriptFailureCode: String, Codable, Sendable {
     case invalidJournal, unsupportedSchema, sessionMismatch, duplicateConflict, invalidOrder
     case invalidTime, canonicalConflict, missingCanonical, notFinalized, editConflict, segmentMissing
-    case busy, storage, catalog, repairRequired
+    case busy, storage, catalog, repairRequired, speechIncomplete
 }
 
 struct TranscriptFailure: Error, Codable, Sendable, Equatable {
@@ -115,14 +115,21 @@ enum TranscriptRenderer {
         func scalar<T: Encodable>(_ value: T) throws -> String {
             String(decoding: try encoder.encode(value), as: UTF8.self)
         }
-        let header = try [
+        var headerLines = try [
             "---", "sessionId: \(scalar(metadata.sessionId))", "title: \(scalar(metadata.title))",
             "createdAt: \(scalar(metadata.createdAt))", "durationMs: \(metadata.activeDurationMs.rawValue)",
             "languageMode: \(scalar(metadata.languageMode))", "detectedLanguage: \(scalar(metadata.detectedLanguage))",
             "engine: \(scalar(metadata.engine))", "model: \(scalar(metadata.model))", "---", ""
-        ].joined(separator: "\n")
+        ]
+        if let recovery = metadata.transcript.recovery {
+            headerLines.insert("transcriptionPendingRanges: \(recovery.pending)", at: headerLines.count - 2)
+            headerLines.insert("transcriptionUnresolvedRanges: \(recovery.unresolved)", at: headerLines.count - 2)
+        }
+        let header = headerLines.joined(separator: "\n")
         let body = document.segments.map { "[\(timestamp($0.startMs))] \($0.text)" }.joined(separator: "\n")
-        let text = body.isEmpty ? "" : body + "\n"
+        let notice = metadata.transcript.recovery.map { $0.pending + $0.unresolved > 0
+            ? "[전사 미완료: 복구 대기 \($0.pending)구간, 미복구 \($0.unresolved)구간]\n" : "" } ?? ""
+        let text = notice + (body.isEmpty ? "" : body + "\n")
         return .init(text: Data(text.utf8), markdown: Data((header + "\n" + text).utf8))
     }
 }

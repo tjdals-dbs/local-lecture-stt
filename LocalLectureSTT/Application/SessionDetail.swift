@@ -14,6 +14,7 @@ struct SessionDetailDocument: Codable, Sendable, Equatable {
     let availableFiles: [SessionDetailFile]
     let editable: Bool
     let issues: [SessionDetailIssue]
+    var speechRecovery: SpeechRecoverySummary? = nil
 }
 enum SessionDetailFailure: String, Error, Codable, Sendable {
     case busy, unavailable, invalidAudio, invalidSeek, identityChanged, notFinalized, conflict, cancelled

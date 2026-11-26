@@ -60,12 +60,28 @@ actor FileSessionDetailStore: SessionDetailStoring {
                     else { issues.append(.init(artifact: file.rawValue, code: "missing")) }
                 } catch { issues.append(.init(artifact: file.rawValue, code: SessionDetailDiagnostics.code(error))) }
             }
-            let editable = metadata.map { [.completed, .interrupted].contains($0.status) &&
+            var speechRecovery: SpeechRecoverySummary?
+            var recoveryDamaged = false
+            do {
+                if try files.identity(SpeechRecoveryDocument.path) != nil {
+                    let recovery = try files.readJSON(SpeechRecoveryDocument.self, SpeechRecoveryDocument.path)
+                    guard let metadata else { throw TranscriptFailure(code: .missingCanonical) }
+                    try recovery.validate(metadata: metadata)
+                    speechRecovery = recovery.summary
+                } else if metadata?.transcript.recovery != nil {
+                    throw TranscriptFailure(code: .missingCanonical)
+                }
+            } catch {
+                recoveryDamaged = true
+                issues.append(.init(artifact: SpeechRecoveryDocument.path, code: SessionDetailDiagnostics.code(error)))
+            }
+            let editable = !recoveryDamaged && speechRecovery?.requiresWork != true && metadata.map { [.completed, .interrupted].contains($0.status) &&
                 [.completed, .interrupted].contains($0.captureOutcome) } == true && document != nil &&
                 checkpoint?.sessionId == location.sessionID && checkpoint?.completedSteps.contains(.metadataCompleted) == true
             try files.validateDirectories()
             await lease.release()
-            return .init(location: location, metadata: metadata, transcript: document, availableFiles: available, editable: editable, issues: issues)
+            return .init(location: location, metadata: metadata, transcript: document, availableFiles: available,
+                         editable: editable, issues: issues, speechRecovery: speechRecovery)
         } catch { await lease.release(); throw error }
     }
 

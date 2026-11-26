@@ -67,6 +67,8 @@ struct SpeechNoticeState: Equatable {
     var degraded = false
     var pendingFinals = 0
     var inputDiscontinuities = 0
+    var recovery: SpeechRecoverySummary?
+    var automaticRestarts = 0
 }
 
 @MainActor
@@ -75,7 +77,8 @@ final class SpeechNoticePresentation: ObservableObject {
     fileprivate func update(_ speech: LiveSTTSnapshot) {
         let next = SpeechNoticeState(phase: speech.phase, failure: speech.failure,
             storageWarning: speech.storageWarning, degraded: speech.degraded,
-            pendingFinals: speech.pendingFinals, inputDiscontinuities: speech.inputDiscontinuities)
+            pendingFinals: speech.pendingFinals, inputDiscontinuities: speech.inputDiscontinuities,
+            recovery: speech.recovery, automaticRestarts: speech.automaticRestarts)
         if state != next { state = next }
     }
 }

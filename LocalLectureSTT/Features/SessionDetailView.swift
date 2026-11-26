@@ -22,6 +22,18 @@ struct SessionDetailView: View {
                     Button("다시 읽기") { Task { await model.refresh() } }.disabled(model.busy || model.hasDraft)
                 }.font(.caption).foregroundStyle(.secondary)
                 if model.document?.availableFiles.contains(.audio) == true { audioControls }
+                if let recovery = model.document?.speechRecovery {
+                    SpeechRecoveryRangesView(recovery: recovery)
+                    if recovery.pending > 0 {
+                        Text("오디오 저장 완료 · 전사 \(recovery.pending)구간 복구 대기/진행 중 · 편집 잠금")
+                            .foregroundStyle(.orange).accessibilityIdentifier("session-speech-pending")
+                    } else if recovery.unresolved > 0 {
+                        Text("오디오 저장 완료 · 전사 \(recovery.unresolved)구간 미복구")
+                            .foregroundStyle(.orange).accessibilityIdentifier("session-speech-incomplete")
+                    } else if recovery.recovered > 0 {
+                        Text("누락 전사 \(recovery.recovered)구간 복구 완료").foregroundStyle(.secondary)
+                    }
+                }
                 HStack {
                     ForEach(SessionDetailFile.allCases, id: \.self) { file in
                         Button("\(file.rawValue) 위치") { Task { await model.reveal(file) } }

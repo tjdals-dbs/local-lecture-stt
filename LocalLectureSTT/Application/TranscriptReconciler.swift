@@ -9,12 +9,17 @@ protocol TranscriptReconciling: Sendable {
 /// Consumes closed windows in media order and returns only newly committed segments.
 /// The caller owns the transcript. This value retains at most the previous engine snapshot.
 struct TranscriptReconciler: TranscriptReconciling {
-    let session: STTSessionConfiguration
+    private(set) var session: STTSessionConfiguration
     private var previousFrames: Range<Int64>?
     private var previousFinal: [STTHypothesisSegment] = []
     private var nextSequence: Int64 = 0
 
     init(session: STTSessionConfiguration) { self.session = session }
+
+    mutating func rebind(to next: STTSessionConfiguration) throws {
+        guard next.sessionID == session.sessionID, next.model == session.model else { throw STTEngineError(.sessionMismatch) }
+        session = next
+    }
 
     mutating func reconcile(_ response: STTResponse, for window: SpeechWindow,
                             language: LanguageCode) throws -> [TranscriptSegment] {

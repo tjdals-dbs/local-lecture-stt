@@ -40,8 +40,13 @@ actor FileTranscriptRepository: TranscriptFinalizing, TranscriptEditing, Remaini
             if existing == nil, journal.isEmpty, run.metadata.transcript.segmentCount.rawValue > 0 {
                 throw TranscriptFailure(code: .missingCanonical)
             }
-            let document = try TranscriptCanonical.compact(sessionID: location.sessionID, journal: journal,
+            let document: TranscriptDocument
+            if let recovery = try run.speechRecovery() {
+                document = try recovery.canonical(existing: existing, journal: journal, duration: duration)
+            } else {
+                document = try TranscriptCanonical.compact(sessionID: location.sessionID, journal: journal,
                                                            existing: existing, duration: duration)
+            }
             let metadata = try run.completedMetadata(count: document.segments.count, duration: duration)
             if document == existing, metadata == run.metadata,
                run.checkpoint.completedSteps.contains(.catalogUpdated),
@@ -82,6 +87,7 @@ actor FileTranscriptRepository: TranscriptFinalizing, TranscriptEditing, Remaini
 
     func updateTitle(at location: SessionLocation, expectedTitle: String, title: String) async throws {
         try await transaction(at: location, control: .init()) { run in
+            guard try run.speechRecovery()?.summary.requiresWork != true else { throw TranscriptFailure(code: .notFinalized) }
             guard run.checkpoint.completedSteps.contains(.metadataCompleted),
                   [.completed, .interrupted].contains(run.metadata.status),
                   [.completed, .interrupted].contains(run.metadata.captureOutcome) else {
@@ -116,6 +122,7 @@ actor FileTranscriptRepository: TranscriptFinalizing, TranscriptEditing, Remaini
     private func edit(at location: SessionLocation,
                       mutation: @Sendable (TranscriptDocument) throws -> TranscriptDocument) async throws -> TranscriptDocument {
         try await transaction(at: location, control: .init()) { run in
+            guard try run.speechRecovery()?.summary.requiresWork != true else { throw TranscriptFailure(code: .notFinalized) }
             guard run.checkpoint.completedSteps.contains(.metadataCompleted),
                   (run.metadata.status == .completed && run.metadata.captureOutcome == .completed) ||
                   (run.metadata.status == .interrupted && run.metadata.captureOutcome == .interrupted) else {
@@ -136,6 +143,9 @@ actor FileTranscriptRepository: TranscriptFinalizing, TranscriptEditing, Remaini
     /// not infer completion from checkpoint booleans or caller-supplied hashes.
     func verify(location: SessionLocation, files expected: [FinalizationFileEvidence]) async throws -> CatalogProjection {
         try await transaction(at: location, control: .init(), requiresWrite: false) { run in
+            if let recovery = try run.speechRecovery(), recovery.summary.pending > 0 || recovery.summary.unresolved > 0 {
+                throw AudioFinalizationCode.completionEvidence
+            }
             for file in expected { try run.files.verify(file, contents: true) }
             guard run.checkpoint.completedSteps.contains(.catalogUpdated),
                   let document = try run.canonical() else { throw AudioFinalizationCode.completionEvidence }
@@ -198,7 +208,7 @@ private final class TranscriptFileTransaction {
             throw TranscriptFailure(code: .sessionMismatch)
         }
         for path in ["metadata.json", FinalizationFileAccess.checkpoint, "transcript.json", "transcript.txt", "transcript.md",
-                     SessionArtifact.transcriptJournal.relativePath, FinalizationFileAccess.source, FinalizationFileAccess.canonical] {
+                     SessionArtifact.transcriptJournal.relativePath, SpeechRecoveryDocument.path, FinalizationFileAccess.source, FinalizationFileAccess.canonical] {
             try observe(path)
         }
         guard try files.identity("metadata.json") == metadataBefore,
@@ -257,6 +267,15 @@ private final class TranscriptFileTransaction {
         guard pending.isEmpty else { throw TranscriptFailure(code: .invalidJournal, line: line) }
         return replay.segments
     }
+    func speechRecovery() throws -> SpeechRecoveryDocument? {
+        guard try files.identity(SpeechRecoveryDocument.path) != nil else {
+            guard metadata.transcript.recovery == nil else { throw TranscriptFailure(code: .missingCanonical) }
+            return nil
+        }
+        let document = try files.readJSON(SpeechRecoveryDocument.self, SpeechRecoveryDocument.path)
+        try document.validate(metadata: metadata)
+        return document
+    }
     func writeCanonical(_ document: TranscriptDocument) async throws {
         try await reach(.beforeCanonical)
         try write(document, path: "transcript.json")
@@ -274,12 +293,15 @@ private final class TranscriptFileTransaction {
     func completedMetadata(count: Int, duration: MediaMilliseconds, edited: Bool = false) throws -> SessionMetadataDocument {
         let m = metadata
         let status: SessionStatus = m.captureOutcome == .completed ? .completed : .interrupted
-        if !edited, m.status == status, m.transcript.segmentCount.rawValue == count, m.activeDurationMs == duration { return m }
+        let recovered = try speechRecovery()
+        let recovery = recovered?.summary
+        if !edited, m.status == status, m.transcript.segmentCount.rawValue == count, m.activeDurationMs == duration,
+           m.transcript.recovery == recovery, m.detectedLanguage == (recovered?.language ?? m.detectedLanguage) { return m }
         return try .init(sessionId: m.sessionId, title: m.title, status: status, captureOutcome: m.captureOutcome,
             createdAt: m.createdAt, recordingStartedAt: m.recordingStartedAt, recordingEndedAt: m.recordingEndedAt,
-            activeDurationMs: duration, languageMode: m.languageMode, detectedLanguage: m.detectedLanguage,
+            activeDurationMs: duration, languageMode: m.languageMode, detectedLanguage: recovered?.language ?? m.detectedLanguage,
             engine: m.engine, model: m.model, modelSettings: m.modelSettings, audio: m.audio,
-            transcript: .init(segmentCount: .init(Int64(count))), appVersion: m.appVersion, osVersion: m.osVersion,
+            transcript: .init(segmentCount: .init(Int64(count)), recovery: recovery), appVersion: m.appVersion, osVersion: m.osVersion,
             lastUpdatedAt: AbsoluteTime(Date()))
     }
     func renameTitle(_ title: String) async throws {

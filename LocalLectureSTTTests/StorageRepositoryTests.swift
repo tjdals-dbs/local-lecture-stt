@@ -222,7 +222,8 @@ final class StorageRepositoryTests: XCTestCase {
             (.events, "events.jsonl", .authoritativeOrRecovery),
             (.recoveryAudio, "recovery/audio.recovery.mov", .authoritativeOrRecovery),
             (.transcriptJournal, "recovery/transcript.journal.jsonl", .authoritativeOrRecovery),
-            (.finalizationCheckpoint, "recovery/finalization.checkpoint.json", .authoritativeOrRecovery)
+            (.finalizationCheckpoint, "recovery/finalization.checkpoint.json", .authoritativeOrRecovery),
+            (.speechRecovery, "recovery/speech-recovery.json", .authoritativeOrRecovery)
         ]
         XCTAssertEqual(expected.map(\.0), SessionArtifact.allCases)
         for (artifact, path, ownership) in expected {

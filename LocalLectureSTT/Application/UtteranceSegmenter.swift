@@ -165,6 +165,11 @@ struct UtteranceSegmenter: Sendable {
     /// T19 may sample this for partial inference. Reading it never advances the segmenter.
     func openWindow() throws -> SpeechWindow? { try window(.open) }
 
+    /// Audio before this position is either classified silence or belongs to a
+    /// closed window. The retained prefix/open utterance must survive a crash
+    /// as unprocessed audio, even when it has not produced any text.
+    var safeThroughFrame: Int64 { analyzedEnd - Int64(buffer.count) }
+
     /// Stop or pause flushes even a partial analysis frame, without padding recorded time.
     mutating func flush() throws -> [SpeechWindow] { try drain(.flush) }
 

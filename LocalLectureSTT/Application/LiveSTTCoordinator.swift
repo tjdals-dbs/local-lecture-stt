@@ -10,7 +10,7 @@ protocol SpeechPCMConverting: Sendable {
     func drain() async throws -> [SpeechAudioBlock]
 }
 
-enum LiveSTTPhase: String, Sendable { case idle, listening, finishing, finished, cancelled, failed }
+enum LiveSTTPhase: String, Sendable { case idle, listening, recovering, finishing, finished, cancelled, failed }
 
 struct LiveSTTSnapshot: Sendable, Equatable {
     var phase: LiveSTTPhase = .idle
@@ -26,19 +26,28 @@ struct LiveSTTSnapshot: Sendable, Equatable {
     var inputDiscontinuities = 0
     var failure: STTErrorCode?
     var storageWarning: String?
+    var recovery: SpeechRecoverySummary?
+    var automaticRestarts = 0
     static let idle = LiveSTTSnapshot()
 }
 
 /// One owner per recording, independent of the recorder's PCM consumer.
 /// At most one inference and four pending final windows hold audio. Partial
-/// work has no queue: busy/degraded ticks are skipped. Exhausting final capacity
-/// visibly stops STT only; recoverable audio remains the source for later repair.
+/// work has no queue: busy/degraded ticks are skipped. With a durable recovery
+/// ledger, overflowing final windows are deferred to post-stop audio repair.
 actor LiveSTTCoordinator {
     // Conservative UTF-8 suffix, below the selected adapter's prompt-token
     // budget even for byte-level tokens. Never forward the entire transcript.
     static let contextUTF8Limit = 96
     private let engine: any STTEngine
-    private let session: STTSessionConfiguration
+    private var session: STTSessionConfiguration
+    private let recovery: (any SpeechRecoveryRecording)?
+    private var persistedThrough: Int64 = 0
+    private var consecutiveFailures = 0
+    private var speechUnavailable = false
+    private var inputComplete = false
+    private let requestTimeout: Duration
+    private var inferenceID: UUID?
     private let repository: any SessionRepository
     private let location: SessionLocation
     private let converter: any SpeechPCMConverting
@@ -67,9 +76,13 @@ actor LiveSTTCoordinator {
          converter: any SpeechPCMConverting,
          detector: any VoiceActivityDetector = AdaptiveEnergyVAD(),
          maximumPendingFinals: Int = 4,
+         recovery: (any SpeechRecoveryRecording)? = nil,
+         requestTimeout: Duration = .seconds(60),
          publish: @escaping @Sendable (LiveSTTSnapshot) async -> Void = { _ in }) {
         self.engine = engine; self.session = session; self.repository = repository
         self.location = location; self.converter = converter
+        self.recovery = recovery
+        self.requestTimeout = requestTimeout
         capacity = max(1, maximumPendingFinals); self.publish = publish
         segmenter = UtteranceSegmenter(detector: detector)
         reconciler = TranscriptReconciler(session: session)
@@ -99,6 +112,10 @@ actor LiveSTTCoordinator {
 
     private func run(_ handle: CaptureHandle) async {
         do {
+            if let recovery {
+                do { try await recovery.initialize(session, at: location) }
+                catch { snapshot.storageWarning = "recoveryLedgerWriteFailed"; throw error }
+            }
             try await engine.start(session)
             try checkRunning()
             snapshot.phase = .listening
@@ -141,15 +158,18 @@ actor LiveSTTCoordinator {
                 origin = origin ?? handle.timeline.sourceOrigin() ?? chunk.sourceSampleTime
                 let blocks = try await converter.convert(chunk, origin: origin!)
                 try checkRunning()
-                try ingest(blocks)
+                try await ingest(blocks)
                 await emit()
             }
             try checkRunning()
             let tail = try await converter.drain()
             try checkRunning()
-            try ingest(tail, allowsPartial: false)
-            for window in try segmenter.flush() { try enqueue(window) }
-            snapshot.phase = .finishing
+            try await ingest(tail, allowsPartial: false)
+            let flushed = try segmenter.flush()
+            try await observe(flushed, through: latestFrame / 16, ended: true)
+            for window in flushed { try enqueue(window) }
+            inputComplete = true
+            if !speechUnavailable { snapshot.phase = .finishing }
             snapshot.partial = nil
             await emit()
             startWorker()
@@ -158,13 +178,13 @@ actor LiveSTTCoordinator {
         }
         await worker?.value
         if let abort { await abort.value }
-        if !stopped {
+        if !stopped && !speechUnavailable {
             do { try await engine.end() }
             catch { fail(error); await abort?.value }
         }
         // All accepted callbacks and journal appends have settled before unload.
         await engine.unload()
-        if !stopped { snapshot.phase = .finished }
+        if !stopped && !speechUnavailable { snapshot.phase = .finished }
         snapshot.partial = nil
         queue.removeAll()
         activeWindow = nil
@@ -180,8 +200,10 @@ actor LiveSTTCoordinator {
         snapshot.partial = nil
         let tail = try await converter.drain()
         try checkRunning()
-        try ingest(tail, allowsPartial: false)
-        for window in try segmenter.flush() { try enqueue(window) }
+        try await ingest(tail, allowsPartial: false)
+        let flushed = try segmenter.flush()
+        try await observe(flushed, through: latestFrame / 16, ended: true)
+        for window in flushed { try enqueue(window) }
         sealedEnd = max(sealedEnd, latestFrame)
         startWorker()
         await emit()
@@ -191,15 +213,18 @@ actor LiveSTTCoordinator {
         guard !stopped, !Task.isCancelled else { throw STTEngineError(.cancelled) }
     }
 
-    private func ingest(_ blocks: [SpeechAudioBlock], allowsPartial: Bool = true) throws {
+    private func ingest(_ blocks: [SpeechAudioBlock], allowsPartial: Bool = true) async throws {
         for block in blocks {
             let end = block.startFrame.addingReportingOverflow(Int64(block.samples.count))
             guard !end.overflow, block.samples.count <= 480_000 else { throw STTEngineError(.invalidInput) }
+            let missing = block.startFrame / 16 > latestFrame / 16 ? [try SpeechRecoveryRange(latestFrame / 16, block.startFrame / 16)] : []
             latestFrame = max(latestFrame, end.partialValue)
-            for window in try segmenter.append(block.samples, at: block.startFrame) { try enqueue(window) }
+            let windows = try segmenter.append(block.samples, at: block.startFrame)
+            try await observe(windows, missing: missing, through: segmenter.safeThroughFrame / 16)
+            for window in windows { try enqueue(window) }
         }
         updateMetrics()
-        if allowsPartial, worker == nil, queue.isEmpty, !snapshot.degraded,
+        if allowsPartial, !speechUnavailable, worker == nil, queue.isEmpty, !snapshot.degraded,
            latestFrame - lastPartialFrame >= 32_000,
            let open = try segmenter.openWindow(), open.audio.frameCount >= 32_000 {
             lastPartialFrame = latestFrame
@@ -210,7 +235,12 @@ actor LiveSTTCoordinator {
     }
 
     private func enqueue(_ window: SpeechWindow) throws {
-        guard queue.count < capacity else { throw STTEngineError(.backlogFull) }
+        guard !speechUnavailable else { return } // Durable pending range survives.
+        if queue.count >= capacity {
+            guard recovery != nil else { throw STTEngineError(.backlogFull) }
+            queue.removeFirst() // Prefer current speech; the old range remains pending on disk.
+            sawDegradation = true
+        }
         queue.append(window)
         sealedEnd = max(sealedEnd, window.endFrame)
         // An old open-window response may no longer replace the pending final.
@@ -218,12 +248,12 @@ actor LiveSTTCoordinator {
     }
 
     private func startWorker() {
-        guard worker == nil, !queue.isEmpty, !stopped else { return }
+        guard worker == nil, !queue.isEmpty, !stopped, !speechUnavailable else { return }
         worker = Task { await self.drainQueue() }
     }
 
     private func drainQueue() async {
-        while !stopped, !queue.isEmpty {
+        while !stopped, !speechUnavailable, !queue.isEmpty {
             let next = queue.removeFirst()
             activeWindow = next
             await emit()
@@ -234,8 +264,71 @@ actor LiveSTTCoordinator {
         await emit()
     }
 
-    private func process(_ window: SpeechWindow) async {
+    private func observe(_ windows: [SpeechWindow], missing: [SpeechRecoveryRange] = [],
+                         through: Int64, ended: Bool = false) async throws {
+        guard let recovery else { return }
+        let through = max(persistedThrough, through)
+        guard !windows.isEmpty || !missing.isEmpty || ended || through - persistedThrough >= 1000 else { return }
         do {
+            let ranges = try windows.map { try SpeechRecoveryRange($0.mediaStart.rawValue, $0.mediaStart.rawValue + $0.audio.duration.rawValue) }
+            snapshot.recovery = try await recovery.observe(windows: ranges, missing: missing, through: through, ended: ended, at: location)
+            persistedThrough = through
+        } catch { snapshot.storageWarning = "recoveryLedgerWriteFailed"; throw error }
+    }
+
+    private func process(_ window: SpeechWindow) async {
+        guard recovery != nil else {
+            do { try await inferOnce(window) } catch { if !stopped { fail(error) } }
+            return
+        }
+        var retry = 0
+        while !stopped && !speechUnavailable {
+            do {
+                try await inferOnce(window)
+                if window.boundary != .open { consecutiveFailures = 0 }
+                snapshot.phase = inputComplete ? .finishing : .listening
+                await emit(); return
+            } catch {
+                if stopped || Task.isCancelled || speechUnavailable { return }
+                let code = (error as? STTEngineError)?.code ?? .inferenceFailed
+                if snapshot.storageWarning != nil { fail(error); return }
+                guard [.inferenceFailed, .invalidResponse].contains(code) else {
+                    speechUnavailable = true; snapshot.failure = code; snapshot.phase = .failed
+                    snapshot.partial = nil; queue.removeAll(); await emit(); return
+                }
+                if window.boundary == .open {
+                    snapshot.partial = nil; await emit(); return
+                }
+                snapshot.phase = .recovering; snapshot.partial = nil; await emit()
+                if retry == 0 { retry += 1; continue }
+                if retry == 1 && snapshot.automaticRestarts < 2 {
+                    retry += 1; snapshot.automaticRestarts += 1
+                    do {
+                        try await engine.cancel(); try checkRunning()
+                        await engine.unload(); try checkRunning()
+                        let mode = snapshot.language.map { $0.rawValue == "ko" ? LanguageMode.korean : .english } ?? session.languageMode
+                        session = .init(sessionID: session.sessionID, operationID: .init(UUID()), model: session.model, languageMode: mode)
+                        try reconciler.rebind(to: session)
+                        try await engine.load(session.model); try checkRunning()
+                        try await engine.start(session); try checkRunning()
+                        sequence = 0
+                        continue
+                    } catch {
+                        if stopped || Task.isCancelled { return }
+                        speechUnavailable = true
+                        snapshot.failure = (error as? STTEngineError)?.code ?? .loadFailed
+                    }
+                }
+                consecutiveFailures += 1
+                if consecutiveFailures >= 3 { speechUnavailable = true; snapshot.failure = code }
+                snapshot.phase = speechUnavailable ? .failed : (inputComplete ? .finishing : .listening)
+                if speechUnavailable { queue.removeAll() }
+                await emit(); return
+            }
+        }
+    }
+
+    private func inferOnce(_ window: SpeechWindow) async throws {
             try checkRunning()
             sequence += 1
             var context = snapshot.finals.last?.text ?? ""
@@ -243,20 +336,36 @@ actor LiveSTTCoordinator {
             let request = try STTInferenceRequest(session: session, requestID: .init(UUID()), sequence: sequence,
                 mediaStart: window.mediaStart, audio: window.audio,
                 decodingHints: context.isEmpty ? nil : STTDecodingHints(promptText: context))
+            let id = request.context.requestID.rawValue
+            inferenceID = id
+            let timeout: Task<Void, Never>? = recovery == nil ? nil : Task { [weak self, requestTimeout] in
+                do { try await Task.sleep(for: requestTimeout) } catch { return }
+                await self?.inferenceTimedOut(id)
+            }
+            defer { timeout?.cancel(); if inferenceID == id { inferenceID = nil } }
             let feed = try await engine.infer(request)
             try checkRunning()
             var revision: Int64 = 0
             var terminal = false
             for await response in try feed.events() {
                 try checkRunning()
+                guard !speechUnavailable else { throw STTEngineError(.inferenceFailed) }
                 guard response.context == request.context, response.revision > revision else {
                     throw STTEngineError(.invalidResponse)
                 }
                 revision = response.revision
+                if response.kind == .final {
+                    // Inference is complete; a slow durable write is not a native timeout.
+                    timeout?.cancel(); if inferenceID == id { inferenceID = nil }
+                }
                 if let language = response.detectedLanguage {
                     guard ["ko", "en"].contains(language.rawValue),
                           snapshot.language == nil || snapshot.language == language else {
                         throw STTEngineError(.invalidResponse)
+                    }
+                    if snapshot.language == nil, let recovery {
+                        do { try await recovery.pinLanguage(language, at: location) }
+                        catch { snapshot.storageWarning = "recoveryLedgerWriteFailed"; throw error }
                     }
                     snapshot.language = language
                 }
@@ -275,12 +384,24 @@ actor LiveSTTCoordinator {
                         // The engine may truthfully return no speech before
                         // automatic detection has chosen a supported language.
                         if response.segments.isEmpty, snapshot.language == nil {
+                            if let recovery {
+                                let range = try SpeechRecoveryRange(window.mediaStart.rawValue, window.mediaStart.rawValue + window.audio.duration.rawValue)
+                                do {
+                                    try await recovery.prepare([], range: range, language: nil, at: location)
+                                    snapshot.recovery = try await recovery.complete(range, at: location)
+                                } catch { snapshot.storageWarning = "recoveryLedgerWriteFailed"; throw error }
+                            }
                             snapshot.partial = nil
                             await emit()
                             continue
                         }
                         guard let language = snapshot.language else { throw STTEngineError(.invalidResponse) }
                         let segments = try reconciler.reconcile(response, for: window, language: language)
+                        let range = try SpeechRecoveryRange(window.mediaStart.rawValue, window.mediaStart.rawValue + window.audio.duration.rawValue)
+                        if let recovery {
+                            do { try await recovery.prepare(segments, range: range, language: language, at: location) }
+                            catch { snapshot.storageWarning = "recoveryLedgerWriteFailed"; throw error }
+                        }
                         for segment in segments {
                             // A completed append is published even if cancellation arrived
                             // while it was syncing. No ambiguous write is retried.
@@ -294,6 +415,10 @@ actor LiveSTTCoordinator {
                             snapshot.finals.append(segment)
                             try checkRunning()
                         }
+                        if let recovery {
+                            do { snapshot.recovery = try await recovery.complete(range, at: location) }
+                            catch { snapshot.storageWarning = "recoveryLedgerWriteFailed"; throw error }
+                        }
                         snapshot.partial = nil
                     }
                 case .failed, .cancelled:
@@ -302,9 +427,6 @@ actor LiveSTTCoordinator {
                 await emit()
             }
             guard terminal else { throw STTEngineError(.invalidResponse) }
-        } catch {
-            if !stopped { fail(error) }
-        }
     }
 
     private func fail(_ error: Error) {
@@ -314,6 +436,16 @@ actor LiveSTTCoordinator {
         snapshot.phase = .failed
         snapshot.partial = nil
         beginAbort()
+    }
+
+    private func inferenceTimedOut(_ id: UUID) async {
+        guard !Task.isCancelled, inferenceID == id, !stopped, !speechUnavailable else { return }
+        speechUnavailable = true; snapshot.phase = .failed; snapshot.failure = .inferenceFailed
+        snapshot.partial = nil; queue.removeAll()
+        await emit()
+        // No replacement context can be created until native cancellation joins.
+        // Capture ingestion continues, recording durable pending ranges.
+        if abort == nil { abort = Task { try? await engine.cancel() } }
     }
 
     private func beginAbort() {

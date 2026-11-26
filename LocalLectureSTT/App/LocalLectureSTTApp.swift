@@ -19,6 +19,9 @@ struct LocalLectureSTTApp: App {
         let sources = ModelImportSources()
         let models = FileModelRepository(sources: sources, validator: WhisperCppModelValidator(),
                                          references: SessionModelReferenceChecker(roots: roots))
+        let speechRecovery = FileSpeechRecoveryStore(roots: roots, makeEngine: { _ in
+            try WhisperCppSTTEngine(repository: models)
+        })
         let activity = SessionActivityRegistry()
         let processActivity = ProcessInfoLifecycleActivityAdapter()
         let authority = LifecycleWorkAuthority(activity: { processActivity.update($0) })
@@ -76,6 +79,7 @@ struct LocalLectureSTTApp: App {
             makeSelectedSpeechModel: { try ProductionSpeechModel.make(repository: models, descriptor: $0) },
             prepareCapture: { await microphonePreview.stop() },
             makeSpeechConverter: { SpeechPCMConverter() },
+            speechRecovery: speechRecovery,
             activity: activity, authority: authority, diagnostics: diagnostics
         )
         let transcripts = FileTranscriptRepository(roots: roots, catalog: catalog)
@@ -83,6 +87,8 @@ struct LocalLectureSTTApp: App {
             audio: FileAudioFinalizer(roots: roots, catalog: catalog, diagnostics: diagnostics), transcripts: transcripts,
             settleSpeech: { location, control in
                 try await recordingCoordinator.settleSpeechForTranscript(at: location, control: control)
+            }, gapRepair: speechRecovery, didRepairSpeech: { location, summary in
+                await recordingCoordinator.didRepairSpeech(at: location, summary: summary)
             }), authority: authority, diagnostics: diagnostics)
         let recovery = SessionRecoveryCoordinator(
             scanner: SessionFileScanner(roots: roots),

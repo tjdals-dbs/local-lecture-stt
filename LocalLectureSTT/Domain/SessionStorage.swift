@@ -10,6 +10,7 @@ enum SessionArtifact: String, CaseIterable, Codable, Sendable {
     case recoveryAudio
     case transcriptJournal
     case finalizationCheckpoint
+    case speechRecovery
 
     var relativePath: String {
         switch self {
@@ -21,6 +22,7 @@ enum SessionArtifact: String, CaseIterable, Codable, Sendable {
         case .events: "events.jsonl"
         case .recoveryAudio: "recovery/audio.recovery.mov"
         case .transcriptJournal: "recovery/transcript.journal.jsonl"
+        case .speechRecovery: "recovery/speech-recovery.json"
         case .finalizationCheckpoint: "recovery/finalization.checkpoint.json"
         }
     }
@@ -28,7 +30,7 @@ enum SessionArtifact: String, CaseIterable, Codable, Sendable {
     var ownership: SessionArtifactOwnership {
         switch self {
         case .transcriptText, .transcriptMarkdown: .derived
-        case .metadata, .finalAudio, .transcript, .events, .recoveryAudio, .transcriptJournal, .finalizationCheckpoint:
+        case .metadata, .finalAudio, .transcript, .events, .recoveryAudio, .transcriptJournal, .finalizationCheckpoint, .speechRecovery:
             .authoritativeOrRecovery
         }
     }

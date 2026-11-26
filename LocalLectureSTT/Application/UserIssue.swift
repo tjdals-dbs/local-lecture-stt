@@ -4,7 +4,7 @@ enum UserIssueCode: String, Codable, Sendable, CaseIterable {
     case microphonePermission, microphoneRestricted, noInput, microphoneDisconnected, captureFailed
     case storageSelection, storagePermission, storageMissing, diskFull, storageWrite
     case modelMissing, modelCorrupt, modelIncompatible, modelBusy, modelTransfer, modelOperation, modelAccess, modelCapacity
-    case engineInitialization, engineInference, speechDelayed, transcriptStorage, transcriptRepair
+    case engineInitialization, engineInference, speechDelayed, transcriptStorage, transcriptRepair, speechIncomplete
     case audioFinalization, sessionMissing, sessionCorrupt, catalog, busy, conflict, invalidTitle
     case interrupted, cancelled, playback, diagnosticStorage, diagnosticExport, unknown
 }
@@ -27,7 +27,7 @@ struct UserIssue: Sendable, Equatable, Identifiable {
     var id: UserIssueCode { code }
     var recovery: IssueRecovery {
         switch code {
-        case .sessionMissing, .sessionCorrupt, .transcriptStorage: .preservedNeedsInspection
+        case .sessionMissing, .sessionCorrupt, .transcriptStorage, .speechIncomplete: .preservedNeedsInspection
         case .noInput, .speechDelayed, .interrupted, .cancelled, .busy: .informational
         default: .retryAfterAction
         }
@@ -57,9 +57,10 @@ struct UserIssue: Sendable, Equatable, Identifiable {
         case .modelOperation: ("모델 작업을 완료하지 못했습니다", "모델 설치·검증·삭제 상태를 확인할 수 없습니다.", "모델 관리 목록을 새로고침하고 파일 접근 권한과 저장 공간을 확인하세요.")
         case .modelAccess: ("모델 폴더에 접근할 수 없습니다", "선택한 모델 원본 또는 앱 모델 저장소의 접근 권한이 없습니다.", "모델 관리에서 원본 폴더를 다시 선택해 가져오세요. 앱 모델 저장소의 권한과 저장 장치 연결도 확인하세요.")
         case .engineInitialization: ("STT 엔진을 준비하지 못했습니다", "선택한 모델로 엔진을 초기화하거나 시작하지 못했습니다.", "모델 파일과 호환성을 확인하세요. 녹음이 진행 중이라면 오디오는 계속 저장됩니다.")
-        case .engineInference: ("실시간 전사가 중단되었습니다", "STT 엔진이 음성을 처리하지 못했습니다. 오디오 저장은 계속됩니다.", "녹음을 마친 뒤 오디오와 모델 상태를 확인하세요. 누락된 전사는 자동 복원되지 않습니다.")
+        case .engineInference: ("실시간 전사가 중단되었습니다", "STT 엔진이 음성을 처리하지 못했습니다. 오디오 저장은 계속됩니다.", "녹음을 마친 뒤 오디오와 모델 상태를 확인하세요. 누락 구간의 복구 상태를 확인하세요.")
         case .speechDelayed: ("실시간 전사 처리가 지연됩니다", "전사가 입력 속도를 따라가지 못하고 있습니다. 오디오 저장은 계속됩니다.", "잠시 기다리거나 다른 무거운 작업을 줄이세요. 녹음 종료는 계속 사용할 수 있습니다.")
         case .transcriptStorage: ("전사 기록을 저장하지 못했습니다", "전사 journal 또는 원본 기록의 저장·검증에 실패했습니다.", "저장 권한과 공간을 확인하세요. 오디오는 보존되며 기록 파일을 직접 덮어쓰지 말고 복구 안내를 확인하세요.")
+        case .speechIncomplete: ("일부 전사가 완료되지 않았습니다", "오디오는 저장됐지만 복구 대기 또는 미복구 전사 구간이 남아 있습니다.", "세션 상세에서 누락 시간을 확인하세요. 복구 대기는 원래 모델을 확인한 뒤 마무리를 재시도할 수 있습니다. 한도에 도달한 미복구 구간은 자동 재시도하지 않습니다.")
         case .transcriptRepair: ("파생 문서 복구가 필요합니다", "원본 기록은 있으나 문서를 다시 생성해야 합니다.", "저장 폴더에 쓰기 권한을 허용한 뒤 문서 다시 생성 또는 마무리 재시도를 실행하세요.")
         case .audioFinalization: ("오디오 마무리에 실패했습니다", "최종 오디오 생성 또는 검증을 완료하지 못했습니다.", "저장 장치와 공간을 확인한 뒤 마무리 재시도를 실행하세요. 복구 원본은 보존됩니다.")
         case .sessionMissing: ("세션 파일이 없습니다", "필요한 오디오·기록·메타데이터 파일을 찾지 못했습니다.", "원래 폴더나 백업을 확인하세요. 남아 있는 파일은 자동 삭제하지 않습니다.")
@@ -151,6 +152,7 @@ enum UserIssues {
     }
     static func transcript(_ c: TranscriptFailureCode) -> UserIssue {
         switch c {
+        case .speechIncomplete: .init(code: .speechIncomplete)
         case .repairRequired: .init(code: .transcriptRepair)
         case .busy, .notFinalized: .init(code: .busy)
         case .editConflict: .init(code: .conflict)
