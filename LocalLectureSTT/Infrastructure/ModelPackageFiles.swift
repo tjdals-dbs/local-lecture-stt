@@ -19,6 +19,8 @@ struct ModelFileStamp: Codable, Equatable, Sendable {
     var fingerprint: String { "\(device):\(inode):\(size):\(modified):\(modifiedNS):\(changed):\(changedNS)" }
 }
 
+/// Ancestors are search-only: Sandbox grants a selected subtree, not permission
+/// to list /Users or /private. Only the final directory is opened for reading.
 /// All traversal uses no-follow descriptors. Paths are re-opened component by
 /// component on revalidation; replacing any ancestor cannot redirect an operation.
 final class ModelPackageDirectory: @unchecked Sendable {
@@ -29,16 +31,22 @@ final class ModelPackageDirectory: @unchecked Sendable {
     let stamp: ModelFileStamp
     init(url: URL, create: Bool = false) throws {
         guard url.isFileURL, url.path.hasPrefix("/") else { throw ModelRepositoryCode.unsafeLayout }
-        var current = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        let components = url.path.split(separator: "/").map(String.init)
+        guard !components.contains("."), !components.contains("..") else { throw ModelRepositoryCode.unsafeLayout }
+        var current = Darwin.open("/", (components.isEmpty ? O_RDONLY | O_DIRECTORY : O_SEARCH) | O_NOFOLLOW | O_CLOEXEC)
         guard current >= 0 else { throw ModelRepositoryCode.storageUnavailable }
         do {
-            for component in url.path.split(separator: "/").map(String.init) {
-                if create {
+            for (index, component) in components.enumerated() {
+                let mode = (index == components.count - 1 ? O_RDONLY | O_DIRECTORY : O_SEARCH) | O_NOFOLLOW | O_CLOEXEC
+                var next = openat(current, component, mode)
+                // Do not attempt mkdir on existing ancestors: Sandbox may deny
+                // that write before the filesystem can report EEXIST.
+                if next < 0, errno == ENOENT, create {
                     let made = mkdirat(current, component, 0o700)
                     if made != 0, errno != EEXIST { throw ModelRepositoryCode.storageUnavailable }
                     if made == 0, fsync(current) != 0 { throw ModelRepositoryCode.flushFailed }
+                    next = openat(current, component, mode)
                 }
-                let next = openat(current, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
                 guard next >= 0 else { throw errno == ENOENT ? ModelRepositoryCode.sourceUnavailable : ModelRepositoryCode.storageUnavailable }
                 Darwin.close(current); current = next
             }

@@ -192,18 +192,21 @@ final class LocalDiagnosticLog: DiagnosticRecording, DiagnosticManaging, @unchec
         guard fstat(fd, &info) == 0, info.st_uid == getuid() else { close(fd); throw DiagnosticFailure.unsafeLayout }
         return fd
     }
-    /// Walk directory descriptors, refusing symlinks at every component.
+    /// Search ancestors without listing them; Sandbox authorizes the log subtree.
+    /// Refuse symlinks at every component and read only the final directory.
     private static func openPath(_ url: URL, create: Bool) throws -> Int32 {
         guard url.isFileURL, url.path.hasPrefix("/") else { throw DiagnosticFailure.unsafeLayout }
-        var fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        let components = url.path.split(separator: "/").map(String.init)
+        var fd = open("/", (components.isEmpty ? O_RDONLY | O_DIRECTORY : O_SEARCH) | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw DiagnosticFailure.storage }
         do {
-            for component in url.path.split(separator: "/").map(String.init) {
+            for (index, component) in components.enumerated() {
                 guard component != ".", component != ".." else { throw DiagnosticFailure.unsafeLayout }
-                var next = openat(fd, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                let mode = (index == components.count - 1 ? O_RDONLY | O_DIRECTORY : O_SEARCH) | O_NOFOLLOW | O_CLOEXEC
+                var next = openat(fd, component, mode)
                 if next < 0, errno == ENOENT, create {
                     guard mkdirat(fd, component, 0o700) == 0 || errno == EEXIST else { throw DiagnosticFailure.storage }
-                    next = openat(fd, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                    next = openat(fd, component, mode)
                 }
                 guard next >= 0 else { throw DiagnosticFailure.unsafeLayout }
                 close(fd); fd = next

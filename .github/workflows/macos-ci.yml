@@ -44,6 +44,8 @@ jobs:
         run: |
           swiftc -O tools/t27/ProcessMonitor.swift -o "$RUNNER_TEMP/t27-process-monitor"
           python3 -B tools/t27/test_validation_tools.py --monitor "$RUNNER_TEMP/t27-process-monitor"
+          probe_bin_dir="$(swift build --show-bin-path --disable-automatic-resolution)"
+          python3 -B tools/t27/test_model_sandbox.py --probe "$probe_bin_dir/stt-benchmark"
       - name: Verify process-kill recovery and durable checkpoint boundaries
         run: |
           probe_bin_dir="$(swift build --show-bin-path --disable-automatic-resolution)"

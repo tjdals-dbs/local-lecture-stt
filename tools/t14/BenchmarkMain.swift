@@ -120,6 +120,10 @@ struct BenchmarkMain {
     }
     static func execute(_ args: [String]) async throws {
         guard let command = args.first else { throw STTEngineError(.invalidInput) }
+        if command == "model-sandbox-probe" {
+            try await ModelSandboxProbe.execute(Array(args.dropFirst()))
+            return
+        }
         if command == "recovery-probe" {
             try await RecoveryProbe.execute(Array(args.dropFirst()))
             return

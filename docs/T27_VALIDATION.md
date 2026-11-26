@@ -7,7 +7,7 @@
 | 검사 | 결과와 한계 |
 | --- | --- |
 | 실제 기기 | Apple M4 Pro, 25,769,803,776 bytes (24 GiB), arm64, macOS 26.6.2 |
-| 로컬 실행용 Release 빌드 | ad-hoc 서명, Sandbox/마이크/사용자 선택 폴더/bookmark entitlement, 최소 OS 15.0, native 제품 엔진 검사 통과. 실제 GUI 실행·권한 허용·녹음은 미검증 |
+| 로컬 실행용 Release 빌드 | ad-hoc 서명, Sandbox/마이크/사용자 선택 폴더/bookmark entitlement, 최소 OS 15.0, native 제품 엔진 검사 통과. GUI 모델 가져오기에서 Sandbox 오류를 발견해 아래 보완에 기록. 새 앱 재시도·마이크 녹음은 미검증 |
 | 서명 인증서 | `security find-identity -v -p codesigning`: 유효 identity 0개. ad-hoc 검증은 Developer ID 서명·공증·다른 맥 설치의 통과 근거가 아님 |
 | 짧은 오프라인 엔진 시험 | OS `deny network*` 아래 설치된 whisper.cpp + 비양자화 large-v3로 합성 영어 음성 3회 모두 final 반환. 별도 socket probe가 `EPERM`으로 거부됨 |
 | 측정값 | 워밍업 제외 2회 RTF 0.121 / 0.117, 추론 시작 후 partial 0.873 / 0.846초, process footprint peak 약 3.47 GiB. 전체 앱·실제 발화 지연·장시간 열/메모리 기준을 대체하지 않음 |
@@ -24,7 +24,7 @@
 4. 첫 시험은 짧게 말하고 종료한 뒤 원음 시작/끝 재생, transcript와 타임스탬프, 편집·재열기를 직접 확인한다. 이 확인 전부터 2시간 시험을 시작하지 않는다.
 
 ```sh
-open /private/tmp/stt-t27-local-app/LocalLectureSTT.app
+open /private/tmp/stt-t27-sandbox-fixed/LocalLectureSTT.app
 ```
 
 앱이 macOS 권한/Gatekeeper에서 거부되면 표시된 메시지를 기록한다. 보안 설정을 일괄 해제하거나 quarantine을 재귀 삭제하지 않는다. 자동 서명/공증·인증서 구입은 수행하지 않았다.
@@ -88,3 +88,19 @@ TEST_RUNNER_LLSTT_T19_MODEL_STORE=/private/tmp/stt-t19-model/store TEST_RUNNER_L
 ```
 
 `RealModel.xcresult`와 report 출력 디렉토리는 재실행 시 새 이름을 쓴다. XCTest와 CLI의 입력은 합성 음성이며 물리 마이크를 사용하지 않는다. 로컬 앱 ad-hoc 빌드는 권한 요청을 없애거나 배포용 서명을 대체하지 않는다. Developer ID/공증 여부는 실제 공유 범위가 정해질 때 결정한다.
+
+
+## Sandbox 모델 가져오기 보완
+
+2026-11-26 사용자가 검증된 turbo 폴더를 가져오는 중 `storageUnavailable`을 보고했다. 실행 앱의 OS 로그에서 `file-read-data /Users`, `file-read-data /private` 거부가 확인됐다. 디스크 여유 공간은 약 189 GiB였고 원본 turbo의 SHA-256은 카탈로그 값과 일치했다. 모델 저장소가 상위 경로 전체를 `O_RDONLY`로 열고, 생성 모드에서 이미 있는 상위 폴더에도 `mkdirat`을 시도하는 것이 원인이었다. 진단 로그의 경로 탐색도 같은 상위 읽기 권한 문제를 가졌다.
+
+수정은 상위 폴더에는 `O_SEARCH`만 요청하고 최종 폴더에만 읽기 권한을 요청한다. 기존 경로를 먼저 열고, 실제로 없는 폴더만 생성한다. `O_NOFOLLOW`, 파일 교체 감지, checksum, 복사 후 원자적 설치, 보안 범위 해제와 생성 부모 fsync는 유지한다. Sandbox entitlement를 늘리거나 원본/기존 설치를 삭제하지 않는다. 사용자의 앱 저장소는 수정 작업에서 직접 변경하지 않았다.
+
+증거는 `/private/tmp/stt-t27-sandbox-repair`에 둔다. 초기 helper 컴파일의 누락된 `try`와 Foundation `/private/tmp`→`/tmp` 별칭 문제는 fixture에서 바로잡았다. 그 결과를 제품 재현 성공으로 세지 않는다. 수정 전 `red-product.log`에서 모델 가져오기(`storageUnavailable`)와 진단 로그(`unsafeLayout`)가 실패하고, 수정 후 `green.log`의 **3개 OS Sandbox 회귀 검사**가 모두 통과했다. 두 합성 모델의 함께 보존, 반복 가져오기, 원본 해시, 정확한 scope 해제와 심볼릭 링크 거부를 확인한다.
+
+- `Full.xcresult` / `full-summary.json`: Debug 빌드와 **624 XCTest**, 실패/skip 0.
+- `real-turbo-import.log`: `/private`, `/private/tmp`, `/Users`의 read-data/create를 거부한 상태에서 실제 turbo 가중치를 별도 임시 store로 가져오기 성공. 원본 SHA-256 `1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69` 보존 확인.
+- `helpers.log`, `python-t16.log`, `process.json`: 기존 T27 도구 3개, T16 Python 4개, T26 프로세스 시험 8개 통과.
+- 새 GUI 빌드는 `bash tools/t27/prepare_local_app.sh /private/tmp/stt-t27-sandbox-fixed /private/tmp/stt-t15-validation.Uth8xp/DerivedData`로 만든다. 기존 앱과 파일은 그대로 둔다. 최종 커밋 CI 및 새 앱 서명/Release 검증 결과는 전달 메시지에 기록한다.
+
+재시도는 **기존 앱을 ⌘Q로 종료 → 새 앱 실행 → 모델 관리 → 모델 폴더 가져오기 → 기존 turbo 패키지 폴더 선택** 순서다. large-v3 가중치 폴더에는 해당 카탈로그 항목의 **파일 폴더 선택**을 사용한다. 새 앱에서 실제 NSOpenPanel·security-scope를 통한 가져오기 완료는 사용자 재시도로 확인해야 한다. 이 보완과 자동 검사로 T27/G1/G4 전체를 통과 처리하지 않는다. 명세 변경은 없다.

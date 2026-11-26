@@ -1021,4 +1021,14 @@ The helper is never compiled into the GUI app. CI runs this command after the Sw
 
 ## T27 validation preparation
 
-[T27 validation](T27_VALIDATION.md) records the user's preparation-only scope, the local ad-hoc app build, external resource sampler, short actual-model/network-denied checks and the pending long-duration/offline GUI matrix. `tools/t27` is excluded from the product and benchmark targets. CI compiles the standalone observer and runs its three helper checks; this does not run or pass the ten-hour physical validation. The helper refuses an existing app output directory and stores all results outside Git. T27, G1 and G4 must not be marked complete from these preparation results.
+[T27 validation](T27_VALIDATION.md) records the user's preparation-only scope, the local ad-hoc app build, external resource sampler, short actual-model/network-denied checks and the pending long-duration/offline GUI matrix. The GUI excludes all `tools/t27` files. Only `ModelSandboxProbe.swift` is compiled into the developer benchmark; the other tools remain standalone. CI runs three observer/build-helper checks and three OS-sandbox repository checks; this does not run or pass the ten-hour physical validation. The helper refuses an existing app output directory and stores all results outside Git. T27, G1 and G4 must not be marked complete from these preparation results.
+
+
+The T27 signed-GUI import repair uses `O_SEARCH` for ancestors and read access only for the final directory. Existing ancestors are opened before attempting creation; missing paths alone use `mkdirat`, with the existing parent sync retained. Per-component `O_NOFOLLOW`, identity checks and pinned file operations remain. The same ancestor-access correction applies to local diagnostic logs. Reproduce the denied-parent test with:
+
+```sh
+swift build --scratch-path /private/tmp/stt-t15-validation.Uth8xp/CLI --disable-automatic-resolution
+python3 -B tools/t27/test_model_sandbox.py --probe /private/tmp/stt-t15-validation.Uth8xp/CLI/debug/stt-benchmark
+```
+
+The probe uses marked disposable `/private/tmp/T27-Model-*` fixtures, synthetic checksummed models and the real repository/capacity/diagnostic implementations. The test first proves directory listing is denied by the OS profile, then checks source-preserving imports, coexistence, repeat import, scope release and symlink rejection. This is not an NSOpenPanel security-extension test; repeat the native picker import with the rebuilt signed app as described in [T27 validation](T27_VALIDATION.md#sandbox-모델-가져오기-보완).
