@@ -144,7 +144,7 @@ struct BenchmarkMain {
                 mediaStart: MediaMilliseconds(5000))
             try save(json(input), to: url(args[2])); print("Prepared \(samples.count) frames; \(input.pcmSHA256)"); return
         }
-        guard (command == "import" && args.count == 4) || (command == "lecture" && args.count == 5) || ((command == "run" || command == "cancel") && (5...6).contains(args.count)) else {
+        guard (command == "import" && args.count == 4) || (command == "lecture" && args.count == 5) || ((command == "run" || command == "cancel" || command == "speech-replay") && (5...6).contains(args.count)) else {
             throw STTEngineError(.invalidInput)
         }
         let catalog = try JSONDecoder().decode(BundledModelCatalog.self, from: Data(contentsOf: url(args[1])))
@@ -186,6 +186,12 @@ struct BenchmarkMain {
         if args.count == 5 { languageMode = .english }
         else if let selected = LanguageMode(rawValue: args[5]) { languageMode = selected }
         else { throw STTEngineError(.invalidConfiguration) }
+        if command == "speech-replay" {
+            try await SpeechReplayProbe.run(engine: engine,
+                session: .init(sessionID: .init(), operationID: .init(UUID()), model: configuration, languageMode: languageMode),
+                input: url(args[3]), output: output)
+            return
+        }
         let input = try JSONDecoder().decode(STTBenchmarkInput.self, from: Data(contentsOf: url(args[3])))
         guard STTBenchmarkInput.pcmDigest(input.audio.samples) == input.pcmSHA256 else { throw STTEngineError(.invalidInput) }
         let export = try STTBenchmarkOutput(output)

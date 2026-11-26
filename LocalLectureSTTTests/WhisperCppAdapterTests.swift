@@ -115,6 +115,70 @@ final class WhisperCppAdapterTests: XCTestCase {
         XCTAssertThrowsError(try WhisperCppSTTEngine.segments(.init(text: "aa", intervals: [interval, interval], language: nil), request: request))
     }
 
+    func testNativePaddedThirtySecondEndFitsShortRequestAndSessionOffset() throws {
+        let snapshot = try NativeDecodeControl.snapshot([
+            .init(startTick: 0, endTick: 3000, text: "짧은 강의")
+        ], language: "ko", timestamps: true, duration: 2020)
+        XCTAssertEqual(snapshot.text, "짧은 강의")
+        XCTAssertEqual(snapshot.intervals, [.init(start: 0, end: 2.02, text: "짧은 강의")])
+        let f = try IntervalFixture<WhisperCppProfile>()
+        let session = f.session(try f.model(), language: .korean)
+        let request = try STTInferenceRequest(session: session, requestID: .init(UUID()), sequence: 0,
+            mediaStart: .init(41880), audio: .init(format: STTInputFormat(), frameCount: 32320,
+                                               samples: Array(repeating: 0, count: 32320)))
+        let segments = try WhisperCppSTTEngine.segments(snapshot, request: request)
+        let response = try STTResponse(context: request.context, revision: 1, kind: .final,
+            segments: segments, detectedLanguage: .init("ko"))
+        XCTAssertEqual(response.segments.first?.start.rawValue, 41880)
+        XCTAssertEqual(response.segments.first?.end.rawValue, 43900)
+    }
+
+    func testNativeTailQuantizationAndPaddingOnlySegmentsDoNotExtendMediaOrText() throws {
+        let snapshot = try NativeDecodeControl.snapshot([
+            .init(startTick: 0, endTick: 30, text: "실제 "),
+            .init(startTick: 30, endTick: 56, text: "음성"),
+            .init(startTick: 56, endTick: 3000, text: "padding")
+        ], language: "ko", timestamps: true, duration: 552)
+        XCTAssertEqual(snapshot.text, "실제 음성")
+        XCTAssertEqual(snapshot.intervals.map(\.end), [0.3, 0.552])
+        XCTAssertEqual(snapshot.intervals.map(\.text).joined(), snapshot.text)
+        let empty = try NativeDecodeControl.snapshot([.init(startTick: 56, endTick: 3000, text: "padding")],
+            language: "ko", timestamps: true, duration: 552)
+        XCTAssertEqual(empty.text, ""); XCTAssertTrue(empty.intervals.isEmpty); XCTAssertNil(empty.language)
+        let point = try NativeDecodeControl.snapshot([
+            .init(startTick: 0, endTick: 100, text: "끝"),
+            .init(startTick: 100, endTick: 100, text: "."),
+            .init(startTick: 100, endTick: 3000, text: "padding")
+        ], language: "ko", timestamps: true, duration: 1000)
+        XCTAssertEqual(point.text, "끝.")
+        XCTAssertEqual(point.intervals.last, .init(start: 1, end: 1, text: "."))
+    }
+
+    func testNativeNormalizationStillRejectsMalformedRawRangesAndOversizedText() throws {
+        let invalid: [[NativeWhisperSegment]] = [
+            [.init(startTick: -1, endTick: 100, text: "x")],
+            [.init(startTick: 0, endTick: 3001, text: "x")],
+            [.init(startTick: 0, endTick: .max, text: "x")],
+            [.init(startTick: 110, endTick: 109, text: "x")],
+            [.init(startTick: 0, endTick: 3000, text: "x"), .init(startTick: 110, endTick: 120, text: "x")],
+            [.init(startTick: 200, endTick: 300, text: "x"), .init(startTick: 210, endTick: 220, text: "x")],
+            [.init(startTick: 0, endTick: 100, text: String(repeating: "x", count: 16385))],
+            Array(repeating: .init(startTick: 0, endTick: 0, text: ""), count: 129),
+            Array(repeating: .init(startTick: 0, endTick: 0, text: String(repeating: "x", count: 16384)), count: 5)
+        ]
+        for segments in invalid {
+            XCTAssertThrowsError(try NativeDecodeControl.snapshot(segments, language: "ko", timestamps: true, duration: 1000)) {
+                XCTAssertEqual($0 as? STTEngineError, .init(.invalidResponse))
+            }
+        }
+        for duration: Int64 in [0, -1, 30001, .max] {
+            XCTAssertThrowsError(try NativeDecodeControl.snapshot([], language: nil, timestamps: true, duration: duration))
+        }
+        let plain = try NativeDecodeControl.snapshot([.init(startTick: 0, endTick: 0, text: "text")],
+            language: "en", timestamps: false, duration: 2000)
+        XCTAssertEqual(plain.text, "text"); XCTAssertTrue(plain.intervals.isEmpty)
+    }
+
     func testDeveloperModelPinsRejectRelabelledVariants() throws {
         let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         for (catalog, turbo, native) in [

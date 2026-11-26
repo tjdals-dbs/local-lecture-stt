@@ -214,6 +214,12 @@ final class NativeWhisperBackend: WhisperIntervalBackend, @unchecked Sendable {
     }
 }
 
+struct NativeWhisperSegment: Sendable {
+    let startTick: Int64
+    let endTick: Int64
+    let text: String
+}
+
 final class NativeDecodeControl: @unchecked Sendable {
     private let lock = NSLock()
     private var failure: STTErrorCode?
@@ -254,18 +260,42 @@ final class NativeDecodeControl: @unchecked Sendable {
     func snapshot(_ ctx: OpaquePointer) throws -> WhisperSnapshot {
         let count = whisper_full_n_segments(ctx)
         guard (0...128).contains(count) else { throw STTEngineError(.invalidResponse) }
-        var text = "", intervals: [WhisperInterval] = []
+        var segments: [NativeWhisperSegment] = [], bytes = 0
         for i in 0..<count {
             guard let ptr = whisper_full_get_segment_text(ctx, i),
                   strnlen(ptr, 16385) <= 16384, let part = String(validatingCString: ptr),
-                  text.utf8.count + part.utf8.count <= 65536 else { throw STTEngineError(.invalidResponse) }
-            text += part
+                  bytes + part.utf8.count <= 65536 else { throw STTEngineError(.invalidResponse) }
+            bytes += part.utf8.count
+            segments.append(.init(startTick: timestamps ? whisper_full_get_segment_t0(ctx, i) : 0,
+                                  endTick: timestamps ? whisper_full_get_segment_t1(ctx, i) : 0, text: part))
+        }
+        return try Self.snapshot(segments, language: language, timestamps: timestamps, duration: duration)
+    }
+
+    static func snapshot(_ segments: [NativeWhisperSegment], language: String?, timestamps: Bool,
+                         duration: Int64) throws -> WhisperSnapshot {
+        guard (1...30_000).contains(duration), segments.count <= 128 else { throw STTEngineError(.invalidResponse) }
+        var text = "", intervals: [WhisperInterval] = [], bytes = 0
+        var previous = 0.0
+        for segment in segments {
+            bytes += segment.text.utf8.count
+            guard segment.text.utf8.count <= 16384, bytes <= 65536 else { throw STTEngineError(.invalidResponse) }
             if timestamps {
-                let start = try Self.seconds(ticks: whisper_full_get_segment_t0(ctx, i), duration: duration)
-                let end = try Self.seconds(ticks: whisper_full_get_segment_t1(ctx, i), duration: duration)
-                guard start >= (intervals.last?.end ?? 0), end >= start else { throw STTEngineError(.invalidResponse) }
-                intervals.append(.init(start: start, end: end, text: part))
+                // This pin decodes a padded 30-second native window even for
+                // short VAD inputs (e.g. a 2020 ms input can end at tick 3000).
+                // Validate raw order/bounds BEFORE intersecting with real media.
+                // The shared engine boundary still rejects out-of-input times.
+                let start = try seconds(ticks: segment.startTick, duration: 30_000)
+                let end = try seconds(ticks: segment.endTick, duration: 30_000)
+                guard start >= previous, end >= start else { throw STTEngineError(.invalidResponse) }
+                previous = end
+                let limit = Double(duration) / 1000
+                // Do not manufacture text from padding-only spans. Preserve
+                // legitimate zero-duration marks exactly on the media endpoint.
+                guard start < limit || (start == limit && end == start) else { continue }
+                intervals.append(.init(start: start, end: min(end, limit), text: segment.text))
             }
+            text += segment.text
         }
         return .init(text: text, intervals: intervals, language: text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : language)
     }

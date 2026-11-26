@@ -104,3 +104,30 @@ TEST_RUNNER_LLSTT_T19_MODEL_STORE=/private/tmp/stt-t19-model/store TEST_RUNNER_L
 - 새 GUI 빌드는 `bash tools/t27/prepare_local_app.sh /private/tmp/stt-t27-sandbox-fixed /private/tmp/stt-t15-validation.Uth8xp/DerivedData`로 만든다. 기존 앱과 파일은 그대로 둔다. 최종 커밋 CI 및 새 앱 서명/Release 검증 결과는 전달 메시지에 기록한다.
 
 재시도는 **기존 앱을 ⌘Q로 종료 → 새 앱 실행 → 모델 관리 → 모델 폴더 가져오기 → 기존 turbo 패키지 폴더 선택** 순서다. large-v3 가중치 폴더에는 해당 카탈로그 항목의 **파일 폴더 선택**을 사용한다. 새 앱에서 실제 NSOpenPanel·security-scope를 통한 가져오기 완료는 사용자 재시도로 확인해야 한다. 이 보완과 자동 검사로 T27/G1/G4 전체를 통과 처리하지 않는다. 명세 변경은 없다.
+
+## 짧은 실시간 STT 응답의 패딩 시각 보완
+
+2026-11-26 사용자의 136.3초 large-v3/자동 언어 세션과 38.6초 turbo/한국어 세션에서 `speech.invalidResponse`가 기록됐다. 두 세션 모두 오디오 검증·전사 파생 파일·메타데이터·카탈로그 단계까지 완료했고, 복구 MOV도 보존되어 있었다. 첫 세션은 AVAssetReader로 전체 136.299625초를 디코딩했다. 오류 이전 전사만 저장된 상태이므로 이를 완전한 전사 성공으로 해석하지 않는다. 사용자 세션은 읽기만 하고 재현 입력·출력은 Git 밖에 두었다.
+
+실제 large-v3 엔진을 제품 segmenter/adapter/reconciler로 순차 재생하자 41.880초에서 시작하는 **2020 ms 입력에 native 종료 tick 3000(30초)**이 반환되어 동일한 `invalidResponse`가 재현됐다. 순차 재생은 실시간 worker의 partial 생략/큐 진행과 다르므로 원래 실패 시각과 일치한다고 주장하지 않는다. 별도 짧은 입력에서는 552 ms에 560 ms를 반환하는 tick 경계도 확인했다. 사용자 원시 PCM은 보존되지 않으므로 두 원래 실패 시점의 정확한 native payload까지 확인한 것은 아니다.
+
+보완은 native adapter 안에서 원시 시간의 음수·overflow·역전·겹침·30초 초과를 먼저 거부한 뒤 실제 입력 구간과 교집합을 취한다. 패딩에만 속한 text는 제외하고 입력 끝의 0ms 문장부호는 유지한다. partial/final이 같은 경로를 사용하며, 공통 엔진 계약의 엄격한 입력 시간 범위 검사는 바꾸지 않았다. 명세·모델 pin·모델 다운로드·오디오 저장 및 기존 transcript는 변경하지 않았다.
+
+재현/검사 자료는 `/private/tmp/stt-t27-timestamp-diagnosis`에 있다. 실제 녹음, PCM, 가중치, 로그, 실행 결과는 커밋하지 않는다.
+
+- `Red.xcresult`: 새 반례 2개가 기존 시간 검사에서 `invalidResponse`로 실패했다. 추가한 범위/크기 거부 검사는 통과했다.
+- `large-replay-red/attempts.json`, `large-replay-diag.log`: 수정 전 실제 native 실패. 임시 숫자 진단 출력은 제품 코드에서 제거했다.
+- `large-replay-green/attempts.json`: 수정 후 **51개 요청, 오류 0, 확정 segment 44개**. `turbo-replay-green/attempts.json`: **14개 요청, 오류 0, 확정 segment 12개**. 전사 내용은 결과 파일에 쓰지 않으며 원본 세션에도 반영하지 않는다. 이 수치는 정확도·실시간 latency·누락 전사 복구를 뜻하지 않는다.
+- `t16.log`, `helpers.log`, `sandbox.log`, `process.json`: 기존 Python 4개, T27 도구 3개, 모델 Sandbox 3개, T26 프로세스 8개 검사. 전체 XCTest/최종 CI 및 앱 빌드 결과는 아래 검증 기록과 전달 메시지에 기록한다.
+- `Full.xcresult`는 **625 통과/2 실행기 조기 종료(code 0)**였다. 실패 항목은 기존 `AudioFinalizationLongMediaTests.testTwoHourContinuousAACProductionFinalizationAndRevalidation`와 `SpeechSegmentationTests.testReviewT20AcceptsExistingT18BoundaryShiftOutput`였으며 assertion 실패는 아니었다. 이를 통과로 세지 않았다. 실제 모델 추론과 병렬 실행을 끝낸 뒤 `-parallel-testing-enabled NO`로 전체 빌드/테스트를 다시 수행한 `FullRetry.xcresult` / `full-retry-summary.json`은 **627 통과(605 unit + 22 integration), 실패/skip 0**이다. 조기 종료 원인을 확정하거나 숨기지 않는다.
+- 독립된 읽기 전용 diff 검토에서 native 원시 범위 검증이 clamp보다 먼저 수행됨, 패딩 text 제외 후 text/interval 일치, 입력 끝의 0ms 표기 보존, 두 snapshot 경로 공유, 공통 엔진 계약·취소/cleanup 불변과 원본 세션 무수정을 확인했다. 최종 task 커밋의 CI는 별도로 확인하며 dev 통합은 허용하지 않는다.
+
+실행 예시(이미 디코딩한 로컬 PCM, 설치된 모델 store 및 새 결과 폴더 필요):
+
+```sh
+swift build --scratch-path /private/tmp/stt-t15-validation.Uth8xp/CLI --disable-automatic-resolution
+/private/tmp/stt-t15-validation.Uth8xp/CLI/debug/stt-benchmark speech-replay tools/t15/candidate.json /private/tmp/stt-t19-model/store /private/tmp/stt-t27-timestamp-diagnosis/large.f32 /private/tmp/stt-t27-timestamp-diagnosis/NEW-large-replay automatic
+bash tools/t27/prepare_local_app.sh /private/tmp/stt-t27-stt-fixed /private/tmp/stt-t15-validation.Uth8xp/DerivedData
+```
+
+새 앱에서 실제 마이크로 두 모델의 짧은 녹음을 다시 확인해야 한다. 기존에 누락된 전사의 자동 재생성은 구현/수행하지 않았다. T27 장시간·실시간 성능, G1과 G4는 여전히 미검증이며 dev/main 통합은 하지 않는다.
