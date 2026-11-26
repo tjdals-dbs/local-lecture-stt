@@ -40,6 +40,10 @@ jobs:
         run: swift build --disable-automatic-resolution
       - name: Check lecture frame boundaries and benchmark aggregation
         run: python3 -B -m unittest discover -s tools/t16
+      - name: Check T27 local validation helpers
+        run: |
+          swiftc -O tools/t27/ProcessMonitor.swift -o "$RUNNER_TEMP/t27-process-monitor"
+          python3 -B tools/t27/test_validation_tools.py --monitor "$RUNNER_TEMP/t27-process-monitor"
       - name: Verify process-kill recovery and durable checkpoint boundaries
         run: |
           probe_bin_dir="$(swift build --show-bin-path --disable-automatic-resolution)"

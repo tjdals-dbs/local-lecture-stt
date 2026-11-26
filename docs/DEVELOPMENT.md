@@ -1018,3 +1018,7 @@ python3 -B tools/t26/test_recovery_process.py \
 ```
 
 The helper is never compiled into the GUI app. CI runs this command after the SwiftPM/Python checks and before Release verification, and prints its measurements. A custom SwiftPM scratch path must be used consistently for both build and executable lookup. XCTest full/focused/repeated commands, 17.6 scenario mapping, loss measurements, known harness failures and pending physical procedures are in [T26 acceptance](T26_ACCEPTANCE.md). G1 remains unverified. Do not treat a generated result file or an active-prefix snapshot as a claim of real hardware/power-loss validation.
+
+## T27 validation preparation
+
+[T27 validation](T27_VALIDATION.md) records the user's preparation-only scope, the local ad-hoc app build, external resource sampler, short actual-model/network-denied checks and the pending long-duration/offline GUI matrix. `tools/t27` is excluded from the product and benchmark targets. CI compiles the standalone observer and runs its three helper checks; this does not run or pass the ten-hour physical validation. The helper refuses an existing app output directory and stores all results outside Git. T27, G1 and G4 must not be marked complete from these preparation results.
