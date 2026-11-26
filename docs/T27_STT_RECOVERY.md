@@ -78,3 +78,40 @@ Manual checks still required with a newly built signed local app:
 4. Run the deferred long lecture/offline/thermal matrix and latency observations in `T27_VALIDATION.md`. Single-process native deadlock/crash, actual disk exhaustion/power loss and G1 physical tests remain unverified.
 
 No dev integration, release readiness, G1/G4 pass or next-task approval is implied by this candidate.
+
+## 2026-11-27 timeout-exhaustion repair
+
+Repair of the `fa1e435` review finding: the post-stop timer used to fail the shared finalization control before saving the timeout outcome, leaving an exhausted attempt pending and skipping partial publication. The deadline now produces a local timeout outcome, joins native cancellation, saves pending/exhausted state, and returns the summary for partial publication. The first timeout consumes one attempt and ends that pass; the second marks the range exhausted without another inference. Old pending entries with two attempts are normalized before model construction. Normal cancellation refunds an unfinished attempt; cancellation after timeout expiry retains the consumed attempt. Partial output still reports `speechIncomplete`, blocking healthy-completion proof and automatic exit.
+
+Five new regressions in `SpeechRecoveryTests.swift`:
+
+- `testSecondTimeoutPublishesExhaustedPartialWithoutThirdInferenceAndPreservesExistingData`: two fresh stores, exactly two requests, pending then unresolved counts, canonical/MD output and detail editing state, preserved segment ID/text/user edit/times, journal and MOV/M4A bytes, no model required on retry.
+- `testAlreadyConsumedPendingBudgetPublishesPartialWithoutConstructingMissingModel`: persisted pending/attempts=2 becomes exhausted without constructing the missing model; entry IDs, audio and incomplete notice remain.
+- `testExplicitCancelOfSecondAttemptRefundsBudgetAndPreservesPublishedPartial`: ordinary cancellation retains one available attempt and all published transcript/audio bytes.
+- `testTimeoutCleanupIsJoinedAndLaterUserCancelDoesNotRefundConsumedTimeout`: held cancellation keeps the scope open and publication blocked; later explicit cancellation retains the timeout count, joins unload and balances scope release.
+- `testSecondTimeoutPublicationFaultRetriesSavedPartialWithoutModelOrInference`: a Markdown publication fault after exhaustion leaves canonical data intact; a fresh store completes partial publication without model construction or extra inference.
+
+The new two-timeout regression failed on the original source (`red.xcresult`, `red-second.xcresult`: shared storage failure/absent partial Markdown). The first repair test run found a test fault hook placed after an unchanged canonical write, which correctly did not run; the test now faults the required Markdown update. Focused recovery/lifecycle/live-STT/transcript suites then passed **108 tests**. Final full validation passed **636 unit + 22 integration = 658 tests**, zero failures. SwiftPM build and Python groups **4 + 3 + 3 + 8 = 18** also passed. No physical long-duration/TCC/lid/power-loss verification was added; G1 remains unverified.
+
+Current repair evidence directory: `/private/tmp/stt-t27-timeout-repair`. Commands actually run (output logs in that directory):
+
+```sh
+xcodebuild -project LocalLectureSTT.xcodeproj -scheme LocalLectureSTT \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath /private/tmp/stt-t15-validation.Uth8xp/DerivedData \
+  -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+  -parallel-testing-enabled NO \
+  -resultBundlePath /private/tmp/stt-t27-timeout-repair/full.xcresult \
+  -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
+  CODE_SIGNING_ALLOWED=NO build test
+swift build --scratch-path /private/tmp/stt-t15-validation.Uth8xp/CLI --disable-automatic-resolution
+python3 -B -m unittest discover -s tools/t16
+swiftc -O tools/t27/ProcessMonitor.swift -o /private/tmp/stt-t27-timeout-repair/process-monitor
+python3 -B tools/t27/test_validation_tools.py --monitor /private/tmp/stt-t27-timeout-repair/process-monitor
+python3 -B tools/t27/test_model_sandbox.py --probe /private/tmp/stt-t15-validation.Uth8xp/CLI/debug/stt-benchmark
+python3 -B tools/t26/test_recovery_process.py \
+  --probe /private/tmp/stt-t15-validation.Uth8xp/CLI/debug/stt-benchmark \
+  --results /private/tmp/stt-t27-timeout-repair/process-results.json
+```
+
+Final diff review covered deadline/completion arbitration, joined cleanup, model-free exhaustion, ordinary/late cancellation, storage-failure propagation, and existing canonical/journal/audio preservation. Only the repair source, its tests and architecture/acceptance documentation change. This remains a review-ready task candidate only after final-commit CI is verified; PROJECT_STATUS, the plan checklist, dev and main remain unchanged. The next task remains the coordinator's post-review decision.

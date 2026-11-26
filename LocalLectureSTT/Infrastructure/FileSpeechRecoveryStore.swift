@@ -219,9 +219,9 @@ private final class SpeechRepairTransaction: @unchecked Sendable {
         let watchdog = Task {
             do { try await Task.sleep(for: timeout) } catch { return }
             guard deadline.expire() else { return }
-            control.fail(.transcript)
             try? await engine.cancel()
         }
+        let outcome: Result<STTResponse, Error>
         do {
             let feed = try await engine.infer(request)
             var final: STTResponse?
@@ -233,14 +233,17 @@ private final class SpeechRepairTransaction: @unchecked Sendable {
                 if let failure = response.failure { throw failure }
                 if response.kind == .final { final = response }
             }
-            deadline.disarm(); watchdog.cancel(); await watchdog.value
-            try check()
             guard let final else { throw STTEngineError(.invalidResponse) }
-            return final
-        } catch {
-            deadline.disarm(); watchdog.cancel(); await watchdog.value
-            throw error
-        }
+            outcome = .success(final)
+        } catch { outcome = .failure(error) }
+        // A timeout belongs to this attempt, not the control used to publish
+        // partial transcripts. Once expiry wins, never cancel its cleanup task.
+        let timedOut = deadline.disarm()
+        if !timedOut { watchdog.cancel() }
+        await watchdog.value
+        if timedOut { throw SpeechRecoveryTimeout() }
+        try check()
+        return try outcome.get()
     }
     func repair(makeEngine: FileSpeechRecoveryStore.EngineFactory, readAudio: FileSpeechRecoveryStore.AudioReader, timeout: Duration) async throws -> SpeechRecoverySummary {
         try check()
@@ -259,6 +262,14 @@ private final class SpeechRepairTransaction: @unchecked Sendable {
             document.captureEnded = true
             try save()
         }
+        // A crash or an older build may have persisted the final attempt but
+        // not its terminal state. Exhaustion must not require a model to load.
+        var normalized = false
+        for i in document.entries.indices where document.entries[i].state == .pending && document.entries[i].attempts == 2 {
+            document.entries[i].state = .exhausted
+            normalized = true
+        }
+        if normalized { try save() }
         guard document.summary.requiresWork else { return document.summary }
         let engine = try makeEngine(document.session.model)
         do {
@@ -273,7 +284,8 @@ private final class SpeechRepairTransaction: @unchecked Sendable {
             let session = STTSessionConfiguration(sessionID: document.session.sessionID, operationID: .init(UUID()),
                 model: document.session.model, languageMode: languageMode)
             try await engine.start(session)
-            for i in document.entries.indices where document.entries[i].state == .pending {
+            var timedOut = false
+            repairWindows: for i in document.entries.indices where document.entries[i].state == .pending {
                 while document.entries[i].attempts < 2 && document.entries[i].state == .pending {
                     try check()
                     document.entries[i].attempts += 1; try save()
@@ -302,32 +314,42 @@ private final class SpeechRepairTransaction: @unchecked Sendable {
                         document.entries[i].failure = nil
                         try save()
                     } catch {
-                        if control.outcome().0 == .cancelled || (Task.isCancelled && control.outcome().0 == nil) {
+                        let expired = error is SpeechRecoveryTimeout
+                        let cancelled = control.outcome().0 == .cancelled || (Task.isCancelled && control.outcome().0 == nil)
+                        if cancelled && !expired {
                             document.entries[i].attempts -= 1
                             try save(cancellationCheckpoint: true)
                             throw AudioFinalizationCode.cancelled
                         }
-                        try check()
-                        guard let failure = error as? STTEngineError else { throw error }
-                        document.entries[i].failure = failure.code
+                        // A cancellation arriving during timeout cleanup must
+                        // retain that consumed attempt, while ordinary cancel refunds it.
+                        if !cancelled { try check() }
+                        guard expired || error is STTEngineError else { throw error }
+                        document.entries[i].failure = (error as? STTEngineError)?.code ?? .inferenceFailed
                         if document.entries[i].attempts >= 2 { document.entries[i].state = .exhausted }
-                        try save()
+                        try save(cancellationCheckpoint: cancelled)
+                        if cancelled { throw AudioFinalizationCode.cancelled }
+                        if expired { timedOut = true; break repairWindows }
                     }
                 }
                 if document.entries[i].state == .pending { document.entries[i].state = .exhausted; try save() }
             }
-            try await engine.end(); await engine.unload(); try check()
-            return document.summary
+            if !timedOut { try await engine.end() }
         } catch {
             try? await engine.cancel(); await engine.unload(); throw error
         }
+        await engine.unload(); try check()
+        return document.summary
     }
 }
 
-/// A cancelled timer must never fail a later request using the same control.
+private struct SpeechRecoveryTimeout: Error {}
+
+/// Atomically choose completion or expiry, then join an expired timer's cleanup.
 private final class SpeechRecoveryDeadline: @unchecked Sendable {
     private let lock = NSLock()
     private var active = true
-    func expire() -> Bool { lock.withLock { guard active else { return false }; active = false; return true } }
-    func disarm() { lock.withLock { active = false } }
+    private var expired = false
+    func expire() -> Bool { lock.withLock { guard active else { return false }; active = false; expired = true; return true } }
+    func disarm() -> Bool { lock.withLock { active = false; return expired } }
 }

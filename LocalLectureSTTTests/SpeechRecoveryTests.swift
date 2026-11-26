@@ -152,9 +152,59 @@ final class SpeechRecoveryTests: XCTestCase {
         let f = try await RecoveryFixture.make(hang: true); addTeardownBlock { try await f.catalogStore.close(); f.audio.clean() }
         let store = FileSpeechRecoveryStore(roots: f.audio.roots, makeEngine: { _ in f.engine }, requestTimeout: .milliseconds(100))
         let result = await f.finish(store: store)
-        XCTAssertNotNil(result.failure)
+        XCTAssertEqual(result.transcriptFailure?.code, .speechIncomplete)
         XCTAssertEqual(try f.ledger().entries[0].attempts, 1)
         let counts = await f.engine.counts; XCTAssertGreaterThanOrEqual(counts[0], 1); XCTAssertEqual(counts[1], 1)
+        let scopes = await f.audio.bookmarks.counts(); XCTAssertEqual(scopes[0], scopes[1])
+    }
+
+    func testSecondTimeoutPublishesExhaustedPartialWithoutThirdInferenceAndPreservesExistingData() async throws {
+        let f = try await RecoveryFixture.make(hang: true)
+        addTeardownBlock { try await f.catalogStore.close(); f.audio.clean() }
+        let kept = try segment(0, 1_100, 1_900, "기존 확정")
+        try await f.store.prepare([kept], range: .init(1_000, 2_000), language: .init("ko"), at: f.audio.location)
+        try await f.audio.repository.appendTranscriptJournal(.init(sessionId: f.audio.location.sessionID, segment: kept), at: f.audio.location)
+        _ = try await f.store.complete(.init(1_000, 2_000), at: f.audio.location)
+        var edited = kept; edited.text = "사용자 수정"
+        let canonical = try TranscriptDocument(sessionId: f.audio.location.sessionID, segments: [edited])
+        try JSONEncoder().encode(canonical).write(to: f.audio.url("transcript.json"))
+        let source = try Data(contentsOf: f.audio.url(FinalizationFileAccess.source))
+        let journal = try Data(contentsOf: f.audio.url(SessionArtifact.transcriptJournal.relativePath))
+        var finalAudio: Data?
+        for attempt in 1...2 {
+            let control = AudioFinalizationControl()
+            let fresh = FileSpeechRecoveryStore(roots: f.audio.roots, makeEngine: { _ in f.engine }, requestTimeout: .milliseconds(50))
+            let result = await f.finish(store: fresh, control: control)
+            XCTAssertEqual(result.transcriptFailure?.code, .speechIncomplete)
+            XCTAssertEqual(result.failure, .transcript) // Partial output is not a healthy completion.
+            XCTAssertNil(control.outcome().0) // Publication retains a usable cancellation control.
+            let ledger = try f.ledger()
+            let missing = try XCTUnwrap(ledger.entries.first { $0.range.start == 0 })
+            XCTAssertEqual(missing.attempts, attempt)
+            XCTAssertEqual(missing.state, attempt == 1 ? .pending : .exhausted)
+            XCTAssertEqual(ledger.summary.pending, attempt == 1 ? 1 : 0)
+            XCTAssertEqual(ledger.summary.unresolved, attempt == 1 ? 0 : 1)
+            let detail = try await f.detail.load(f.audio.location)
+            XCTAssertEqual(detail.editable, attempt == 2)
+            XCTAssertEqual(detail.speechRecovery, ledger.summary)
+            let output = try await f.audio.repository.readTranscript(at: f.audio.location)
+            XCTAssertEqual(output.segments, [edited])
+            let md = (try? String(contentsOf: f.audio.url("transcript.md"), encoding: .utf8)) ?? ""
+            XCTAssertTrue(md.contains(attempt == 1 ? "복구 대기 1구간" : "미복구 1구간"))
+            XCTAssertTrue(md.contains("사용자 수정"))
+            let audio = try Data(contentsOf: f.audio.url("audio.m4a"))
+            if let finalAudio { XCTAssertEqual(audio, finalAudio) } else { finalAudio = audio }
+        }
+        // Exhausted work and partial publication must not depend on an available model.
+        let noModel = FileSpeechRecoveryStore(roots: f.audio.roots, makeEngine: { _ in
+            XCTFail("an exhausted gap must not construct an engine"); throw STTEngineError(.loadFailed)
+        })
+        let again = await f.finish(store: noModel)
+        XCTAssertEqual(again.transcriptFailure?.code, .speechIncomplete)
+        let requests = await f.engine.requests
+        XCTAssertEqual(requests.map(\.context.mediaStart.rawValue), [0, 0])
+        XCTAssertEqual(try Data(contentsOf: f.audio.url(FinalizationFileAccess.source)), source)
+        XCTAssertEqual(try Data(contentsOf: f.audio.url(SessionArtifact.transcriptJournal.relativePath)), journal)
         let scopes = await f.audio.bookmarks.counts(); XCTAssertEqual(scopes[0], scopes[1])
     }
 
@@ -170,6 +220,104 @@ final class SpeechRecoveryTests: XCTestCase {
         let second = await f.finish()
         XCTAssertNil(second.failure)
         XCTAssertEqual(try Data(contentsOf: f.audio.url("transcript.json")), saved)
+        let count = await f.engine.requests.count; XCTAssertEqual(count, 2)
+    }
+
+    func testAlreadyConsumedPendingBudgetPublishesPartialWithoutConstructingMissingModel() async throws {
+        let f = try await RecoveryFixture.make(loadFailure: true)
+        addTeardownBlock { try await f.catalogStore.close(); f.audio.clean() }
+        _ = await f.finish() // Seal capture and publish pending work without consuming attempts.
+        var ledger = try f.ledger()
+        for i in ledger.entries.indices { ledger.entries[i].attempts = 2 }
+        // Simulate the durable checkpoint left by the old build or a process exit.
+        try JSONEncoder().encode(ledger).write(to: f.audio.url(SpeechRecoveryDocument.path))
+        let source = try Data(contentsOf: f.audio.url(FinalizationFileAccess.source))
+        let store = FileSpeechRecoveryStore(roots: f.audio.roots, makeEngine: { _ in
+            XCTFail("budget normalization must precede model construction"); throw STTEngineError(.loadFailed)
+        })
+        let result = await f.finish(store: store)
+        XCTAssertEqual(result.transcriptFailure?.code, .speechIncomplete)
+        let exhausted = try f.ledger()
+        XCTAssertEqual(exhausted.entries.map(\.id), ledger.entries.map(\.id))
+        XCTAssertEqual(exhausted.entries.map(\.attempts), [2, 2])
+        XCTAssertEqual(exhausted.entries.map(\.state), [.exhausted, .exhausted])
+        XCTAssertEqual(exhausted.summary.pending, 0); XCTAssertEqual(exhausted.summary.unresolved, 2)
+        let detail = try await f.detail.load(f.audio.location)
+        XCTAssertTrue(detail.editable); XCTAssertEqual(detail.speechRecovery, exhausted.summary)
+        let md = try String(contentsOf: f.audio.url("transcript.md"), encoding: .utf8)
+        XCTAssertTrue(md.contains("미복구 2구간"))
+        let requests = await f.engine.requests; XCTAssertTrue(requests.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: f.audio.url(FinalizationFileAccess.source)), source)
+    }
+
+    func testExplicitCancelOfSecondAttemptRefundsBudgetAndPreservesPublishedPartial() async throws {
+        let gate = T14Gate()
+        let f = try await RecoveryFixture.make(gateAt: 1, gate: gate, hang: true)
+        addTeardownBlock { await gate.release(); try await f.catalogStore.close(); f.audio.clean() }
+        let firstStore = FileSpeechRecoveryStore(roots: f.audio.roots, makeEngine: { _ in f.engine }, requestTimeout: .milliseconds(50))
+        let first = await f.finish(store: firstStore)
+        XCTAssertEqual(first.transcriptFailure?.code, .speechIncomplete)
+        let paths = ["transcript.json", "transcript.txt", "transcript.md", "audio.m4a", FinalizationFileAccess.source]
+        let before = try paths.map { try Data(contentsOf: f.audio.url($0)) }
+        let control = AudioFinalizationControl()
+        let run = Task { await f.finish(control: control) }
+        try await gate.wait(); control.cancel(); await gate.release()
+        let cancelled = await run.value
+        XCTAssertEqual(cancelled.failure, .cancelled)
+        let ledger = try f.ledger()
+        let missing = try XCTUnwrap(ledger.entries.first { $0.range.start == 0 })
+        XCTAssertEqual(missing.attempts, 1); XCTAssertEqual(missing.state, .pending)
+        XCTAssertEqual(try paths.map { try Data(contentsOf: f.audio.url($0)) }, before)
+        let counts = await f.engine.counts; XCTAssertEqual(counts[1], 2)
+        let scopes = await f.audio.bookmarks.counts(); XCTAssertEqual(scopes[0], scopes[1])
+    }
+
+    func testTimeoutCleanupIsJoinedAndLaterUserCancelDoesNotRefundConsumedTimeout() async throws {
+        let gate = T14Gate()
+        let f = try await RecoveryFixture.make(hang: true, cancelGate: gate)
+        addTeardownBlock { await gate.release(); try await f.catalogStore.close(); f.audio.clean() }
+        let control = AudioFinalizationControl()
+        let store = FileSpeechRecoveryStore(roots: f.audio.roots, makeEngine: { _ in f.engine }, requestTimeout: .milliseconds(50))
+        let run = Task { await f.finish(store: store, control: control) }
+        try await gate.wait()
+        let held = await f.engine.counts; XCTAssertEqual(held, [1, 0])
+        let activeScopes = await f.audio.bookmarks.counts(); XCTAssertGreaterThan(activeScopes[0], activeScopes[1])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.audio.url("transcript.md").path))
+        control.cancel(); await gate.release()
+        let cancelled = await run.value
+        XCTAssertEqual(cancelled.failure, .cancelled)
+        XCTAssertEqual(try f.ledger().entries.first { $0.range.start == 0 }?.attempts, 1)
+        let counts = await f.engine.counts; XCTAssertEqual(counts[1], 1)
+        let scopes = await f.audio.bookmarks.counts(); XCTAssertEqual(scopes[0], scopes[1])
+    }
+
+    func testSecondTimeoutPublicationFaultRetriesSavedPartialWithoutModelOrInference() async throws {
+        let f = try await RecoveryFixture.make(hang: true)
+        addTeardownBlock { try await f.catalogStore.close(); f.audio.clean() }
+        let kept = try segment(0, 1_100, 1_900, "보존할 문장")
+        try await f.store.prepare([kept], range: .init(1_000, 2_000), language: .init("ko"), at: f.audio.location)
+        _ = try await f.store.complete(.init(1_000, 2_000), at: f.audio.location)
+        let store = FileSpeechRecoveryStore(roots: f.audio.roots, makeEngine: { _ in f.engine }, requestTimeout: .milliseconds(50))
+        _ = await f.finish(store: store)
+        let failing = FileTranscriptRepository(roots: f.audio.roots, catalog: f.catalog, hook: { point in
+            // Canonical text is unchanged; fail the required incomplete-notice update.
+            if point == .beforeMarkdown { throw TranscriptFailure(code: .storage) }
+        })
+        let worker = SessionFinalizationWorker(audio: f.audio.worker(), transcripts: failing, gapRepair: store)
+        let failed = await worker.finalize(.init(location: f.audio.location), control: .init(), progress: { _ in })
+        XCTAssertEqual(failed.transcriptFailure?.code, .storage)
+        XCTAssertEqual(try f.ledger().summary.unresolved, 1)
+        let canonical = try Data(contentsOf: f.audio.url("transcript.json"))
+        let noModel = FileSpeechRecoveryStore(roots: f.audio.roots, makeEngine: { _ in
+            XCTFail("publication retry must not load a model"); throw STTEngineError(.loadFailed)
+        })
+        let result = await f.finish(store: noModel)
+        XCTAssertEqual(result.transcriptFailure?.code, .speechIncomplete)
+        XCTAssertEqual(try Data(contentsOf: f.audio.url("transcript.json")), canonical)
+        let output = try await f.audio.repository.readTranscript(at: f.audio.location)
+        XCTAssertEqual(output.segments, [kept])
+        let md = try String(contentsOf: f.audio.url("transcript.md"), encoding: .utf8)
+        XCTAssertTrue(md.contains("미복구 1구간")); XCTAssertTrue(md.contains("보존할 문장"))
         let count = await f.engine.requests.count; XCTAssertEqual(count, 2)
     }
 
@@ -293,7 +441,7 @@ private struct RecoveryFixture: Sendable {
             .finalize(.init(location: audio.location), control: control, progress: { _ in })
     }
     static func make(failure: STTErrorCode? = nil, loadFailure: Bool = false,
-                     gateAt: Int? = nil, gate: T14Gate? = nil, hang: Bool = false) async throws -> Self {
+                     gateAt: Int? = nil, gate: T14Gate? = nil, hang: Bool = false, cancelGate: T14Gate? = nil) async throws -> Self {
         let audio = try await FinalizationFixture.make()
         let model = try STTTestFixture.model()
         let session = STTSessionConfiguration(sessionID: audio.location.sessionID, operationID: .init(UUID()), model: model, languageMode: .korean)
@@ -304,7 +452,7 @@ private struct RecoveryFixture: Sendable {
             modelSettings: .init(weightSHA256: String(repeating: "0", count: 64), quantization: "none", inference: model.options, decodingStrategy: "default"),
             transcript: .init(segmentCount: old.transcript.segmentCount, recovery: .init(pending: 0, unresolved: 0, recovered: 0)), appVersion: old.appVersion, osVersion: old.osVersion, lastUpdatedAt: old.lastUpdatedAt)
         try await audio.repository.writeMetadata(metadata, at: audio.location)
-        let engine = try RecoveryEngine(failure: failure, loadFailure: loadFailure, gateAt: gateAt, gate: gate, hang: hang)
+        let engine = try RecoveryEngine(failure: failure, loadFailure: loadFailure, gateAt: gateAt, gate: gate, hang: hang, cancelGate: cancelGate)
         let store = FileSpeechRecoveryStore(roots: audio.roots, makeEngine: { _ in engine })
         try await store.initialize(session, at: audio.location)
         _ = try await store.observe(windows: [.init(0, 1_000), .init(1_000, 2_000)], missing: [], through: 2_000, ended: true, at: audio.location)
@@ -321,12 +469,13 @@ private actor RecoveryEngine: STTEngine {
     let failure: STTErrorCode?
     var loadFailure: Bool
     let gateAt: Int?, gate: T14Gate?, hang: Bool
+    let cancelGate: T14Gate?
     var loaded: [STTModelConfiguration] = [], requests: [STTInferenceRequest] = []
     var pending: (STTInferenceRequest, STTEventFeed)?
     var counts = [0, 0] // cancel, unload
-    init(failure: STTErrorCode?, loadFailure: Bool, gateAt: Int?, gate: T14Gate?, hang: Bool) throws {
+    init(failure: STTErrorCode?, loadFailure: Bool, gateAt: Int?, gate: T14Gate?, hang: Bool, cancelGate: T14Gate?) throws {
         capabilities = try STTTestFixture.capabilities(); self.failure = failure; self.loadFailure = loadFailure
-        self.gateAt = gateAt; self.gate = gate; self.hang = hang
+        self.gateAt = gateAt; self.gate = gate; self.hang = hang; self.cancelGate = cancelGate
     }
     func restoreModel() { loadFailure = false }
     func load(_ model: STTModelConfiguration) throws { loaded.append(model); if loadFailure { throw STTEngineError(.loadFailed) } }
@@ -345,8 +494,9 @@ private actor RecoveryEngine: STTEngine {
         return feed
     }
     func end() throws {}
-    func cancel() throws {
+    func cancel() async throws {
         counts[0] += 1
+        await cancelGate?.hold()
         if let (request, feed) = pending { feed.publish(try .init(context: request.context, revision: 1, kind: .cancelled, failure: .init(.cancelled))); pending = nil }
     }
     func unload() { counts[1] += 1 }
